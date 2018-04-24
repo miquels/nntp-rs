@@ -1,0 +1,16 @@
+[history]
+path = "/home/mikevs/tmp/dhistory"
+backend = "diablo"
+
+[spool.0]
+backend = "diablo"
+path = "/news/spool/news/P.00"
+
+[spool.1]
+backend = "diablo"
+path = "/news/spool/news/P.01"
+
+[spool.2]
+backend = "diablo"
+path = "/news/spool/news/P.02"
+

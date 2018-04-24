@@ -1,0 +1,16 @@
+[package]
+name = "nntp"
+version = "0.1.0"
+authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
+
+[dependencies]
+lazy_static = "1.0.0"
+toml = "0.4.6"
+serde = "1.0"
+serde_derive = "1.0"
+storage = { path = "storage" }
+log = "0.3"
+
+# for bin/readart
+env_logger = "0.4"
+clap = "2.29.4"
