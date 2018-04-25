@@ -45,7 +45,7 @@ fn main() {
     }).unwrap();
 
     debug!("histent: {:?}", dhe);
-    if dhe.status != HistStatus::Found {
+    if dhe.status != HistStatus::Present {
         println!("{:?}", dhe.status);
         return;
     }

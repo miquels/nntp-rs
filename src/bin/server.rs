@@ -75,7 +75,7 @@ fn serve_article<W: Write>(mut out: W, store: &Store, argv: &[&str], part: ArtPa
         return Ok(());
     }
     let he = store.history.lookup(argv[1])?;
-    if he.status != HistStatus::Found ||
+    if he.status != HistStatus::Present ||
        (he.head_only && part != ArtPart::Head) {
         write!(out, "430 No such article\r\n")?;
         return Ok(());
