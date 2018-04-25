@@ -16,7 +16,7 @@ pub struct SpoolCfg {
     pub minfree:    Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug,PartialEq,Clone,Copy)]
 #[repr(u8)]
 pub enum Backend {
     Diablo = 0,

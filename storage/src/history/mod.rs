@@ -13,6 +13,7 @@ use spool;
 
 pub(crate) trait HistBackend: Send + Sync {
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;
+    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()>;
 }
 
 /// History database functionality.

@@ -2,8 +2,9 @@
 use std::io;
 use std::fs;
 use std::mem;
+use std::io::Seek;
 use std::path::{Path, PathBuf};
-
+use std::sync::RwLock;
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
@@ -14,16 +15,11 @@ use history::{HistEnt,HistStatus};
 #[derive(Debug)]
 pub(crate) struct DHistory {
     path:           PathBuf,
-    file:           MyFile,
+    file:           RwLock<fs::File>,
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
 }
-
-#[derive(Debug)]
-struct MyFile(fs::File);
-unsafe impl Send for MyFile {}
-unsafe impl Sync for MyFile {}
 
 #[derive(Debug)]
 #[repr(C)]
@@ -79,7 +75,7 @@ lazy_static! {
 }
 
 impl DHistory {
-        pub fn open(path: &Path) -> io::Result<DHistory> {
+    pub fn open(path: &Path) -> io::Result<DHistory> {
 
         // open file and read first 16 bytes into a DHistHead.
         let f = fs::File::open(path)?;
@@ -109,7 +105,7 @@ impl DHistory {
 
         Ok(DHistory{
             path:           path.to_owned(),
-            file:           MyFile(f),
+            file:           RwLock::new(f),
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
@@ -186,6 +182,11 @@ fn read_u32_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<u32> 
     Ok(unsafe { mem::transmute(buf) })
 }
 
+fn write_u32_at<N: Debug>(_path: N, file: &fs::File, pos: u64, val: u32) -> io::Result<(usize)> {
+    let buf : [u8; 4] = unsafe { mem::transmute(val) };
+    file.write_at(&buf, pos)
+}
+
 fn read_dhistent_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DHistEnt> {
     let mut buf = [0u8; DHISTENT_SIZE];
     let n = file.read_at(&mut buf, pos)?;
@@ -196,31 +197,71 @@ fn read_dhistent_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
     Ok(unsafe { mem::transmute(buf) })
 }
 
+fn write_dhistent_at<N: Debug>(_path: N, file: &fs::File, pos: u64, dhe: DHistEnt) -> io::Result<(usize)> {
+    let buf : [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
+    file.write_at(&buf, pos)
+}
+
+fn b2_to_u16(b: &[u8]) -> u16 {
+    (b[0] as u16) << 8 | b[1] as u16
+}
+
+fn b4_to_u32(b: &[u8]) -> u32 {
+    (b[0] as u32) << 24 | (b[1] as u32) << 16 | (b[2] as u32) << 8 | b[3] as u32
+}
+
 impl DHistEnt {
-    fn status(&self) -> HistStatus {
-        if self.gmt == 0 {
-            return HistStatus::NotFound;
+
+    // Encode a new DHistEnt.
+    fn new(he: &HistEnt, hv: DHash, next: u32) -> DHistEnt {
+
+        let mut dhe : DHistEnt = Default::default();
+        dhe.next = next;
+        dhe.hv = hv;
+        dhe.gmt = (he.time / 60) as u32;
+
+        let mut storage_type = spool::Backend::Diablo;
+        if let Some(ref loc) = he.location {
+            storage_type = loc.storage_type;
+            dhe.iter = b2_to_u16(&loc.token[0..2]);
+            dhe.boffset = b4_to_u32(&loc.token[2..6]);
+            dhe.bsize = b4_to_u32(&loc.token[6..10]);
+            dhe.exp = if loc.spool < 100 { loc.spool as u16 + 100 } else { 0xff };
         }
-        // not a diablo spool?
-        if (self.exp & 0x1000) != 0 {
-            if (self.exp & 0x4000) != 0 {
-                return HistStatus::Expired;
-            }
-            if (self.exp & 0x2000) != 0 {
-                return HistStatus::Rejected;
-            }
-            return HistStatus::Found;
+
+        if he.head_only {
+            dhe.exp |= 0x8000;
         }
-        // is a diablo spool?
-        if (self.exp & 0x4000) != 0 {
-            if self.iter == 0xffff {
-                return HistStatus::Rejected;
-            } else {
-                return HistStatus::Expired;
+
+        if storage_type == spool::Backend::Diablo {
+            if let Some(ref loc) = he.location {
+                dhe.gmt = b4_to_u32(&loc.token[10..14]);
+            }
+            match he.status {
+                HistStatus::Expired => {
+                    dhe.exp |= 0x4000;
+                },
+                HistStatus::Rejected => {
+                    dhe.exp |= 0x4000;
+                    dhe.iter = 0xffff;
+                },
+                _ => {},
+            }
+        } else {
+            dhe.exp |= 0x1000 | (((storage_type as u8) & 0x0f) as u16) << 8;
+            match he.status {
+                HistStatus::Expired => {
+                    dhe.exp |= 0x4000;
+                },
+                HistStatus::Rejected => {
+                    dhe.exp = 0x2000;
+                },
+                _ => {},
             }
         }
-        HistStatus::Found
+        dhe
     }
+
 
     fn to_location(&self) -> spool::ArtLoc {
         let mut t = [0u8; 14];
@@ -256,6 +297,31 @@ impl DHistEnt {
             token:          s,
         }
     }
+
+    fn status(&self) -> HistStatus {
+        if self.gmt == 0 {
+            return HistStatus::NotFound;
+        }
+        // not a diablo spool?
+        if (self.exp & 0x1000) != 0 {
+            if (self.exp & 0x4000) != 0 {
+                return HistStatus::Expired;
+            }
+            if (self.exp & 0x2000) != 0 {
+                return HistStatus::Rejected;
+            }
+            return HistStatus::Found;
+        }
+        // is a diablo spool?
+        if (self.exp & 0x4000) != 0 {
+            if self.iter == 0xffff {
+                return HistStatus::Rejected;
+            } else {
+                return HistStatus::Expired;
+            }
+        }
+        HistStatus::Found
+    }
 }
 
 impl history::HistBackend for DHistory {
@@ -264,15 +330,17 @@ impl history::HistBackend for DHistory {
         let hv = crc_hash(msgid);
         let bucket = ((hv.h1 ^hv.h2) & self.hash_mask) as u64;
         let pos = DHISTHEAD_SIZE as u64 + bucket * 4;
-        let mut idx = read_u32_at(&self.path, &self.file.0, pos)?;
 
         let mut dhe : DHistEnt = Default::default();
         let mut counter = 0;
         let mut found = false;
 
+        let file = self.file.read().unwrap();
+        let mut idx = read_u32_at(&self.path, &*file, pos)?;
+
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.path, &self.file.0, pos)?;
+            dhe = read_dhistent_at(&self.path, &*file, pos)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -283,6 +351,7 @@ impl history::HistBackend for DHistory {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "database loop"));
             }
         }
+        drop(file);
 
         if !found {
             return Ok(HistEnt{
@@ -316,5 +385,32 @@ impl history::HistBackend for DHistory {
             head_only:  (dhe.exp & 0x8000) > 0,
             location:   location,
         })
+    }
+
+    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+
+        let hv = crc_hash(msgid);
+        let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as u64;
+        let bpos = DHISTHEAD_SIZE as u64 + bucket * 4;
+
+        let file = self.file.write().unwrap();
+        let next = read_u32_at(&self.path, &*file, bpos)?;
+        let dhe = DHistEnt::new(he, hv, next);
+
+        // file must be bigger than histhead + hashtable.
+        let mut pos = (&*file).seek(io::SeekFrom::End(0))?;
+        if pos < self.data_offset {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                      format!("{:?}: corrupt dhistory file", &self.path)));
+        }
+        // calculate hashtable index and write pos.
+        pos -= self.data_offset;
+        let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
+        let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
+
+        write_dhistent_at(&self.path, &*file, pos, dhe)?;
+        write_u32_at(&self.path, &*file, bpos, idx as u32)?;
+
+        Ok(())
     }
 }
