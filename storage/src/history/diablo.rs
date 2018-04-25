@@ -14,11 +14,16 @@ use history::{HistEnt,HistStatus};
 #[derive(Debug)]
 pub(crate) struct DHistory {
     path:           PathBuf,
-    file:           fs::File,
+    file:           MyFile,
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
 }
+
+#[derive(Debug)]
+struct MyFile(fs::File);
+unsafe impl Send for MyFile {}
+unsafe impl Sync for MyFile {}
 
 #[derive(Debug)]
 #[repr(C)]
@@ -104,7 +109,7 @@ impl DHistory {
 
         Ok(DHistory{
             path:           path.to_owned(),
-            file:           f,
+            file:           MyFile(f),
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
@@ -217,7 +222,7 @@ impl DHistEnt {
         HistStatus::Found
     }
 
-    fn to_token(&self) -> spool::Token {
+    fn to_location(&self) -> spool::ArtLoc {
         let mut t = [0u8; 14];
         t[0] = (self.iter >> 8) as u8;
         t[1] = (self.iter & 0xff) as u8;
@@ -245,7 +250,7 @@ impl DHistEnt {
         let btype = spool::Backend::from_u8(((self.exp & 0x0f00) >> 8) as u8);
         let sp = (self.exp & 0xff) as u8;
         let spool = if sp > 99 && sp < 200 { sp - 100 } else { 0xff };
-        spool::Token{
+        spool::ArtLoc{
             storage_type:   btype,
             spool:          spool,
             token:          s,
@@ -259,7 +264,7 @@ impl history::HistBackend for DHistory {
         let hv = crc_hash(msgid);
         let bucket = ((hv.h1 ^hv.h2) & self.hash_mask) as u64;
         let pos = DHISTHEAD_SIZE as u64 + bucket * 4;
-        let mut idx = read_u32_at(&self.path, &self.file, pos)?;
+        let mut idx = read_u32_at(&self.path, &self.file.0, pos)?;
 
         let mut dhe : DHistEnt = Default::default();
         let mut counter = 0;
@@ -267,7 +272,7 @@ impl history::HistBackend for DHistory {
 
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.path, &self.file, pos)?;
+            dhe = read_dhistent_at(&self.path, &self.file.0, pos)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -284,7 +289,7 @@ impl history::HistBackend for DHistory {
                 time:       0,
                 status:     HistStatus::NotFound,
                 head_only:  false,
-                token:      None,
+                location:   None,
             });
         }
 
@@ -297,19 +302,19 @@ impl history::HistBackend for DHistory {
                 time:       0,
                 status:     HistStatus::NotFound,
                 head_only:  false,
-                token:      None,
+                location:   None,
             });
         }
 
-        let token = match status {
-            HistStatus::Found => Some(dhe.to_token()),
+        let location = match status {
+            HistStatus::Found => Some(dhe.to_location()),
             _ => None,
         };
         Ok(HistEnt{
             time:       (dhe.gmt as u64) * 60,
             status:     status,
             head_only:  (dhe.exp & 0x8000) > 0,
-            token:      token,
+            location:   location,
         })
     }
 }

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use spool;
 
-pub(crate) trait HistBackend {
+pub(crate) trait HistBackend: Send + Sync {
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;
 }
 
@@ -26,7 +26,7 @@ pub struct HistEnt {
     pub status:     HistStatus,
     pub time:       u64,
     pub head_only:  bool,
-    pub token:      Option<spool::Token>,
+    pub location:   Option<spool::ArtLoc>,
 }
 
 /// Status of entry.

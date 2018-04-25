@@ -52,8 +52,8 @@ struct DArtHead {
 }
 const DARTHEAD_SIZE : usize = 24;
 
-fn to_location(tok: &spool::Token) -> DArtLocation {
-    let t = &tok.token;
+fn to_location(loc: &spool::ArtLoc) -> DArtLocation {
+    let t = &loc.token;
     let gmt = (t[10] as u32) << 24 | (t[11] as u32) << 16 | (t[12] as u32) << 8 | t[13] as u32;
     DArtLocation{
         file:   (t[0] as u16) << 8 | t[1] as u16,
@@ -125,31 +125,46 @@ impl spool::SpoolBackend for DSpool {
         spool::Backend::Diablo
     }
 
-    fn open(&self, token: &spool::Token, head_only: bool) -> io::Result<Box<io::Read>> {
-        let t = to_location(token);
+    fn open(&self, art_loc: &spool::ArtLoc, part: spool::ArtPart) -> io::Result<Box<io::Read>> {
+
+        let t = to_location(art_loc);
         debug!("art location: {:?}", t);
         let flnm = format!("D.{:08x}/B.{:04x}", t.dir, t.file);
         let mut path = self.path.clone();
         path.push(flnm);
         let mut file = fs::File::open(&path)?;
+
         let dh = read_darthead_at(&path, &file, t.pos)?;
         debug!("art header: {:?}", dh);
-        file.seek(io::SeekFrom::Start(t.pos + DARTHEAD_SIZE as u64))?;
-        let sz = if head_only {
-            let mut s = dh.arthdr_len + 1;
-            if (dh.store_type & 4) > 0 {
-                s += 1
-            }
-            if s > dh.art_len {
-                s = dh.art_len;
-            }
-            s
-        } else {
-            dh.art_len
+
+        let start = t.pos + DARTHEAD_SIZE as u64;
+        let (pos, sz) = match part {
+            spool::ArtPart::Article => {
+                (start, dh.art_len)
+            },
+            spool::ArtPart::Head => {
+                let mut s = dh.arthdr_len;
+                if s > dh.art_len {
+                    s = dh.art_len;
+                }
+                (start, s)
+            },
+            spool::ArtPart::Body => {
+                let mut s = dh.arthdr_len + 1;
+                if (dh.store_type & 4) > 0 {
+                    s += 1;
+                }
+                if s > dh.art_len {
+                    s = dh.art_len;
+                }
+                (start + s as u64, dh.art_len - s)
+            },
         };
 
-        // if this is not wireformat, translate to crlf on-the-fly.
+        file.seek(io::SeekFrom::Start(pos))?;
         let rdr = file.take(sz as u64);
+
+        // if this is not wireformat, translate to crlf on-the-fly.
         if (dh.store_type & 1) > 0 {
             Ok(Box::new(CrlfXlat::new(rdr)))
         } else {

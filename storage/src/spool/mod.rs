@@ -23,15 +23,22 @@ pub enum Backend {
     Unknown = 255,
 }
 
-pub struct Token {
+#[derive(Debug,Clone,Copy,PartialEq)]
+pub enum ArtPart {
+    Body,
+    Head,
+    Article,
+}
+
+pub struct ArtLoc {
     pub storage_type:   Backend,
     pub spool:          u8,
     pub token:          Vec<u8>,
 }
 
-pub(crate) trait SpoolBackend {
+pub(crate) trait SpoolBackend: Send + Sync {
     fn get_type(&self) -> Backend;
-    fn open(&self, token: &Token, head_only: bool) -> io::Result<Box<io::Read>>;
+    fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<io::Read>>;
 }
 
 /// Article storage (spool) functionality.
@@ -39,9 +46,9 @@ pub struct Spool {
     spool:      HashMap<u8, Box<SpoolBackend>>,
 }
 
-impl std::fmt::Debug for Token {
+impl std::fmt::Debug for ArtLoc {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Token {{ storage_type: {:?}, spool: {}, token: [", self.storage_type, self.spool)?;
+        write!(f, "ArtLoc {{ storage_type: {:?}, spool: {}, token: [", self.storage_type, self.spool)?;
         for b in &self.token {
             write!(f, "{:02x}", b)?;
         }
@@ -85,15 +92,17 @@ impl Spool {
         })
     }
 
-    pub fn open(&self, token: &Token, head_only: bool) -> io::Result<Box<io::Read>> {
-        let be = match self.spool.get(&token.spool as &u8) {
+    /// Open one article. Based on ArtLoc, it finds the
+    /// right spool, and returns a "Read" handle.
+    pub fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<io::Read>> {
+        let be = match self.spool.get(&art_loc.spool as &u8) {
             None => {
                 return Err(io::Error::new(io::ErrorKind::NotFound,
-                                   format!("spool {} not found", token.spool)));
+                                   format!("spool {} not found", art_loc.spool)));
             },
             Some(be) => be,
         };
-        be.open(token, head_only)
+        be.open(art_loc, part)
     }
 }
 
