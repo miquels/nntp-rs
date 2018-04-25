@@ -33,11 +33,11 @@ pub struct HistEnt {
 /// Status of entry.
 #[derive(Debug, PartialEq)]
 pub enum HistStatus {
+    Present,
+    Tentative,
     NotFound,
-    Found,
     Expired,
     Rejected,
-    Tentative,
 }
 
 impl History {

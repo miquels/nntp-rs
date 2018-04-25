@@ -310,7 +310,7 @@ impl DHistEnt {
             if (self.exp & 0x2000) != 0 {
                 return HistStatus::Rejected;
             }
-            return HistStatus::Found;
+            return HistStatus::Present;
         }
         // is a diablo spool?
         if (self.exp & 0x4000) != 0 {
@@ -320,7 +320,7 @@ impl DHistEnt {
                 return HistStatus::Expired;
             }
         }
-        HistStatus::Found
+        HistStatus::Present
     }
 }
 
@@ -362,21 +362,21 @@ impl history::HistBackend for DHistory {
             });
         }
 
-        // see if entry is valid. if it is not, we just return NotFound
+        // see if entry is valid. if it is not, we just return Rejected
         // instead of logging an error. debatable.
         let spool = (dhe.exp & 0xff) as u8;
         let status = dhe.status();
-        if status == HistStatus::Found && (idx == 0 || spool < 100 || spool > 199) {
+        if status == HistStatus::Present && (idx == 0 || spool < 100 || spool > 199) {
             return Ok(HistEnt{
                 time:       0,
-                status:     HistStatus::NotFound,
-                head_only:  false,
+                status:     HistStatus::Rejected,
+                head_only:  (dhe.exp & 0x8000) > 0,
                 location:   None,
             });
         }
 
         let location = match status {
-            HistStatus::Found => Some(dhe.to_location()),
+            HistStatus::Present => Some(dhe.to_location()),
             _ => None,
         };
         Ok(HistEnt{
