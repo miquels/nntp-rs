@@ -4,7 +4,7 @@ extern crate env_logger;
 extern crate nntp;
 extern crate storage;
 
-use storage::{History,HistStatus,Spool};
+use storage::{History,HistStatus,Spool,ArtPart};
 use nntp::config;
 
 fn main() {
@@ -19,7 +19,10 @@ fn main() {
 
     let cfg_file = matches.value_of("CONFIG").unwrap_or("config.toml");
     let msgid = matches.value_of("MSGID").unwrap();
-    let h_only = matches.is_present("HONLY");
+    let part = match matches.is_present("HONLY") {
+        true => ArtPart::Head,
+        false => ArtPart::Article,
+    };
 
     let config = config::read_config(cfg_file).map_err(|e| {
         println!("{}", e);
@@ -47,11 +50,11 @@ fn main() {
         return;
     }
 
-    let mut art = st.open(&dhe.token.unwrap(), h_only).map_err(|e| {
+    let mut art = st.open(&dhe.location.unwrap(), part).map_err(|e| {
         println!("{}", e);
         return;
     }).unwrap();
-    let sz = if h_only { 8192 } else { 32768 };
+    let sz = if part == ArtPart::Head { 8192 } else { 32768 };
     let mut s = Vec::with_capacity(sz);
     art.read_to_end(&mut s).unwrap();
     use std::io::Write;
