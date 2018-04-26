@@ -4,7 +4,6 @@ use std::fs;
 use std::mem;
 use std::io::Seek;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
@@ -15,7 +14,7 @@ use history::{HistEnt,HistStatus};
 #[derive(Debug)]
 pub(crate) struct DHistory {
     path:           PathBuf,
-    file:           RwLock<fs::File>,
+    file:           fs::File,
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
@@ -105,7 +104,7 @@ impl DHistory {
 
         Ok(DHistory{
             path:           path.to_owned(),
-            file:           RwLock::new(f),
+            file:           f,
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
@@ -335,12 +334,11 @@ impl history::HistBackend for DHistory {
         let mut counter = 0;
         let mut found = false;
 
-        let file = self.file.read().unwrap();
-        let mut idx = read_u32_at(&self.path, &*file, pos)?;
+        let mut idx = read_u32_at(&self.path, &self.file, pos)?;
 
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.path, &*file, pos)?;
+            dhe = read_dhistent_at(&self.path, &self.file, pos)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -351,7 +349,6 @@ impl history::HistBackend for DHistory {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "database loop"));
             }
         }
-        drop(file);
 
         if !found {
             return Ok(HistEnt{
@@ -387,18 +384,17 @@ impl history::HistBackend for DHistory {
         })
     }
 
-    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+    fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
         let hv = crc_hash(msgid);
         let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as u64;
         let bpos = DHISTHEAD_SIZE as u64 + bucket * 4;
 
-        let file = self.file.write().unwrap();
-        let next = read_u32_at(&self.path, &*file, bpos)?;
+        let next = read_u32_at(&self.path, &self.file, bpos)?;
         let dhe = DHistEnt::new(he, hv, next);
 
         // file must be bigger than histhead + hashtable.
-        let mut pos = (&*file).seek(io::SeekFrom::End(0))?;
+        let mut pos = self.file.seek(io::SeekFrom::End(0))?;
         if pos < self.data_offset {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                                       format!("{:?}: corrupt dhistory file", &self.path)));
@@ -408,8 +404,8 @@ impl history::HistBackend for DHistory {
         let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
         let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
 
-        write_dhistent_at(&self.path, &*file, pos, dhe)?;
-        write_u32_at(&self.path, &*file, bpos, idx as u32)?;
+        write_dhistent_at(&self.path, &self.file, pos, dhe)?;
+        write_u32_at(&self.path, &self.file, bpos, idx as u32)?;
 
         Ok(())
     }
