@@ -2,6 +2,7 @@
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate log;
 extern crate time;
+extern crate linked_hash_map;
 
 mod history;
 mod spool;

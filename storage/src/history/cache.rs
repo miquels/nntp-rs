@@ -1,12 +1,11 @@
 
-use std::collections::{HashMap,VecDeque};
+use linked_hash_map::LinkedHashMap;
 
 use time;
 use history::{HistEnt, HistStatus};
 
 pub(crate) struct HCache {
-    map:        HashMap<Vec<u8>, HistEnt>,
-    vec:        VecDeque<Vec<u8>>,
+    map:        LinkedHashMap<Vec<u8>, HistEnt>,
     max_ent:    u32,
     max_age:    u64,
 }
@@ -14,8 +13,7 @@ pub(crate) struct HCache {
 impl HCache {
     pub fn new(max_ent: u32, max_age: u64) -> HCache {
         HCache{
-            map:        HashMap::new(),
-            vec:        VecDeque::new(),
+            map:        LinkedHashMap::new(),
             max_ent:    max_ent,
             max_age:    max_age,
         }
@@ -39,31 +37,19 @@ impl HCache {
             he.time = time::now_utc().to_timespec().sec as u64;
         }
         let now = he.time;
-        self.vec.push_back(msgid.to_owned());
         self.map.insert(msgid.to_owned(), he);
 
-        // limit number of entries.
-        if self.max_ent > 0 && self.vec.len() as u32 > self.max_ent {
-            self.vec.pop_front();
+        // limit cache size.
+        let mut v = Vec::new();
+        let len = self.map.len();
+        for (k, h) in &self.map {
+            if len - v.len() > self.max_ent as usize ||
+               h.time < now - self.max_age {
+                v.push(k.to_owned());
+            }
         }
-
-        // limit age of entries.
-        if self.max_age > 0 {
-            let mut to_pop = 0;
-            for v in &self.vec {
-                let rm = if let Some(he) = self.map.get(v) {
-                    he.time < now - self.max_age
-                } else {
-                    false
-                };
-                if rm {
-                    self.map.remove(v);
-                    to_pop += 1;
-                }
-            }
-            for _ in 0..to_pop {
-                self.vec.pop_front();
-            }
+	    for k in &v {
+            self.map.remove(k);
         }
     }
 }
