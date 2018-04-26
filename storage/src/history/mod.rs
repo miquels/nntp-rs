@@ -4,11 +4,13 @@
 //!   - diablo
 //!
 
+mod cache;
 mod diablo;
 
 use std::io;
 use std::path::Path;
 
+use history::cache::HCache;
 use spool;
 
 pub(crate) trait HistBackend: Send + Sync {
@@ -19,10 +21,11 @@ pub(crate) trait HistBackend: Send + Sync {
 /// History database functionality.
 pub struct History {
     inner:  Box<HistBackend>,
+    cache:  HCache,
 }
 
 /// One history entry.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HistEnt {
     pub status:     HistStatus,
     pub time:       u64,
@@ -31,7 +34,7 @@ pub struct HistEnt {
 }
 
 /// Status of entry.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HistStatus {
     Present,
     Tentative,
@@ -48,6 +51,7 @@ impl History {
                 let h = diablo::DHistory::open(path.as_ref())?;
                 Ok(History{
                     inner:  Box::new(h),
+                    cache:  HCache::new(32000, 300),
                 })
             },
             s => {
@@ -58,7 +62,17 @@ impl History {
 
     /// Find an entry in the history file.
     pub fn lookup<T: AsRef<[u8]>>(&self, msgid: T) -> io::Result<HistEnt> {
+        let id = msgid.as_ref();
+        let he = self.cache.lookup(id);
+        if he.status != HistStatus::NotFound {
+            return Ok(he)
+        }
         self.inner.lookup(msgid.as_ref())
+    }
+
+    pub fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+        self.cache.store(msgid, he);
+        self.inner.store(msgid, he)
     }
 }
 

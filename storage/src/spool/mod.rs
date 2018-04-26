@@ -30,6 +30,7 @@ pub enum ArtPart {
     Article,
 }
 
+#[derive(Clone)]
 pub struct ArtLoc {
     pub storage_type:   Backend,
     pub spool:          u8,
