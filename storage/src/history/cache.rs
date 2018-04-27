@@ -19,10 +19,10 @@ impl HCache {
         }
     }
 
-    pub fn lookup(&self, msgid: &[u8]) -> HistEnt {
+    pub fn lookup(&self, msgid: &[u8], now: u64) -> HistEnt {
         match self.map.get(msgid) {
-            Some(he) => he.to_owned(),
-            None => HistEnt{
+            Some(he) if he.time >= now - self.max_age => he.to_owned(),
+            _ => HistEnt{
                 status:     HistStatus::NotFound,
                 time:       0,
                 head_only:  false,
@@ -51,5 +51,9 @@ impl HCache {
 	    for k in &v {
             self.map.remove(k);
         }
+    }
+
+    pub fn remove(&mut self, msgid: &[u8]) {
+        self.map.remove(msgid);
     }
 }

@@ -147,6 +147,14 @@ fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
             "article" | "stat" => {
                 serve_article(&mut out, &store, &argv, ArtPart::Article)?;
             },
+            "check" => {
+                let code = match store.history.check(argv[1])? {
+                    HistStatus::Tentative => 431,
+                    HistStatus::NotFound => 238,
+                    _ => 438,
+                };
+                write!(out, "{} {}\r\n", code, argv[1])?;
+            },
             _ => {
                 write!(out, "500 what?\r\n")?;
             },
