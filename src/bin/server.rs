@@ -109,6 +109,17 @@ fn serve_article<W: Write>(mut out: W, store: &Store, argv: &[&str], part: ArtPa
     Ok(())
 }
 
+fn help<W: Write>(mut out: W) -> io::Result<()> {
+    write!(out, "100 Hallo! Ik begrijp de volgende commando's:\r\n")?;
+    write!(out, "  help\r\n")?;
+    write!(out, "  date\r\n")?;
+    write!(out, "  head <msgid>\r\n")?;
+    write!(out, "  body <msgid>\r\n")?;
+    write!(out, "  article <msgid>\r\n")?;
+    write!(out, "  check <msgid>\r\n")?;
+    write!(out, ".\r\n")
+}
+
 fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
 	let mut rdr = BufReader::new(out.try_clone()?);
     write!(out, "200 Ready\r\n")?;
@@ -134,18 +145,21 @@ fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
                 write!(out, "205 bye\r\n")?;
                 break;
             },
+            "help" => {
+                help(&out)?;
+            },
             "date" => {
                 let tm = time::now_utc();
                 write!(out, "111 {}\r\n", time::strftime("%Y%m%d%H%M%S", &tm).unwrap())?;
             },
             "head" => {
-                serve_article(&mut out, &store, &argv, ArtPart::Head)?;
+                serve_article(&out, &store, &argv, ArtPart::Head)?;
             },
             "body" => {
-                serve_article(&mut out, &store, &argv, ArtPart::Body)?;
+                serve_article(&out, &store, &argv, ArtPart::Body)?;
             },
             "article" | "stat" => {
-                serve_article(&mut out, &store, &argv, ArtPart::Article)?;
+                serve_article(&out, &store, &argv, ArtPart::Article)?;
             },
             "check" => {
                 let code = match store.history.check(argv[1])? {
