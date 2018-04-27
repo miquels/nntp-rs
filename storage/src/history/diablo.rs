@@ -2,7 +2,7 @@
 use std::io;
 use std::fs;
 use std::mem;
-use std::io::Seek;
+use std::io::{Seek,Write};
 use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
@@ -74,6 +74,8 @@ lazy_static! {
 }
 
 impl DHistory {
+
+    // open existing history database
     pub fn open(path: &Path) -> io::Result<DHistory> {
 
         // open file and read first 16 bytes into a DHistHead.
@@ -109,6 +111,40 @@ impl DHistory {
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
         })
+    }
+
+    // create a new history database, only if it doesn't exist yet.
+    pub fn create(path: &Path, num_buckets: u32) -> io::Result<()> {
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+
+        // write header
+        let head = DHistHead{
+            magic:          DHISTHEAD_MAGIC,
+            hash_size:      num_buckets,
+            version:        DHISTHEAD_VERSION2,
+            histent_size:   DHISTENT_SIZE as u16,
+            head_size:      DHISTHEAD_SIZE as u16,
+            resv:           0,
+        };
+        let buf : [u8; DHISTHEAD_SIZE] = unsafe { mem::transmute(head) };
+        file.write(&buf)?;
+
+        // write empty hash table, plus first empty histent.
+        let buf = [0u8; 1024*1024];
+        let todo = (num_buckets * 4 + DHISTENT_SIZE as u32) as usize;
+        let mut done = 0;
+        while todo < done {
+            let w = if todo > buf.len() { buf.len() } else { todo };
+            let wbuf = &buf[0..w];
+            done += file.write(wbuf)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -161,6 +197,7 @@ fn crc_hash(msgid: &[u8]) -> DHash {
     hv
 }
 
+// helper
 fn read_dhisthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DHistHead> {
     let mut buf = [0u8; DHISTHEAD_SIZE];
     let n = file.read_at(&mut buf, pos)?;
@@ -171,6 +208,7 @@ fn read_dhisthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result
     Ok(unsafe { mem::transmute(buf) })
 }
 
+// helper
 fn read_u32_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     let n = file.read_at(&mut buf, pos)?;
@@ -181,11 +219,13 @@ fn read_u32_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<u32> 
     Ok(unsafe { mem::transmute(buf) })
 }
 
+// helper
 fn write_u32_at<N: Debug>(_path: N, file: &fs::File, pos: u64, val: u32) -> io::Result<(usize)> {
     let buf : [u8; 4] = unsafe { mem::transmute(val) };
     file.write_at(&buf, pos)
 }
 
+// helper
 fn read_dhistent_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DHistEnt> {
     let mut buf = [0u8; DHISTENT_SIZE];
     let n = file.read_at(&mut buf, pos)?;
@@ -196,15 +236,18 @@ fn read_dhistent_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
     Ok(unsafe { mem::transmute(buf) })
 }
 
+// helper
 fn write_dhistent_at<N: Debug>(_path: N, file: &fs::File, pos: u64, dhe: DHistEnt) -> io::Result<(usize)> {
     let buf : [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
     file.write_at(&buf, pos)
 }
 
+// helper
 fn b2_to_u16(b: &[u8]) -> u16 {
     (b[0] as u16) << 8 | b[1] as u16
 }
 
+// helper
 fn b4_to_u32(b: &[u8]) -> u32 {
     (b[0] as u32) << 24 | (b[1] as u32) << 16 | (b[2] as u32) << 8 | b[3] as u32
 }
@@ -262,6 +305,7 @@ impl DHistEnt {
     }
 
 
+    // convert a DHistEnt to a spool::ArtLoc
     fn to_location(&self) -> spool::ArtLoc {
         let mut t = [0u8; 14];
         t[0] = (self.iter >> 8) as u8;
@@ -297,6 +341,7 @@ impl DHistEnt {
         }
     }
 
+    // return status of this DHistEnt as history::HistStatus.
     fn status(&self) -> HistStatus {
         if self.gmt == 0 {
             return HistStatus::NotFound;
@@ -324,6 +369,8 @@ impl DHistEnt {
 }
 
 impl history::HistBackend for DHistory {
+
+    // lookup an article in the DHistry database
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
 
         let hv = crc_hash(msgid);
@@ -384,6 +431,7 @@ impl history::HistBackend for DHistory {
         })
     }
 
+    // store an article in the DHistry database
     fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
         let hv = crc_hash(msgid);
