@@ -10,6 +10,7 @@ use std::os::unix::fs::FileExt;
 use spool;
 use history;
 use history::{HistEnt,HistStatus};
+use {u16_to_b2,u32_to_b4,b2_to_u16,b4_to_u32};
 
 #[derive(Debug)]
 pub(crate) struct DHistory {
@@ -242,16 +243,6 @@ fn write_dhistent_at<N: Debug>(_path: N, file: &fs::File, pos: u64, dhe: DHistEn
     file.write_at(&buf, pos)
 }
 
-// helper
-fn b2_to_u16(b: &[u8]) -> u16 {
-    (b[0] as u16) << 8 | b[1] as u16
-}
-
-// helper
-fn b4_to_u32(b: &[u8]) -> u32 {
-    (b[0] as u32) << 24 | (b[1] as u32) << 16 | (b[2] as u32) << 8 | b[3] as u32
-}
-
 impl DHistEnt {
 
     // Encode a new DHistEnt.
@@ -308,16 +299,9 @@ impl DHistEnt {
     // convert a DHistEnt to a spool::ArtLoc
     fn to_location(&self) -> spool::ArtLoc {
         let mut t = [0u8; 14];
-        t[0] = (self.iter >> 8) as u8;
-        t[1] = (self.iter & 0xff) as u8;
-        t[2] = ((self.boffset >> 24) & 0xff) as u8;
-        t[3] = ((self.boffset >> 16) & 0xff) as u8;
-        t[4] = ((self.boffset >> 8) & 0xff) as u8;
-        t[5] = (self.boffset & 0xff) as u8;
-        t[6] = ((self.bsize >> 24) & 0xff) as u8;
-        t[7] = ((self.bsize >> 16) & 0xff) as u8;
-        t[8] = ((self.bsize >> 8) & 0xff) as u8;
-        t[9] = (self.bsize & 0xff) as u8;
+        u16_to_b2(&mut t, 0, self.iter);
+        u32_to_b4(&mut t, 2, self.boffset);
+        u32_to_b4(&mut t, 6, self.bsize);
 
         let s  = if (self.exp & 0x1000) != 0 {
             // not a diablo-spool history entry.
@@ -325,10 +309,7 @@ impl DHistEnt {
         } else {
             // This is a diablo-spool history entry, so include
             // gmt in the returned StorageToken
-            t[10] = ((self.gmt >> 24) & 0xff) as u8;
-            t[11] = ((self.gmt >> 16) & 0xff) as u8;
-            t[12] = ((self.gmt >> 8) & 0xff) as u8;
-            t[13] = (self.gmt & 0xff) as u8;
+            u32_to_b4(&mut t, 10, self.gmt);
             (&t)[0..14].to_vec()
         };
         let btype = spool::Backend::from_u8(((self.exp & 0x0f00) >> 8) as u8);
