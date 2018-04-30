@@ -14,3 +14,8 @@ path = "/news/spool/news/P.01"
 backend = "diablo"
 path = "/news/spool/news/P.02"
 
+[[metaspool]]
+spool = [ 1, 2, 3 ]
+groups = "*"
+maxsize = "64K"
+

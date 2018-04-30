@@ -135,10 +135,10 @@ impl<T: Read> Read for CrlfXlat<T> {
 }
 
 impl DSpool {
-    pub fn new(cfg: &spool::SpoolCfg) -> io::Result<Box<spool::SpoolBackend>> {
+    pub fn new(cfg: &spool::SpoolCfg, spool_no: u8) -> io::Result<Box<spool::SpoolBackend>> {
         Ok(Box::new(DSpool{
             path:       PathBuf::from(cfg.path.clone()),
-            spool_no:   cfg.spool_no,
+            spool_no:   spool_no,
             reallocint: 600,
             inner:      Mutex::new(DSpoolFile{
                             time:   0,

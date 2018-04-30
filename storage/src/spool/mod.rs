@@ -6,46 +6,24 @@
 use std;
 use std::io;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 mod diablo;
 
-#[derive(Deserialize, Debug, Clone)]
+/// Configuration for one spool instance.
+#[derive(Deserialize,Default,Debug,Clone)]
 pub struct SpoolCfg {
-    spool_no:       u8,
     pub backend:    String,
     pub path:       String,
     pub minfree:    Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
-pub struct MetaSpoolCfg {
-    pub spool:          Vec<String>,
-    pub groups:         String,
-    pub maxsize:        String,
-    pub reallocint:     String,
-    pub dontstore:      String,
-    pub rejectarts:     String,
-}
-
-#[derive(Debug,PartialEq,Clone,Copy)]
-#[repr(u8)]
-pub enum Backend {
-    Diablo = 0,
-    Unknown = 255,
-}
-
+/// Which part of the article to process: body/head/all
 #[derive(Debug,Clone,Copy,PartialEq)]
 pub enum ArtPart {
     Body,
     Head,
     Article,
-}
-
-#[derive(Clone)]
-pub struct ArtLoc {
-    pub storage_type:   Backend,
-    pub spool:          u8,
-    pub token:          Vec<u8>,
 }
 
 pub(crate) trait SpoolBackend: Send + Sync {
@@ -54,9 +32,11 @@ pub(crate) trait SpoolBackend: Send + Sync {
     fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc>;
 }
 
-/// Article storage (spool) functionality.
-pub struct Spool {
-    spool:      HashMap<u8, Box<SpoolBackend>>,
+#[derive(Clone)]
+pub struct ArtLoc {
+    pub storage_type:   Backend,
+    pub spool:          u8,
+    pub token:          Vec<u8>,
 }
 
 impl std::fmt::Debug for ArtLoc {
@@ -69,6 +49,16 @@ impl std::fmt::Debug for ArtLoc {
     }
 }
 
+
+#[derive(Debug,PartialEq,Clone,Copy)]
+#[repr(u8)]
+pub enum Backend {
+    Diablo = 0,
+    Reject = 253,
+    DontStore = 254,
+    Unknown = 255,
+}
+
 impl Backend {
     /// convert u8 to enum.
     pub fn from_u8(t: u8) -> Backend {
@@ -79,24 +69,70 @@ impl Backend {
     }
 }
 
+
+/// Metaspool is a group of spools.
+#[derive(Default,Debug)]
+pub(crate) struct MetaSpool {
+    pub spool:          Vec<u8>,
+    pub groups:         Vec<String>,
+    pub maxsize:        u32,
+    pub reallocint:     u32,
+    pub dontstore:      bool,
+    pub rejectart:      bool,
+    pub last_spool:     u8,
+}
+
+/// Metaspool instance configuration.
+#[derive(Deserialize,Default,Debug)]
+#[serde(default)]
+pub struct MetaSpoolCfg {
+    pub spool:          Vec<u8>,
+    pub groups:         String,
+    pub maxsize:        String,
+    pub reallocint:     String,
+    pub dontstore:      String,
+    pub rejectarts:     String,
+}
+
+impl MetaSpoolCfg {
+    fn parse(&self) -> io::Result<MetaSpool> {
+        Ok(MetaSpool{
+            spool:  self.spool.clone(),
+            ..Default::default()
+        })
+    }
+}
+
+
+/// Article storage (spool) functionality.
+pub struct Spool {
+    spool:      HashMap<u8, Box<SpoolBackend>>,
+    metaspool:  Mutex<Vec<MetaSpool>>,
+}
+
 impl Spool {
     /// initialize all storage backends.
-    pub fn new(spoolcfg: &HashMap<String, SpoolCfg>) -> io::Result<Spool> {
+    pub fn new(spoolcfg: &HashMap<String, SpoolCfg>, metaspoolcfg: &Vec<MetaSpoolCfg>) -> io::Result<Spool> {
 
+        // first parse metaspool definitions.
+        let mut metaspool = Vec::new();
+        for ms in metaspoolcfg {
+            let m = ms.parse()?;
+            metaspool.push(m);
+        }
+
+        // now parse spool definitions.
         let mut m = HashMap::new();
-
         for (num, cfg) in spoolcfg {
             let n = num.parse::<i8>().unwrap_or(-1);
             if n < 0 || n > 99 {
                 return Err(io::Error::new(io::ErrorKind::InvalidData,
                                   format!("[spool.{}]: invalid spool number", num)));
             }
-            let mut cfg2 = cfg.to_owned();
-            cfg2.spool_no = n as u8;
 
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    diablo::DSpool::new(&cfg2)
+                    diablo::DSpool::new(cfg, n as u8)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,
@@ -106,7 +142,8 @@ impl Spool {
             m.insert(n as u8, be);
         }
         Ok(Spool{
-            spool:  m,
+            spool:      m,
+            metaspool:  Mutex::new(metaspool),
         })
     }
 
@@ -122,5 +159,22 @@ impl Spool {
         };
         be.open(art_loc, part)
     }
+
+    /// save one article.
+    pub fn write(&mut self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc> {
+        unimplemented!()
+    }/*
+        // XXX should return an error here, really.
+        if self.metaspool.len() == 0 {
+            return Ok(ArtLoc{
+                storage_type:   Backend::Reject,
+                spool:          0,
+                token:          Vec::new(),
+            });
+        }
+
+        // XXX for now just take the first metaspool
+        let mut m = 
+    */
 }
 

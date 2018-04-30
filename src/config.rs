@@ -5,12 +5,14 @@ use std::fs::File;
 use std::collections::HashMap;
 
 use storage::SpoolCfg as Spool;
+use storage::MetaSpoolCfg as MetaSpool;
 
 use toml;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub spool:      HashMap<String, Spool>,
+    pub metaspool:  Vec<MetaSpool>,
     pub history:    HistFile,
 }
 
