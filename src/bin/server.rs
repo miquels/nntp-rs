@@ -8,10 +8,11 @@ extern crate storage;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::io;
-use std::io::{BufRead,BufReader,Read,Write};
+use std::io::{Read,Write};
 use std::sync::Arc;
 
 use storage::{History,HistStatus,Spool,ArtPart};
+use storage::nntpproto::NntpReader;
 use nntp::config;
 
 #[derive(Clone)]
@@ -39,7 +40,7 @@ fn main() {
          println!("{}", e);
          return;
     }).unwrap();
-    let st = Spool::new(&config.spool).map_err(|e| {
+    let st = Spool::new(&config.spool, &config.metaspool).map_err(|e| {
          println!("{}", e);
          return;
     }).unwrap();
@@ -59,9 +60,9 @@ fn main() {
             Ok(stream) => {
                 let st = store.clone();
                 thread::spawn(move || {
-                    handle_client(stream, st).map_err(|e| {
+                    if let Err(e) = handle_client(stream, st) {
                         println!("{}", e);
-                    }).unwrap();
+                    }
                 });
             }
             Err(e) => panic!(e),
@@ -109,6 +110,12 @@ fn serve_article<W: Write>(mut out: W, store: &Store, argv: &[&str], part: ArtPa
     Ok(())
 }
 
+fn takethis<R: Read, W: Write>(rdr: &mut NntpReader<R>, mut out: W, store: &Store, argv: &[&str]) -> io::Result<()> {
+    let mut bufs = vec![Vec::with_capacity(8192)];
+    let res = rdr.read_data(&mut bufs, 1500000)?;
+    write!(out, "439 {}\r\n", argv[1])
+}
+
 fn help<W: Write>(mut out: W) -> io::Result<()> {
     write!(out, "100 Hallo! Ik begrijp de volgende commando's:\r\n")?;
     write!(out, "  help\r\n")?;
@@ -117,18 +124,19 @@ fn help<W: Write>(mut out: W) -> io::Result<()> {
     write!(out, "  body <msgid>\r\n")?;
     write!(out, "  article <msgid>\r\n")?;
     write!(out, "  check <msgid>\r\n")?;
+    write!(out, "  takethis <msgid>\r\n")?;
     write!(out, ".\r\n")
 }
 
 fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
-	let mut rdr = BufReader::new(out.try_clone()?);
+	let mut rdr = NntpReader::new(out.try_clone()?);
     write!(out, "200 Ready\r\n")?;
 
     let mut line = String::new();
 
     loop {
         line.clear();
-        let len = rdr.read_line(&mut line)?;
+        let len = rdr.read_cmd_string(&mut line)?;
         if len == 0 {
             break;
         }
@@ -168,6 +176,9 @@ fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
                     _ => 438,
                 };
                 write!(out, "{} {}\r\n", code, argv[1])?;
+            },
+            "takethis" => {
+                takethis(&mut rdr, &out, &store, &argv)?;
             },
             _ => {
                 write!(out, "500 what?\r\n")?;

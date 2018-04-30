@@ -9,6 +9,7 @@ extern crate linked_hash_map;
 pub mod history;
 pub mod spool;
 pub mod clock;
+pub mod nntpproto;
 
 pub use history::{History,HistEnt,HistStatus};
 pub use spool::{MetaSpoolCfg,SpoolCfg,Spool,ArtPart,ArtLoc};

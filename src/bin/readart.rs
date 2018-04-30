@@ -34,7 +34,7 @@ fn main() {
          return;
     }).unwrap();
 
-    let st = Spool::new(&config.spool).map_err(|e| {
+    let st = Spool::new(&config.spool, &config.metaspool).map_err(|e| {
          println!("{}", e);
          return;
     }).unwrap();
