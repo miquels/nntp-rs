@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use storage::{History,HistStatus,Spool,ArtPart};
 use storage::nntpproto::NntpReader;
+use storage::{Cmd,Capb,CmdNo};
 use nntp::config;
 
 #[derive(Clone)]
@@ -116,16 +117,12 @@ fn takethis<R: Read, W: Write>(rdr: &mut NntpReader<R>, mut out: W, store: &Stor
     write!(out, "439 {}\r\n", argv[1])
 }
 
-fn help<W: Write>(mut out: W) -> io::Result<()> {
-    write!(out, "100 Hallo! Ik begrijp de volgende commando's:\r\n")?;
-    write!(out, "  help\r\n")?;
-    write!(out, "  date\r\n")?;
-    write!(out, "  head <msgid>\r\n")?;
-    write!(out, "  body <msgid>\r\n")?;
-    write!(out, "  article <msgid>\r\n")?;
-    write!(out, "  check <msgid>\r\n")?;
-    write!(out, "  takethis <msgid>\r\n")?;
-    write!(out, ".\r\n")
+fn help<W: Write>(cmd: &Cmd, out: W) -> io::Result<()> {
+    cmd.help(out)
+}
+
+fn capabilities<W: Write>(cmd: &Cmd, out: W) -> io::Result<()> {
+    cmd.capabilities(out)
 }
 
 fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
@@ -134,42 +131,52 @@ fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
 
     let mut line = String::new();
 
+    let mut cmd = Cmd::new();
+    cmd.add_cap(Capb::Ihave);
+    cmd.add_cap(Capb::Streaming);
+
     loop {
         line.clear();
         let len = rdr.read_cmd_string(&mut line)?;
         if len == 0 {
             break;
         }
-        let mut cmd = String::new();
-        let mut argv : Vec<_> = line.split_whitespace().collect();
-        if argv.len() == 0 {
-            write!(out, "500 what?\r\n")?;
-            continue;
-        }
-        cmd.push_str(&argv[0].to_lowercase());
-        argv[0] = cmd.as_ref();
-        match argv[0] {
-            "quit" => {
-                write!(out, "205 bye\r\n")?;
+        let (cmd_no, argv) = match cmd.parse(&mut line) {
+            Err(m) => {
+                write!(out, "{}\r\n", m)?;
+                continue;
+            },
+            Ok((c, a)) => (c, a),
+        };
+
+        match cmd_no {
+            CmdNo::Quit => {
+                write!(out, "205 Bye!\r\n")?;
                 break;
             },
-            "help" => {
-                help(&out)?;
+            CmdNo::Help => {
+                help(&cmd, &out)?;
             },
-            "date" => {
+            CmdNo::Capabilities => {
+                capabilities(&cmd, &out)?;
+            },
+            CmdNo::Date => {
                 let tm = time::now_utc();
                 write!(out, "111 {}\r\n", time::strftime("%Y%m%d%H%M%S", &tm).unwrap())?;
             },
-            "head" => {
+            CmdNo::Head => {
                 serve_article(&out, &store, &argv, ArtPart::Head)?;
             },
-            "body" => {
+            CmdNo::Body => {
                 serve_article(&out, &store, &argv, ArtPart::Body)?;
             },
-            "article" | "stat" => {
+            CmdNo::Article | CmdNo::Stat => {
                 serve_article(&out, &store, &argv, ArtPart::Article)?;
             },
-            "check" => {
+            CmdNo::Mode_Stream => {
+                write!(out, "203 Streaming permitted\r\n")?;
+            },
+            CmdNo::Check => {
                 let code = match store.history.check(argv[1])? {
                     HistStatus::Tentative => 431,
                     HistStatus::NotFound => 238,
@@ -177,14 +184,13 @@ fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
                 };
                 write!(out, "{} {}\r\n", code, argv[1])?;
             },
-            "takethis" => {
+            CmdNo::Takethis => {
                 takethis(&mut rdr, &out, &store, &argv)?;
             },
             _ => {
                 write!(out, "500 what?\r\n")?;
             },
         }
-        drop(argv);
     }
     Ok(())
 }
