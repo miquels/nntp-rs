@@ -100,30 +100,63 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
 // A reader-wrapper that translates CR to CRLF.
 struct CrlfXlat<T> {
     inner:  BufReader<T>,
+    lfseen: bool,
+    eof:    bool,
 }
 
 impl<T: Read> CrlfXlat<T> {
     fn new(file: T) -> CrlfXlat<T> {
         CrlfXlat{
             inner:  BufReader::new(file),
+            lfseen: true,
+            eof:    false,
         }
     }
 }
 
 impl<T: Read> Read for CrlfXlat<T> {
     fn read(&mut self, outbuf: &mut [u8]) -> io::Result<usize> {
+
+        if self.eof {
+            return Ok(0);
+        }
+
         let mut out_idx = 0;
         let mut in_idx = 0;
         {
             let inbuf = self.inner.fill_buf()?;
+            if inbuf.len() == 0 {
+                outbuf[0] = b'.';
+                outbuf[1] = b'\r';
+                outbuf[2] = b'\n';
+                self.eof = true;
+                return Ok(3);
+            }
+
             while in_idx < inbuf.len() && out_idx < outbuf.len() {
-                if inbuf[in_idx] == b'\n' {
-                    outbuf[out_idx] = b'\r';
-                    out_idx += 1;
-                    if out_idx >= outbuf.len() {
+
+                // dotstuffing.
+                if self.lfseen && inbuf[in_idx] == b'.' {
+                    // need to insert a dot. see if there's still space.
+                    if out_idx > outbuf.len() - 2 {
                         break;
                     }
+                    outbuf[out_idx] = b'.';
+                    out_idx += 1;
                 }
+                self.lfseen = false;
+
+                // LF -> CRLF
+                if inbuf[in_idx] == b'\n' {
+                    // need to insert a \r. see if there's still space.
+                    if out_idx > outbuf.len() - 2 {
+                        break;
+                    }
+                    outbuf[out_idx] = b'\r';
+                    out_idx += 1;
+                    self.lfseen = true;
+                }
+
                 outbuf[out_idx] = inbuf[in_idx];
                 out_idx += 1;
                 in_idx += 1;
@@ -260,19 +293,8 @@ impl spool::SpoolBackend for DSpool {
             }
         }
 
-        // head_only articles are stored WITHOUT the .\r\n at the end
-        // not sure why, it's just the way the original implementation does it.
-        let mut art2 = art;
-        if head_only {
-            let mut n = hdr_len + 2;
-            if n > art.len() {
-                n = art.len();
-            }
-            art2 = &art[0..n];
-        }
-
         let pos = inner.size;
-        let store_len = (DARTHEAD_SIZE + art2.len() + 1) as u32;
+        let store_len = (DARTHEAD_SIZE + art.len() + 1) as u32;
         let mut fh = inner.fh.take().unwrap();
 
         // write header.
@@ -283,7 +305,7 @@ impl spool::SpoolBackend for DSpool {
         ah.head_len = DARTHEAD_SIZE as u8;
         ah.store_type = 4;
         ah.arthdr_len = hdr_len as u32;
-        ah.art_len = art2.len() as u32;
+        ah.art_len = art.len() as u32;
         ah.store_len = store_len;
         let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
         if let Err(e) = fh.write_all(&buf) {
@@ -292,10 +314,10 @@ impl spool::SpoolBackend for DSpool {
         inner.size += DARTHEAD_SIZE as u32;
 
         // and article itself.
-        if let Err(e) = fh.write_all(art2) {
+        if let Err(e) = fh.write_all(art) {
             return Err(e);
         }
-        inner.size += art2.len() as u32;
+        inner.size += art.len() as u32;
 
         // add \0 at the end
         if let Err(e) = fh.write(b"\0") {
