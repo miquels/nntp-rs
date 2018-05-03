@@ -1,7 +1,7 @@
 //! NNTP wire protocol implementation.
 use std;
 use std::io;
-use std::io::Read;
+use std::io::{Read,Write};
 
 use memchr;
 
@@ -303,6 +303,118 @@ impl<R: Read> Read for NntpReader<R> {
     /// Simply forwards to nntp_read.
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
         self.nntp_read(&mut buf)
+    }
+}
+
+/// A writer with 2 modes: normal and xlat.
+///
+/// Xlat mode translates LF -> CRLF, does dotstuffing,
+/// and when done() is called, writes DOT CRLF.
+pub struct NntpWriter<W> {
+    inner:      W,
+    mode:       WMode,
+    state:      WState,
+}
+
+#[derive(Debug,PartialEq,Eq)]
+enum WState {
+    Data,
+    LfSeen,
+}
+
+#[derive(Debug,PartialEq,Eq)]
+enum WMode {
+    Normal,
+    Xlat,
+}
+
+impl<W: Write> NntpWriter<W> {
+
+    /// Return a new NntpWriter.
+    pub fn new(inner: W) -> NntpWriter<W> {
+        NntpWriter{
+            inner:  inner,
+            mode:   WMode::Normal,
+            state:  WState::LfSeen,
+        }
+    }
+
+    /// Switch to normal mode (passthrough)
+    pub fn mode_normal(&mut self) {
+        self.mode = WMode::Normal;
+    }
+
+    /// Switch to xlat mode.
+    pub fn mode_xlat(&mut self) {
+        self.mode = WMode::Xlat;
+    }
+
+    /// Call this after being done writing in mode_xlat, it
+    /// writes a final DOT CRLF
+    pub fn done(&mut self) -> io::Result<(usize)> {
+        if self.mode == WMode::Normal {
+            return Ok(0);
+        }
+        match self.state {
+            WState::LfSeen => {
+                self.inner.write_all(b".\r\n")?;
+                Ok(3)
+            },
+            _ => {
+                self.state = WState::LfSeen;
+                self.inner.write_all(b"\r\n.\r\n")?;
+                Ok(5)
+            }
+        }
+    }
+}
+
+impl<W: Write> Write for NntpWriter<W> {
+
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+
+        if self.mode == WMode::Normal {
+            return self.inner.write(buf);
+        }
+
+        let mut written = 0;
+        let mut i = 0;
+        let n = buf.len();
+
+        while i < n {
+            match self.state {
+                WState::Data => {
+                    match memchr::memchr(b'\n', &buf[i..n]) {
+                        Some(z) => {
+                            self.inner.write_all(&buf[i..i+z-1])?;
+                            self.inner.write_all(b"\r\n")?;
+                            i += z;
+                            written += z + 1;
+                            self.state = WState::LfSeen;
+                        },
+                        None => {
+                            self.inner.write_all(&buf[i..n])?;
+                            let w = n - i;
+                            written += w;
+                            i += w;
+                        },
+                    }
+                },
+                WState::LfSeen => {
+                    if buf[i] == b'.' {
+                        self.inner.write_all(b"..")?;
+                        i += 1;
+                        written += 2;
+                    }
+                    self.state = WState::Data;
+                },
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
