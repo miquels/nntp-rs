@@ -5,7 +5,7 @@ extern crate time;
 extern crate nntp;
 extern crate backends;
 
-use std::net::TcpListener;
+use std::net::{TcpListener,TcpStream};
 use std::thread;
 use std::io;
 use std::io::{Read,Write};
@@ -22,9 +22,9 @@ struct Store {
 	spool:		Arc<Spool>,
 }
 
-struct NntpSession<T> {
+struct NntpSession {
     store:      Store,
-    strm:       NntpStream<T>,
+    strm:       NntpStream,
 }
 
 fn main() {
@@ -76,9 +76,9 @@ fn main() {
     }
 }
 
-impl<T: Read + Write> NntpSession<T> {
+impl NntpSession {
 
-    pub fn new(strm: T, store: Store) -> NntpSession<T> {
+    pub fn new(strm: TcpStream, store: Store) -> NntpSession {
         NntpSession{
             strm:   NntpStream::new(strm),
             store:  store,

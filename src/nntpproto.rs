@@ -2,25 +2,30 @@
 use std;
 use std::io;
 use std::io::{Read,Write};
+use std::net::TcpStream;
 
 use memchr;
 
 /// A NntpStream wraps a TcpStream and adds buffering, timeout,
 /// command-line reading, etc.
-pub struct NntpStream<S> {
-    inner:      S,
+pub struct NntpStream {
+    inner:      TcpStream,
     rbuffer:    Vec<u8>,
     rbufpos:    usize,
+    rtimeout:   u64,
+    wtimeout:   u64,
 }
 
-impl<S: Read + Write> NntpStream<S> {
+impl NntpStream {
 
     /// Return a new NntpStream.
-    pub fn new(inner: S) -> NntpStream<S> {
+    pub fn new(inner: TcpStream) -> NntpStream {
         NntpStream{
-            inner:  inner,
-            rbuffer: Vec::with_capacity(1024),
-            rbufpos: 0,
+            inner:      inner,
+            rbuffer:    Vec::with_capacity(1024),
+            rbufpos:    0,
+            rtimeout:   10,
+            wtimeout:   10,
         }
     }
 
@@ -44,7 +49,7 @@ impl<S: Read + Write> NntpStream<S> {
     pub fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
 
         if self.rbufpos == self.rbuffer.len() {
-            return self.inner.read(&mut buf);
+            return read_timeout(&mut self.inner, self.rtimeout, &mut buf)
         }
 
         // paste in buffered data.
@@ -60,7 +65,7 @@ impl<S: Read + Write> NntpStream<S> {
         }
 
         // there's some more space in the buffer to read into
-        match self.inner.read(&mut right) {
+        match read_timeout(&mut self.inner, self.rtimeout, &mut right) {
             Ok(n) => Ok(n + m),
             Err(_) => Ok(m),
         }
@@ -93,7 +98,7 @@ impl<S: Read + Write> NntpStream<S> {
                     cap = 8192;
                 }
                 unsafe { self.rbuffer.set_len(cap); }
-                let n = match self.inner.read(&mut self.rbuffer[..]) {
+                let n = match read_timeout(&mut self.inner, self.rtimeout, &mut self.rbuffer[..]) {
                     Ok(n) => n,
                     Err(e) => {
                         self.rbuffer.truncate(0);
@@ -157,28 +162,46 @@ impl<S: Read + Write> NntpStream<S> {
     }
 }
 
-impl<S: Read + Write> Write for NntpStream<S> {
+#[inline]
+fn read_timeout(s: &mut TcpStream, secs: u64, mut buf: &mut [u8]) -> io::Result<usize> {
+    s.set_read_timeout(Some(std::time::Duration::new(secs, 0)))?;
+    match s.read(&mut buf) {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "read timeout"))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+#[inline]
+fn write_timeout(s: &mut TcpStream, secs: u64, buf: &[u8]) -> io::Result<usize> {
+    s.set_write_timeout(Some(std::time::Duration::new(secs, 0)))?;
+    match s.write(buf) {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "write timeout"))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Write for NntpStream {
 
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        write_timeout(&mut self.inner, self.wtimeout, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
 }
-/*
-impl<'a, S: Read + Write> Write for &'a mut NntpStream<S> {
-
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
-*/
 
 /// Reads data into a set of fized-size buffers.
 /// You can also set a maximum size, read_all() returns an io::Error of
@@ -251,8 +274,8 @@ impl<R: Read> DataReader<R> {
 
 
 /// Read adapter that reads until DOT CRLF.
-pub struct DotReader<'a, S: Read + Write + 'a> {
-    inner:      &'a mut NntpStream<S>,
+pub struct DotReader<'a> {
+    inner:      &'a mut NntpStream,
     state:      RState,
 }
 
@@ -266,9 +289,9 @@ enum RState {
     Lf2Seen,
 }
 
-impl<'a, S: Read + Write> DotReader<'a, S> {
+impl<'a> DotReader<'a> {
     /// Constructor.
-    pub fn new(s: &'a mut NntpStream<S>) -> DotReader<S> {
+    pub fn new(s: &'a mut NntpStream) -> DotReader {
         DotReader{
             inner:      s,
             state:      RState::Lf1Seen,
@@ -276,7 +299,7 @@ impl<'a, S: Read + Write> DotReader<'a, S> {
     }
 }
 
-impl<'a, S: Read + Write> Read for DotReader<'a, S> {
+impl<'a> Read for DotReader<'a> {
 
     /// Reads from the underlying NntpStream until DOT CRLF is seen.
     fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
