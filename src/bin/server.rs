@@ -5,14 +5,14 @@ extern crate time;
 extern crate nntp;
 extern crate storage;
 
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::thread;
 use std::io;
 use std::io::{Read,Write};
 use std::sync::Arc;
 
 use storage::{History,HistStatus,Spool,ArtPart};
-use storage::nntpproto::NntpReader;
+use storage::nntpproto::{NntpStream,DotReader,DataReader};
 use storage::{Cmd,Capb,CmdNo};
 use nntp::config;
 
@@ -20,6 +20,11 @@ use nntp::config;
 struct Store {
 	history:	Arc<History>,
 	spool:		Arc<Spool>,
+}
+
+struct NntpSession<T> {
+    store:      Store,
+    strm:       NntpStream<T>,
 }
 
 fn main() {
@@ -59,9 +64,9 @@ fn main() {
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
-                let st = store.clone();
+                let mut sess = NntpSession::new(stream, store.clone());
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(stream, st) {
+                    if let Err(e) = sess.handle_client() {
                         println!("{}", e);
                     }
                 });
@@ -71,126 +76,153 @@ fn main() {
     }
 }
 
-fn serve_article<W: Write>(mut out: W, store: &Store, argv: &[&str], part: ArtPart) -> io::Result<()> {
-    if argv.len() < 2 || !argv[1].starts_with("<") {
-        write!(out, "412 No newsgroup selected\r\n")?;
-        return Ok(());
-    }
-    let he = store.history.lookup(argv[1])?;
-    if he.status != HistStatus::Present ||
-       (he.head_only && part != ArtPart::Head) {
-        write!(out, "430 No such article\r\n")?;
-        return Ok(());
-    }
-    let mut art = match store.spool.open(&he.location.unwrap(), part) {
-        Ok(art) => art,
-        Err(_) => {
-            write!(out, "430 No such article\r\n")?;
-            return Ok(());
-        },
-    };
+impl<T: Read + Write> NntpSession<T> {
 
-    if argv[0] == "stat" {
-        write!(out, "223 0 {}\r\n", argv[1])?;
-        return Ok(());
-    }
-
-    let code = match part {
-        ArtPart::Article => 220,
-        ArtPart::Head => 221,
-        ArtPart::Body => 222,
-    };
-    write!(out, "{} 0 {}\r\n", code, argv[1])?;
-    let sz = if part == ArtPart::Head { 8192 } else { 32768 };
-    let mut s = Vec::with_capacity(sz);
-    art.read_to_end(&mut s).unwrap();
-    out.write(&s)?;
-    if part == ArtPart::Head {
-        out.write(b".\r\n")?;
-    }
-    Ok(())
-}
-
-fn takethis<R: Read, W: Write>(rdr: &mut NntpReader<R>, mut out: W, store: &Store, argv: &[&str]) -> io::Result<()> {
-    let mut bufs = vec![Vec::with_capacity(8192)];
-    let res = rdr.read_data(&mut bufs, 1500000)?;
-    write!(out, "439 {}\r\n", argv[1])
-}
-
-fn help<W: Write>(cmd: &Cmd, out: W) -> io::Result<()> {
-    cmd.help(out)
-}
-
-fn capabilities<W: Write>(cmd: &Cmd, out: W) -> io::Result<()> {
-    cmd.capabilities(out)
-}
-
-fn handle_client(mut out: TcpStream, store: Store) -> io::Result<()> {
-	let mut rdr = NntpReader::new(out.try_clone()?);
-    write!(out, "200 Ready\r\n")?;
-
-    let mut line = String::new();
-
-    let mut cmd = Cmd::new();
-    cmd.add_cap(Capb::Ihave);
-    cmd.add_cap(Capb::Streaming);
-
-    loop {
-        line.clear();
-        let len = rdr.read_cmd_string(&mut line)?;
-        if len == 0 {
-            break;
+    pub fn new(strm: T, store: Store) -> NntpSession<T> {
+        NntpSession{
+            strm:   NntpStream::new(strm),
+            store:  store,
         }
-        let (cmd_no, argv) = match cmd.parse(&mut line) {
-            Err(m) => {
-                write!(out, "{}\r\n", m)?;
-                continue;
+    }
+
+    fn serve_article(&mut self, argv: &[&str], part: ArtPart) -> io::Result<()> {
+        if argv.len() < 2 || !argv[1].starts_with("<") {
+            write!(self.strm, "412 No newsgroup selected\r\n")?;
+            return Ok(());
+        }
+        let he = self.store.history.lookup(argv[1])?;
+        if he.status != HistStatus::Present ||
+           (he.head_only && part != ArtPart::Head) {
+            write!(self.strm, "430 No such article\r\n")?;
+            return Ok(());
+        }
+        let mut art = match self.store.spool.open(&he.location.unwrap(), part) {
+            Ok(art) => art,
+            Err(_) => {
+                write!(self.strm, "430 No such article\r\n")?;
+                return Ok(());
             },
-            Ok((c, a)) => (c, a),
         };
 
-        match cmd_no {
-            CmdNo::Quit => {
-                write!(out, "205 Bye!\r\n")?;
-                break;
-            },
-            CmdNo::Help => {
-                help(&cmd, &out)?;
-            },
-            CmdNo::Capabilities => {
-                capabilities(&cmd, &out)?;
-            },
-            CmdNo::Date => {
-                let tm = time::now_utc();
-                write!(out, "111 {}\r\n", time::strftime("%Y%m%d%H%M%S", &tm).unwrap())?;
-            },
-            CmdNo::Head => {
-                serve_article(&out, &store, &argv, ArtPart::Head)?;
-            },
-            CmdNo::Body => {
-                serve_article(&out, &store, &argv, ArtPart::Body)?;
-            },
-            CmdNo::Article | CmdNo::Stat => {
-                serve_article(&out, &store, &argv, ArtPart::Article)?;
-            },
-            CmdNo::Mode_Stream => {
-                write!(out, "203 Streaming permitted\r\n")?;
-            },
-            CmdNo::Check => {
-                let code = match store.history.check(argv[1])? {
-                    HistStatus::Tentative => 431,
-                    HistStatus::NotFound => 238,
-                    _ => 438,
-                };
-                write!(out, "{} {}\r\n", code, argv[1])?;
-            },
-            CmdNo::Takethis => {
-                takethis(&mut rdr, &out, &store, &argv)?;
-            },
-            _ => {
-                write!(out, "500 what?\r\n")?;
-            },
+        if argv[0] == "stat" {
+            write!(self.strm, "223 0 {}\r\n", argv[1])?;
+            return Ok(());
         }
+
+        let code = match part {
+            ArtPart::Article => 220,
+            ArtPart::Head => 221,
+            ArtPart::Body => 222,
+        };
+        write!(self.strm, "{} 0 {}\r\n", code, argv[1])?;
+        let sz = if part == ArtPart::Head { 8192 } else { 32768 };
+        let mut s = Vec::with_capacity(sz);
+        art.read_to_end(&mut s).unwrap();
+        self.strm.write(&s)?;
+        if part == ArtPart::Head {
+            self.strm.write(b".\r\n")?;
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn takethis(&mut self, argv: &[&str]) -> io::Result<()> {
+        let mut bufs = Vec::new();
+        let r = {
+            let mut rdr = DataReader::new(DotReader::new(&mut self.strm), 2000000, 8192, 65536);
+            rdr.read_all(&mut bufs)?
+        };
+        write!(self.strm, "439 {} {}\r\n", argv[1], r)
+    }
+
+    fn help(&mut self, cmd: &Cmd) -> io::Result<()> {
+        cmd.help(&mut self.strm)
+    }
+
+    fn capabilities(&mut self, cmd: &Cmd) -> io::Result<()> {
+        cmd.capabilities(&mut self.strm)
+    }
+
+    fn handle_client(&mut self) -> io::Result<()> {
+
+        write!(self.strm, "200 Ready\r\n")?;
+
+        let mut line = String::new();
+
+        let mut cmd = Cmd::new();
+        cmd.add_cap(Capb::Ihave);
+        cmd.add_cap(Capb::Streaming);
+
+        loop {
+            line.clear();
+            self.strm.read_line_string(&mut line)?;
+            if !line.ends_with("\r\n") {
+                //use std::ascii::AsciiExt;
+                line.make_ascii_lowercase();
+                if &line != "quit\n" {
+                    write!(self.strm, "500 lines must be terminated with CRLF\r\n")?;
+                    continue;
+                }
+                line.truncate(4);
+            } else {
+                let l = line.len();
+                line.truncate(l - 2);
+            }
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let (cmd_no, argv) = match cmd.parse(&mut line) {
+                Err(m) => {
+                    write!(self.strm, "{}\r\n", m)?;
+                    continue;
+                },
+                Ok((c, a)) => (c, a),
+            };
+
+            match cmd_no {
+                CmdNo::Quit => {
+                    write!(self.strm, "205 Bye!\r\n")?;
+                    break;
+                },
+                CmdNo::Help => {
+                    self.help(&cmd)?;
+                },
+                CmdNo::Capabilities => {
+                    self.capabilities(&cmd)?;
+                },
+                CmdNo::Date => {
+                    let tm = time::now_utc();
+                    write!(self.strm, "111 {}\r\n", time::strftime("%Y%m%d%H%M%S", &tm).unwrap())?;
+                },
+                CmdNo::Head => {
+                    self.serve_article(&argv, ArtPart::Head)?;
+                },
+                CmdNo::Body => {
+                    self.serve_article(&argv, ArtPart::Body)?;
+                },
+                CmdNo::Article | CmdNo::Stat => {
+                    self.serve_article(&argv, ArtPart::Article)?;
+                },
+                CmdNo::Mode_Stream => {
+                    write!(self.strm, "203 Streaming permitted\r\n")?;
+                },
+                CmdNo::Check => {
+                    let code = match self.store.history.check(argv[1])? {
+                        HistStatus::Tentative => 431,
+                        HistStatus::NotFound => 238,
+                        _ => 438,
+                    };
+                    write!(self.strm, "{} {}\r\n", code, argv[1])?;
+                },
+                CmdNo::Takethis => {
+                    self.takethis(&argv)?;
+                },
+                _ => {
+                    write!(self.strm, "500 what?\r\n")?;
+                },
+            }
+        }
+        Ok(())
+    }
 }
