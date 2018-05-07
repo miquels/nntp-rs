@@ -4,12 +4,14 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [dependencies]
+backends = { path = "backends" }
 lazy_static = "1.0.0"
 toml = "0.4.6"
 serde = "1.0"
 serde_derive = "1.0"
-backends = { path = "backends" }
 log = "0.3"
+memchr = "2.0.1"
+libc = "0.2.40"
 
 # for bin/*
 env_logger = "0.4"

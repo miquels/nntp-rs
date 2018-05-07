@@ -12,8 +12,8 @@ use std::io::{Read,Write};
 use std::sync::Arc;
 
 use backends::{History,HistStatus,Spool,ArtPart};
-use backends::nntpproto::{NntpStream,DotReader,DataReader};
-use backends::{Cmd,Capb,CmdNo};
+use nntp::nntpproto::{NntpStream,DotReader,DataReader};
+use nntp::commands::{Cmd,Capb,CmdNo};
 use nntp::config;
 
 #[derive(Clone)]

@@ -1,20 +1,14 @@
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate serde_derive;
 #[macro_use] extern crate log;
-extern crate libc;
 extern crate time;
-extern crate memchr;
 extern crate linked_hash_map;
 
 pub mod history;
 pub mod spool;
-pub mod clock;
-pub mod nntpproto;
-pub mod commands;
 
 pub use history::{History,HistEnt,HistStatus};
 pub use spool::{MetaSpoolCfg,SpoolCfg,Spool,ArtPart,ArtLoc};
-pub use commands::{Cmd,Capb,CmdNo};
 
 pub(crate) fn u16_to_b2(b: &mut [u8], offset: usize, val: u16) {
     b[offset] = ((val >> 8) & 0xff) as u8;
