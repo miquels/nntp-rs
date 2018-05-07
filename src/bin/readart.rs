@@ -2,9 +2,9 @@
 #[macro_use] extern crate log;
 extern crate env_logger;
 extern crate nntp;
-extern crate storage;
+extern crate backends;
 
-use storage::{History,HistStatus,Spool,ArtPart};
+use backends::{History,HistStatus,Spool,ArtPart};
 use nntp::config;
 
 fn main() {

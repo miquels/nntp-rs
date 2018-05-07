@@ -3,7 +3,7 @@
 extern crate env_logger;
 extern crate time;
 extern crate nntp;
-extern crate storage;
+extern crate backends;
 
 use std::net::TcpListener;
 use std::thread;
@@ -11,9 +11,9 @@ use std::io;
 use std::io::{Read,Write};
 use std::sync::Arc;
 
-use storage::{History,HistStatus,Spool,ArtPart};
-use storage::nntpproto::{NntpStream,DotReader,DataReader};
-use storage::{Cmd,Capb,CmdNo};
+use backends::{History,HistStatus,Spool,ArtPart};
+use backends::nntpproto::{NntpStream,DotReader,DataReader};
+use backends::{Cmd,Capb,CmdNo};
 use nntp::config;
 
 #[derive(Clone)]
