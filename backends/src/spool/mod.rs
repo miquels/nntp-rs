@@ -10,14 +10,6 @@ use std::sync::Mutex;
 
 mod diablo;
 
-/// Configuration for one spool instance.
-#[derive(Deserialize,Default,Debug,Clone)]
-pub struct SpoolCfg {
-    pub backend:    String,
-    pub path:       String,
-    pub minfree:    Option<String>,
-}
-
 /// Which part of the article to process: body/head/all
 #[derive(Debug,Clone,Copy,PartialEq)]
 pub enum ArtPart {
@@ -104,6 +96,14 @@ impl MetaSpoolCfg {
 }
 
 
+/// Configuration for one spool instance.
+#[derive(Deserialize,Default,Debug,Clone)]
+pub struct SpoolCfg {
+    pub backend:    String,
+    pub path:       String,
+    pub minfree:    Option<String>,
+}
+
 /// Article storage (spool) functionality.
 pub struct Spool {
     spool:      HashMap<u8, Box<SpoolBackend>>,
@@ -124,15 +124,17 @@ impl Spool {
         // now parse spool definitions.
         let mut m = HashMap::new();
         for (num, cfg) in spoolcfg {
-            let n = num.parse::<i8>().unwrap_or(-1);
-            if n < 0 || n > 99 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData,
+            let n = match num.parse::<u8>() {
+                Ok(n) if n < 100 => n,
+                _ => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
                                   format!("[spool.{}]: invalid spool number", num)));
-            }
+                },
+            };
 
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    diablo::DSpool::new(cfg, n as u8)
+                    diablo::DSpool::new(cfg, n)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,
