@@ -14,15 +14,26 @@ pub use time::Timespec;
 
 /// Clock ID for clock::gettime, see also the manpage for the
 /// clock_gettime() systemcall.
+#[cfg(target_os = "linux")]
 pub enum ClockId {
     /// realtime since the Unix epoch. can jump back or forward.
-    RealTime = libc::CLOCK_REALTIME as isize,
+    Realtime = libc::CLOCK_REALTIME as isize,
     /// like REALTIME, but with a granularity of about 1ms. 3x faster though.
     RealtimeCourse = libc::CLOCK_REALTIME_COARSE as isize,
     /// time since some internal epoch. monotonic, no jumps.
     Monotonic = libc::CLOCK_MONOTONIC as isize,
     /// like MONOTONIC, but with a granularity of about 1ms. 3x faster though.
     MonotonicCoarse = libc::CLOCK_MONOTONIC_COARSE as isize,
+    #[doc(hidden)]
+    _Placeholder = -1,
+}
+
+#[cfg(not(target_os = "linux"))]
+pub enum ClockId {
+    /// realtime since the Unix epoch. can jump back or forward.
+    Realtime = libc::CLOCK_REALTIME as isize,
+    /// time since some internal epoch. monotonic, no jumps.
+    Monotonic = libc::CLOCK_MONOTONIC as isize,
     #[doc(hidden)]
     _Placeholder = -1,
 }
@@ -40,18 +51,39 @@ pub fn gettime(clk_id: ClockId) -> Timespec {
 
 /// Convenience function for gettime(ClockId::RealtimeCoarse), returns ms.
 /// Called js_now() because it's basically javascript's Date.now()
+#[cfg(target_os = "linux")]
 #[inline(always)]
 pub fn js_now() -> u64 {
 	let mut ts = libc::timespec{ tv_sec: 0, tv_nsec: 0 };
-	unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &mut ts); }
+	unsafe { libc::clock_gettime(ClockId::RealtimeCourse as clockid_t, &mut ts); }
 	ts.tv_sec as u64 + (ts.tv_nsec / 1000000) as u64
 }
 
 /// Convenience function for gettime(ClockId::MonotonicCoarse), returns ms.
+#[cfg(target_os = "linux")]
 #[inline(always)]
 pub fn mt_now() -> u64 {
 	let mut ts = libc::timespec{ tv_sec: 0, tv_nsec: 0 };
-	unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, &mut ts); }
+	unsafe { libc::clock_gettime(ClockId::MonotonicCourse as clockid_t, &mut ts); }
+	ts.tv_sec as u64 + (ts.tv_nsec / 1000000) as u64
+}
+
+/// Convenience function for gettime(ClockId::Realtime), returns ms.
+/// Called js_now() because it's basically javascript's Date.now()
+#[cfg(not(target_os = "linux"))]
+#[inline(always)]
+pub fn js_now() -> u64 {
+	let mut ts = libc::timespec{ tv_sec: 0, tv_nsec: 0 };
+	unsafe { libc::clock_gettime(ClockId::Realtime as clockid_t, &mut ts); }
+	ts.tv_sec as u64 + (ts.tv_nsec / 1000000) as u64
+}
+
+/// Convenience function for gettime(ClockId::Monotonic), returns ms.
+#[cfg(not(target_os = "linux"))]
+#[inline(always)]
+pub fn mt_now() -> u64 {
+	let mut ts = libc::timespec{ tv_sec: 0, tv_nsec: 0 };
+	unsafe { libc::clock_gettime(ClockId::Monotonic as clockid_t, &mut ts); }
 	ts.tv_sec as u64 + (ts.tv_nsec / 1000000) as u64
 }
 
