@@ -3,6 +3,9 @@ name = "nntp"
 version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
+[workspace]
+members = [ "backends" ]
+
 [dependencies]
 backends = { path = "backends" }
 lazy_static = "1.0.0"
