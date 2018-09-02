@@ -1,0 +1,10 @@
+[package]
+name = "nntp-rs-spool"
+version = "0.1.0"
+authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
+
+[dependencies]
+serde = "1.0"
+serde_derive = "1.0"
+log = "0.3"
+time = "0.1.39"

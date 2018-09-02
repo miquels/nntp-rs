@@ -1,11 +1,14 @@
-//! Basic NNTP command parsing.
+//! NNTP command parsing.
 
-use std::io;
-use std::io::Write;
+use std::collections::{HashMap, HashSet};
+use std::str;
+
+use bytes::{BufMut, Bytes, BytesMut};
 
 /// Capabilities.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Capb {
+    Never           = 0x00000,
     Always          = 0x00001,
     Authinfo        = 0x00002,
     Hdr             = 0x00004,
@@ -27,98 +30,102 @@ pub enum Capb {
     ModeStream      = 0x40000,
 }
 
-/// NNTP Commands
-// NOTE keep alphabetical, so that "CmdNo" and "commands" are in the same order.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
-#[allow(non_camel_case_types)]
-pub enum CmdNo {
-    Article = 0,
-    Authinfo,
-    Body,
-    Capabilities,
-    Check,
-    Date,
-    Group,
-    Hdr,
-    Head,
-    Help,
-    Ihave,
-    Last,
-    List_Active,
-    List_ActiveTimes,
-    List_DistribPats,
-    List_Headers,
-    List_Newsgroups,
-    List_OverviewFmt,
-    ListGroup,
-    Mode_Headfeed,
-    Mode_Reader,
-    Mode_Stream,
-    NewGroups,
-    NewNews,
-    Next,
-    Over,
-    Post,
-    Quit,
-    Stat,
-    Takethis,
-    XHdr,
-    XOver,
-    XPat,
-    #[doc(hidden)]
-    MaxCmd,
-}
-
 #[derive(Debug)]
 struct CmdDef {
-    cmd:    CmdNo,
-    min:    usize,
-    max:    usize,
-    cap:    Capb,
-    h:      &'static str,
+    cmd:        Cmd,
+    name:       &'static str,
+    min:        usize,
+    max:        usize,
+    has_subcmd: bool,
+    cap:        Capb,
+    h:          &'static str,
 }
 
-// NOTE keep "CmdNo" and "commands" equal and in the same order.
-static COMMANDS: [CmdDef; CmdNo::MaxCmd as usize] = [
-    CmdDef{ cmd: CmdNo::Article,            min: 0, max: 1, cap: Capb::Always,          h: "ARTICLE [%M]" },
-    CmdDef{ cmd: CmdNo::Authinfo,           min: 2, max: 2, cap: Capb::Authinfo,        h: "AUTHINFO USER name|PASS password" },
-    CmdDef{ cmd: CmdNo::Body,               min: 0, max: 1, cap: Capb::Always,          h: "BODY [%M]" },
-    CmdDef{ cmd: CmdNo::Capabilities,       min: 0, max: 1, cap: Capb::Always,          h: "CAPABILITIES [keyword]" },
-    CmdDef{ cmd: CmdNo::Check,              min: 1, max: 1, cap: Capb::Streaming,       h: "CHECK %m" },
-    CmdDef{ cmd: CmdNo::Date,               min: 0, max: 0, cap: Capb::Always,          h: "DATE" },
-    CmdDef{ cmd: CmdNo::Group,              min: 1, max: 1, cap: Capb::Reader,          h: "GROUP newsgroup" },
-    CmdDef{ cmd: CmdNo::Hdr ,               min: 3, max: 3, cap: Capb::Hdr,             h: "HDR [%R]" },
-    CmdDef{ cmd: CmdNo::Head,               min: 0, max: 1, cap: Capb::Always,          h: "HEAD [%M]" },
-    CmdDef{ cmd: CmdNo::Help,               min: 0, max: 0, cap: Capb::Always,          h: "HELP" },
-    CmdDef{ cmd: CmdNo::Ihave,              min: 1, max: 1, cap: Capb::Ihave,           h: "IHAVE %m" },
-    CmdDef{ cmd: CmdNo::Last,               min: 0, max: 0, cap: Capb::Reader,          h: "LAST" },
-    CmdDef{ cmd: CmdNo::List_Active,        min: 0, max: 1, cap: Capb::ListActive,      h: "LIST ACTIVE [%w]" },
-    CmdDef{ cmd: CmdNo::List_ActiveTimes,   min: 0, max: 1, cap: Capb::ListActiveTimes, h: "LIST ACTIVE.TIMES [%w]" },
-    CmdDef{ cmd: CmdNo::List_DistribPats,   min: 0, max: 0, cap: Capb::ListDistribPats, h: "LIST DISTRIB.PATS" },
-    CmdDef{ cmd: CmdNo::List_Headers,       min: 0, max: 0, cap: Capb::Hdr,             h: "LIST HEADERS [%M]" },
-    CmdDef{ cmd: CmdNo::List_Newsgroups,    min: 0, max: 1, cap: Capb::Reader,          h: "LIST NEWSGROUPS [%w]" },
-    CmdDef{ cmd: CmdNo::List_OverviewFmt,   min: 0, max: 0, cap: Capb::Over,            h: "LIST OVERVIEW.FMT" },
-    CmdDef{ cmd: CmdNo::ListGroup,          min: 1, max: 2, cap: Capb::Reader,          h: "LISTGROUP [newsgroup [%r]]" },
-    CmdDef{ cmd: CmdNo::Mode_Headfeed,      min: 0, max: 0, cap: Capb::ModeHeadfeed,    h: "MODE HEADFEED" },
-    CmdDef{ cmd: CmdNo::Mode_Reader,        min: 0, max: 0, cap: Capb::ModeReader,      h: "MODE READER" },
-    CmdDef{ cmd: CmdNo::Mode_Stream,        min: 0, max: 0, cap: Capb::Streaming,       h: "MODE STREAM" },
-    CmdDef{ cmd: CmdNo::NewGroups,          min: 1, max: 4, cap: Capb::Reader,
-                h: "NEWGROUPS [yy]YYMMDD HHMMSS [GMT]" },
-    CmdDef{ cmd: CmdNo::NewNews,            min: 1, max: 5, cap: Capb::NewNews,
-                h: "NEWNEWS %w [yy]yymmdd <hhmmss> [GMT]" },
-    CmdDef{ cmd: CmdNo::Next,               min: 0, max: 0, cap: Capb::Reader,          h: "NEXT", },
-    CmdDef{ cmd: CmdNo::Over,               min: 0, max: 1, cap: Capb::Over,            h: "OVER [%r]", },
-    CmdDef{ cmd: CmdNo::Post,               min: 0, max: 0, cap: Capb::Post,            h: "POST" },
-    CmdDef{ cmd: CmdNo::Quit,               min: 0, max: 0, cap: Capb::Always,          h: "QUIT" },
-    CmdDef{ cmd: CmdNo::Stat,               min: 0, max: 1, cap: Capb::Always,          h: "STAT [%M]" },
-    CmdDef{ cmd: CmdNo::Takethis,           min: 1, max: 1, cap: Capb::Streaming,       h: "TAKETHIS %m" },
-    CmdDef{ cmd: CmdNo::XHdr ,              min: 3, max: 3, cap: Capb::Hdr,             h: "XHDR [%R]" },
-    CmdDef{ cmd: CmdNo::XOver,              min: 0, max: 1, cap: Capb::Over,            h: "XOVER [%r]", },
-    CmdDef{ cmd: CmdNo::XPat,               min: 3, max: 0, cap: Capb::XPat,            h: "XPAT header %R pattern [pattern..]" },
-];
+// This macro generates the Cmd enum, and a few functions to initialize
+// the cmdname -> CmdDef lookup hashmaps.
+macro_rules! cmd {
+    {$(($name:expr, $cmd:ident, $min:expr, $max:expr, $cap:expr, $help:expr)),*} => {
+        #[derive(Debug,Clone,Copy,PartialEq,Eq)]
+		#[allow(non_camel_case_types)]
+        #[repr(usize)]
+        pub enum Cmd { $($cmd),* }
+
+        // build a command -> CmdDef hashmap
+        fn build_cmd_map() -> HashMap<String, CmdDef> {
+            let mut hm = HashMap::new();
+            let mut has_sub = HashSet::new();
+            $(
+                // if this is a subcommand, remember the first word.
+                let mut words = $name.split_whitespace();
+                let w0 = words.next();
+                if words.next().is_some() {
+                    has_sub.insert(w0.unwrap());
+                }
+
+                let def = CmdDef{
+                    cmd: Cmd::$cmd,
+                    has_subcmd: has_sub.contains($name),
+                    name: $name,
+                    min: $min,
+                    max:$max,
+                    cap: $cap,
+                    h: $help
+                };
+                hm.insert($name.to_string(), def);
+            )*
+            hm
+        }
+    }
+}
+
+// And here it is actually generated.
+cmd!{
+    ( "article",            Article,            0, 1, Capb::Always,          "[%M]" ),
+    ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
+    ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
+    ( "authinfo",           Authinfo,           1, 0, Capb::Authinfo,        "" ),
+    ( "body",               Body,               0, 1, Capb::Always,          "[%M]" ),
+    ( "capabilities",       Capabilities,       0, 1, Capb::Always,          "[keyword]" ),
+    ( "check",              Check,              1, 1, Capb::Streaming,       "%m" ),
+    ( "date",               Date,               0, 0, Capb::Always,          "" ),
+    ( "group",              Group,              1, 1, Capb::Reader,          "newsgroup" ),
+    ( "hdr",                Hdr ,               3, 3, Capb::Hdr,             "[%R]" ),
+    ( "Head",               Head,               0, 1, Capb::Always,          "[%M]" ),
+    ( "help",               Help,               0, 0, Capb::Always,          "" ),
+    ( "ihave",              Ihave,              1, 1, Capb::Ihave,           "%m" ),
+    ( "last",               Last,               0, 0, Capb::Reader,          "" ),
+    ( "list active",        List_Active,        0, 1, Capb::ListActive,      "[%w]" ),
+    ( "list active.times",  List_ActiveTimes,   0, 1, Capb::ListActiveTimes, "[%w]" ),
+    ( "list distrib.pats",  List_DistribPats,   0, 0, Capb::ListDistribPats, "" ),
+    ( "list headers",       List_Headers,       0, 0, Capb::Hdr,             "[%M]" ),
+    ( "list newsgroups",    List_Newsgroups,    0, 1, Capb::Reader,          "[%w]" ),
+    ( "list overview.fmt",  List_OverviewFmt,   0, 0, Capb::Over,            "" ),
+    ( "list",               List,               0, 0, Capb::ListActive,      "" ),
+    ( "listgroup",          ListGroup,          1, 2, Capb::Reader,          "[newsgroup [%r]]" ),
+    ( "mode headfeed",      Mode_Headfeed,      0, 0, Capb::ModeHeadfeed,    "" ),
+    ( "mode reader",        Mode_Reader,        0, 0, Capb::ModeReader,      "" ),
+    ( "mode stream",        Mode_Stream,        0, 0, Capb::Streaming,       "" ),
+    ( "mode",               Mode,               1, 0, Capb::Never,           "" ),
+    ( "newgroups",          NewGroups,          1, 4, Capb::Reader,          "[yy]YYMMDD HHMMSS [GMT]" ),
+    ( "newnews",            NewNews,            1, 5, Capb::NewNews,         " %w [yy]yymmdd <hhmmss> [GMT]" ),
+    ( "next",               Next,               0, 0, Capb::Reader,          "" ),
+    ( "over",               Over,               0, 1, Capb::Over,            "[%r]" ),
+    ( "post",               Post,               0, 0, Capb::Post,            "" ),
+    ( "quit",               Quit,               0, 0, Capb::Always,          "" ),
+    ( "stat",               Stat,               0, 1, Capb::Always,          "[%M]" ),
+    ( "takethis",           Takethis,           1, 1, Capb::Streaming,       "%m" ),
+    ( "xhdr",               XHdr ,              3, 3, Capb::Hdr,             "[%R]" ),
+    ( "xover",              XOver,              0, 1, Capb::Over,            "[%r]" ),
+    ( "xpat",               XPat,               3, 0, Capb::XPat,            "header %R pattern [pattern..]" )
+}
+
+// initialize globals.
+lazy_static! {
+    static ref CMD_MAP: HashMap<String, CmdDef> = build_cmd_map();
+}
 
 // very cheap ASCII lowercasing.
-fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a [u8] {
+fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
     let b = s.as_bytes();
     let mut idx = 0;
     for i in 0..b.len() {
@@ -131,18 +138,21 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a [u8] {
             idx += 1;
         }
     }
-    &buf[..idx]
+    unsafe { str::from_utf8_unchecked(&buf[..idx]) }
 }
 
-pub struct Cmd {
+/// NNTP Command parser.
+pub struct CmdParser {
     caps:       usize,
+    cmd_map:    &'static HashMap<String, CmdDef>,
 }
 
-impl Cmd {
+impl CmdParser {
     /// Return a fresh Cmd.
-    pub fn new() -> Cmd {
-        Cmd{
-            caps:   Capb::Always as usize,
+    pub fn new() -> CmdParser {
+        CmdParser{
+            caps:       Capb::Always as usize,
+            cmd_map:    &*CMD_MAP,
         }
     }
 
@@ -156,129 +166,74 @@ impl Cmd {
         self.caps &= !(caps as usize);
     }
 
-    /// Basic command parsing and checking.
-    pub fn parse<'a>(&self, data: &'a mut String) -> Result<(CmdNo, Vec<&'a str>), &'static str> {
+    /// Command parsing and checking.
+    pub fn parse<'a>(&self, data: &'a str) -> Result<(Cmd, Vec<&'a str>), &'static str> {
 
         let mut args : Vec<_> = data.split_whitespace().collect();
         if args.len() == 0 {
             return Err("501 Syntax error");
         }
+
+        // lowercase, then match command.
         let mut buf = [0u8; 32];
-
-        // turn `command subcommand' into a single command.
-        match lowercase(args[0], &mut buf[..]) {
-            b"mode" if args.len() == 1 => {
-                return Err("501 Syntax error");
-            },
-            b"mode" => {
-                match lowercase(args[1], &mut buf[..]) {
-                    b"headfeed" => args[0] = "mode_headfeed",
-                    b"reader"   => args[0] = "mode_reader",
-                    b"stream"   => args[0] = "mode_stream",
-                    _ => return Err("501 Unknown mode option"),
-                }
-                args.remove(1);
-            },
-            b"list" if args.len() == 1 => {
-                args[0] = "list_active";
-            },
-            b"list" => {
-                match lowercase(args[1], &mut buf[..]) {
-                    b"active"           => args[0] = "list_active",
-                    b"active.times"     => args[0] = "list_active.times",
-                    b"distrib.pats"     => args[0] = "list_distrib.pats",
-                    b"headers"          => args[0] = "list_headers",
-                    b"newsgroups"       => args[0] = "list_newsgroups",
-                    b"overview.fmt"     => args[0] = "list_overview.fmt",
-                    _ => return Err("501 Unknown list option"),
-                }
-                args.remove(1);
-            },
-            _ => {},
-        }
-
-        // special handling for authinfo user|pass <arg>, do not split <arg>
-        match lowercase(args[0], &mut buf[..]) {
-            b"authinfo" if args.len() == 1 => {
-                return Err("501 Syntax error");
-            },
-            b"authinfo" => {
-                match lowercase(args[1], &mut buf[..]) {
-                    s @ b"user" | s @ b"pass" => {
-                        args.truncate(0);
-                        args.extend(data.splitn(3, |c| c == ' ' || c == '\t'));
-                        args[0] = "authinfo";
-                        args[1] = if s == b"user" { "user" } else { "pass" };
-                    },
-                    _ => return Err("501 Unknown authinfo option"),
-                }
-                args.remove(1);
-            },
-            _ => {},
-        }
-
-        // match command
-        let cmd = match lowercase(args[0], &mut buf[..]) {
-            b"article"              => &COMMANDS[CmdNo::Article as usize],
-            b"authinfo"             => &COMMANDS[CmdNo::Authinfo as usize],
-            b"body"                 => &COMMANDS[CmdNo::Body as usize],
-            b"capabilities"         => &COMMANDS[CmdNo::Capabilities as usize],
-            b"check"                => &COMMANDS[CmdNo::Check as usize],
-            b"date"                 => &COMMANDS[CmdNo::Date as usize],
-            b"group"                => &COMMANDS[CmdNo::Group as usize],
-            b"hdr"                  => &COMMANDS[CmdNo::Hdr as usize],
-            b"head"                 => &COMMANDS[CmdNo::Head as usize],
-            b"help"                 => &COMMANDS[CmdNo::Help as usize],
-            b"ihave"                => &COMMANDS[CmdNo::Ihave as usize],
-            b"last"                 => &COMMANDS[CmdNo::Last as usize],
-            b"list_active"          => &COMMANDS[CmdNo::List_Active as usize],
-            b"list_active.times"    => &COMMANDS[CmdNo::List_ActiveTimes as usize],
-            b"list_distrib.pats"    => &COMMANDS[CmdNo::List_DistribPats as usize],
-            b"list_heqders"         => &COMMANDS[CmdNo::List_Headers as usize],
-            b"list_newsgroups"      => &COMMANDS[CmdNo::List_Newsgroups as usize],
-            b"list_overview.fmt"    => &COMMANDS[CmdNo::List_OverviewFmt as usize],
-            b"listgroup"            => &COMMANDS[CmdNo::ListGroup as usize],
-            b"mode_headfeed"        => &COMMANDS[CmdNo::Mode_Headfeed as usize],
-            b"mode_reader"          => &COMMANDS[CmdNo::Mode_Reader as usize],
-            b"mode_stream"          => &COMMANDS[CmdNo::Mode_Stream as usize],
-            b"newgroups"            => &COMMANDS[CmdNo::NewGroups as usize],
-            b"newnews"              => &COMMANDS[CmdNo::NewNews as usize],
-            b"next"                 => &COMMANDS[CmdNo::Next as usize],
-            b"over"                 => &COMMANDS[CmdNo::Over as usize],
-            b"post"                 => &COMMANDS[CmdNo::Post as usize],
-            b"quit"                 => &COMMANDS[CmdNo::Quit as usize],
-            b"stat"                 => &COMMANDS[CmdNo::Stat as usize],
-            b"takethis"             => &COMMANDS[CmdNo::Takethis as usize],
-            b"xhdr"                 => &COMMANDS[CmdNo::Hdr as usize],
-            b"xover"                => &COMMANDS[CmdNo::Over as usize],
-            b"xpat"                 => &COMMANDS[CmdNo::XPat as usize],
-            _                       => return Err("500 Unknown command"),
+        let arg0 = lowercase(args[0], &mut buf[..]);
+        let mut cmd = match self.cmd_map.get(arg0) {
+            Some(cmd) => cmd,
+            None => return Err("500 Unknown command"),
         };
+        args.remove(0);
 
-        // Do we allow this command?
-        if (self.caps & (cmd.cap as usize)) == 0 {
-            if args[0].contains("_") {
-                return Err("503 Not supported");
-            } else {
-                return Err("500 Unknown command");
+        if cmd.has_subcmd {
+            if args.len() < cmd.min {
+                if (self.caps & (cmd.cap as usize)) == 0 {
+                    return Err("500 Unknown command");
+                } else {
+                    return Err("501 Missing argument");
+                }
+            }
+            if args.len() > 0 {
+                // match (command, keyword)
+                let mut kw = format!("{} {}", arg0, args[0]);
+                kw.as_mut_str().make_ascii_lowercase();
+                cmd = match self.cmd_map.get(&kw) {
+                    Some(cmd) => cmd,
+                    None => return Err("501 Unknown subcommand"),
+                };
+                args.remove(0);
             }
         }
 
+        // AUTHINFO PASS is special.
+        if cmd.cmd == Cmd::Authinfo_Pass {
+            args.truncate(0);
+            args.extend(data.splitn(3, |c| c == ' ' || c == '\t').skip(2));
+        }
+
+        // Do we allow this command?
+        if (self.caps & (cmd.cap as usize)) == 0 {
+            return Err("500 Unknown command");
+        }
+
         // check number of args
-        let c = args.len() - 1;
+        let c = args.len();
         if c < cmd.min {
             return Err("501 Missing argument(s)");
         }
-        if c > cmd.max && cmd.max > 0 {
+        if c > cmd.max {
             return Err("501 Too many arguments");
         }
 
         Ok((cmd.cmd, args))
     }
 
-    pub fn help<W: Write>(&self, mut out: W) -> io::Result<()> {
-        write!(out, "100 Legal commands\r\n")?;
-        for cmd in COMMANDS.iter() {
+    pub fn help(&self) -> Bytes {
+        let mut out = BytesMut::with_capacity(1024);
+        out.put("100 Legal commands\r\n");
+
+        let mut cmds : Vec<&CmdDef> = self.cmd_map.values().collect();
+        cmds.sort_unstable_by(|a, b| a.name.cmp(b.name));
+
+        for cmd in cmds {
             if (self.caps & (cmd.cap as usize)) == 0 {
                 continue;
             }
@@ -294,23 +249,25 @@ impl Cmd {
                 s = s.replace("%R", "message-ID");
                 s = s.replace("%M", "message-ID");
             }
-            write!(out, "  {}\r\n", s)?;
+            out.put(format!("  {} {}\r\n", cmd.name, s));
         }
-        write!(out, ".\r\n")
+        out.put(".\r\n");
+        out.freeze()
     }
 
-    pub fn capabilities<W: Write>(&self, mut out: W) -> io::Result<()> {
-        write!(out, "101 Capability list:\r\n")?;
-        write!(out, "VERSION: 2\r\n")?;
-        write!(out, "IMPLEMENTATION: Duivel 0.1\r\n")?;
+    pub fn capabilities(&self) -> Bytes {
+        let mut out = BytesMut::with_capacity(1024);
+        out.put("101 Capability list:\r\n");
+        out.put("VERSION: 2\r\n");
+        out.put("IMPLEMENTATION: NNTP-RS 0.1\r\n");
         if (self.caps & Capb::Authinfo as usize) > 0 {
-            write!(out, "AUTHINFO\r\n")?;
+            out.put("AUTHINFO\r\n");
         }
         if (self.caps & Capb::Hdr as usize) > 0 {
-            write!(out, "HDR\r\n")?;
+            out.put("HDR\r\n");
         }
         if (self.caps & Capb::Ihave as usize) > 0 {
-            write!(out, "IHAVE\r\n")?;
+            out.put("IHAVE\r\n");
         }
 
         let mut v = Vec::new();
@@ -330,34 +287,35 @@ impl Cmd {
             v.push("NEWSGROUPS");
         }
         if v.len() > 0 {
-            write!(out, "LIST {}\r\n", v.join(" "))?;
+            out.put(format!("LIST {}\r\n", v.join(" ")));
         }
 
         if (self.caps & Capb::Reader as usize) > 0 {
-            write!(out, "MODE-READER\r\n")?;
+            out.put("MODE-READER\r\n");
         }
         if (self.caps & Capb::NewNews as usize) > 0 {
-            write!(out, "NEWSNEWS\r\n")?;
+            out.put("NEWSNEWS\r\n");
         }
         if (self.caps & Capb::Over as usize) > 0 {
-            write!(out, "OVER\r\n")?;
+            out.put("OVER\r\n");
         }
         if (self.caps & Capb::Post as usize) > 0 {
-            write!(out, "POST\r\n")?;
+            out.put("POST\r\n");
         }
         if (self.caps & Capb::Reader as usize) > 0 {
-            write!(out, "READER\r\n")?;
+            out.put("READER\r\n");
         }
         if (self.caps & Capb::Sasl as usize) > 0 {
-            write!(out, "SASL\r\n")?;
+            out.put("SASL\r\n");
         }
         if (self.caps & Capb::StartTls as usize) > 0 {
-            write!(out, "STARTTLS\r\n")?;
+            out.put("STARTTLS\r\n");
         }
         if (self.caps & Capb::Streaming as usize) > 0 {
-            write!(out, "STREAMING\r\n")?;
+            out.put("STREAMING\r\n");
         }
-        write!(out, ".\r\n")
+        out.put(".\r\n");
+        out.freeze()
     }
 }
 

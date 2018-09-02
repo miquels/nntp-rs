@@ -1,5 +1,5 @@
 [package]
-name = "nntp"
+name = "nntp-rs"
 version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
@@ -7,14 +7,22 @@ authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 members = [ "backends" ]
 
 [dependencies]
-backends = { path = "backends" }
-lazy_static = "1.0.0"
-toml = "0.4.6"
+nntp-rs-storage = { path = "nntp-rs-storage" }
+nntp-rs-history = { path = "nntp-rs-history" }
+bytes = "0.4.9"
+env_logger = "0.5.13"
+futures = "0.1.23"
+futures-cpupool = "0.1.8"
+lazy_static = "1.1.0"
+libc = "0.2.40"
+log = "0.4.4"
+memchr = "2.0.2"
+net2 = "0.2.33"
 serde = "1.0"
 serde_derive = "1.0"
-log = "0.3"
-memchr = "2.0.1"
-libc = "0.2.40"
+tk-listen = "0.2.0"
+tokio = "0.1.8"
+toml = "0.4.6"
 
 # for bin/*
 env_logger = "0.4"
