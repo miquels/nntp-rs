@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [workspace]
-members = [ "nntp-rs-spool", "nntp-rs-history" ]
+members = [ "spool", "history" ]
 
 [dependencies]
 #nntp-rs-history = { path = "nntp-rs-history" }
