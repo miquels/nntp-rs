@@ -9,9 +9,12 @@ use std::sync::Mutex;
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
+use byteorder::ByteOrder;
+use byteorder::LittleEndian as LE;
+
 use time;
-use spool;
-use {u16_to_b2,u32_to_b4,b2_to_u16,b4_to_u32};
+
+use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolCfg};
 
 pub(crate) struct DSpool {
     path:       PathBuf,
@@ -67,23 +70,23 @@ struct DArtHead {
 }
 const DARTHEAD_SIZE : usize = 24;
 
-fn to_location(loc: &spool::ArtLoc) -> DArtLocation {
+fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
     let mins = (t[10] as u32) << 24 | (t[11] as u32) << 16 | (t[12] as u32) << 8 | t[13] as u32;
     DArtLocation{
-        file:   b2_to_u16(&t[0..2]),
-        pos:    b4_to_u32(&t[2..6]),
-        size:   b4_to_u32(&t[6..10]),
+        file:   LE::read_u16(&t[0..2]),
+        pos:    LE::read_u32(&t[2..6]),
+        size:   LE::read_u32(&t[6..10]),
         dir:    mins - (mins % 10),
     }
 }
 
 fn from_location(loc: DArtLocation) -> Vec<u8> {
     let mut t = [0u8; 14];
-    u16_to_b2(&mut t, 0, loc.file);
-    u32_to_b4(&mut t, 2, loc.pos);
-    u32_to_b4(&mut t, 6, loc.size);
-    u32_to_b4(&mut t, 10, loc.dir);
+    LE::write_u16(&mut t[0..2], loc.file);
+    LE::write_u32(&mut t[2..6], loc.pos);
+    LE::write_u32(&mut t[6..10], loc.size);
+    LE::write_u32(&mut t[10..14], loc.dir);
     t.to_vec()
 }
 
@@ -168,7 +171,7 @@ impl<T: Read> Read for CrlfXlat<T> {
 }
 
 impl DSpool {
-    pub fn new(cfg: &spool::SpoolCfg, spool_no: u8) -> io::Result<Box<spool::SpoolBackend>> {
+    pub fn new(cfg: &SpoolCfg, spool_no: u8) -> io::Result<Box<SpoolBackend>> {
         Ok(Box::new(DSpool{
             path:       PathBuf::from(cfg.path.clone()),
             spool_no:   spool_no,
@@ -184,13 +187,13 @@ impl DSpool {
     }
 }
 
-impl spool::SpoolBackend for DSpool {
+impl SpoolBackend for DSpool {
 
-    fn get_type(&self) -> spool::Backend {
-        spool::Backend::Diablo
+    fn get_type(&self) -> Backend {
+        Backend::Diablo
     }
 
-    fn open(&self, art_loc: &spool::ArtLoc, part: spool::ArtPart) -> io::Result<Box<io::Read>> {
+    fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<io::Read>> {
 
         let t = to_location(art_loc);
         debug!("art location: {:?}", t);
@@ -204,17 +207,17 @@ impl spool::SpoolBackend for DSpool {
 
         let start = t.pos + DARTHEAD_SIZE as u32;
         let (pos, sz) = match part {
-            spool::ArtPart::Article => {
+            ArtPart::Article => {
                 (start, dh.art_len)
             },
-            spool::ArtPart::Head => {
+            ArtPart::Head => {
                 let mut s = dh.arthdr_len;
                 if s > dh.art_len {
                     s = dh.art_len;
                 }
                 (start, s)
             },
-            spool::ArtPart::Body => {
+            ArtPart::Body => {
                 let mut s = dh.arthdr_len + 1;
                 if (dh.store_type & 4) > 0 {
                     s += 1;
@@ -237,7 +240,7 @@ impl spool::SpoolBackend for DSpool {
         }
     }
 
-    fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<spool::ArtLoc> {
+    fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc> {
 
         // if file is open, see how long we've had it opened. If it's more
         // than reallocint (default 10 mins) close it and open a new file.
@@ -335,8 +338,8 @@ impl spool::SpoolBackend for DSpool {
         });
 
         // return article location
-        Ok(spool::ArtLoc{
-            storage_type:   spool::Backend::Diablo,
+        Ok(ArtLoc{
+            storage_type:   Backend::Diablo,
             spool:          self.spool_no,
             token:          t,
         })

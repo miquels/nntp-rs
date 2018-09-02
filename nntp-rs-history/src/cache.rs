@@ -2,7 +2,7 @@
 use linked_hash_map::LinkedHashMap;
 
 use time;
-use history::{HistEnt, HistStatus};
+use {HistEnt, HistStatus};
 
 pub(crate) struct HCache {
     map:        LinkedHashMap<Vec<u8>, HistEnt>,

@@ -3,7 +3,12 @@
 //! Types currently supported:
 //!   - diabo
 
-use std;
+#[macro_use] extern crate log;
+#[macro_use] extern crate serde_derive;
+extern crate byteorder;
+extern crate serde;
+extern crate time;
+
 use std::io;
 use std::collections::HashMap;
 use std::sync::Mutex;

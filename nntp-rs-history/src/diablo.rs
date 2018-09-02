@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use spool;
-use history;
-use history::{HistEnt,HistStatus};
-use {u16_to_b2,u32_to_b4,b2_to_u16,b4_to_u32};
+use byteorder::ByteOrder;
+use byteorder::LittleEndian as LE;
+
+use nntp_rs_spool as spool;
+use {HistBackend,HistEnt,HistStatus};
 
 #[derive(Debug)]
 pub(crate) struct DHistory {
@@ -256,9 +257,9 @@ impl DHistEnt {
         let mut storage_type = spool::Backend::Diablo;
         if let Some(ref loc) = he.location {
             storage_type = loc.storage_type;
-            dhe.iter = b2_to_u16(&loc.token[0..2]);
-            dhe.boffset = b4_to_u32(&loc.token[2..6]);
-            dhe.bsize = b4_to_u32(&loc.token[6..10]);
+            dhe.iter = LE::read_u16(&loc.token[0..2]);
+            dhe.boffset = LE::read_u32(&loc.token[2..6]);
+            dhe.bsize = LE::read_u32(&loc.token[6..10]);
             dhe.exp = if loc.spool < 100 { loc.spool as u16 + 100 } else { 0xff };
         }
 
@@ -268,7 +269,7 @@ impl DHistEnt {
 
         if storage_type == spool::Backend::Diablo {
             if let Some(ref loc) = he.location {
-                dhe.gmt = b4_to_u32(&loc.token[10..14]);
+                dhe.gmt = LE::read_u32(&loc.token[10..14]);
             }
             match he.status {
                 HistStatus::Expired => {
@@ -299,9 +300,9 @@ impl DHistEnt {
     // convert a DHistEnt to a spool::ArtLoc
     fn to_location(&self) -> spool::ArtLoc {
         let mut t = [0u8; 14];
-        u16_to_b2(&mut t, 0, self.iter);
-        u32_to_b4(&mut t, 2, self.boffset);
-        u32_to_b4(&mut t, 6, self.bsize);
+        LE::write_u16(&mut t[0..2], self.iter);
+        LE::write_u32(&mut t[2..6], self.boffset);
+        LE::write_u32(&mut t[6..10], self.bsize);
 
         let s  = if (self.exp & 0x1000) != 0 {
             // not a diablo-spool history entry.
@@ -309,7 +310,7 @@ impl DHistEnt {
         } else {
             // This is a diablo-spool history entry, so include
             // gmt in the returned StorageToken
-            u32_to_b4(&mut t, 10, self.gmt);
+            LE::write_u32(&mut t[10..14], self.gmt);
             (&t)[0..14].to_vec()
         };
         let btype = spool::Backend::from_u8(((self.exp & 0x0f00) >> 8) as u8);
@@ -349,7 +350,7 @@ impl DHistEnt {
     }
 }
 
-impl history::HistBackend for DHistory {
+impl HistBackend for DHistory {
 
     // lookup an article in the DHistry database
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {

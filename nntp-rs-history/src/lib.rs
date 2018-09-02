@@ -4,6 +4,13 @@
 //!   - diablo
 //!
 
+#[macro_use] extern crate lazy_static;
+#[macro_use] extern crate log;
+extern crate byteorder;
+extern crate time;
+extern crate linked_hash_map;
+extern crate nntp_rs_spool;
+
 mod cache;
 mod diablo;
 
@@ -12,9 +19,8 @@ use std::sync::{Mutex,RwLock};
 use std::path::Path;
 use std::collections::HashSet;
 
-use time;
-use spool;
-use history::cache::HCache;
+use nntp_rs_spool as spool;
+use cache::HCache;
 
 pub(crate) trait HistBackend: Send + Sync {
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;

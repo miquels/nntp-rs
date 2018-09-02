@@ -1,20 +1,3 @@
-#[macro_use] extern crate futures;
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate log;
-extern crate bytes;
-extern crate env_logger;
-extern crate futures_cpupool;
-extern crate memchr;
-extern crate net2;
-extern crate tk_listen;
-extern crate tokio;
-extern crate tokio_codec;
-extern crate tokio_io_pool;
-
-mod commands;
-mod nntp_codec;
-mod nntp_session;
-
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::thread;
@@ -22,10 +5,13 @@ use std::time::Duration;
 use std::io;
 
 use bytes::BytesMut;
+use env_logger;
+use futures_cpupool;
 use futures::{Future,future,Stream};
-use net2::unix::UnixTcpBuilderExt;
+use net2::{self,unix::UnixTcpBuilderExt};
 use tk_listen::ListenExt;
 use tokio::prelude::*;
+use tokio;
 use tokio::runtime::current_thread;
 
 use nntp_codec::NntpCodec;
