@@ -20,6 +20,7 @@ pub(crate) struct DHistory {
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
+    crc_xor_table:  &'static Vec<DHash>,
 }
 
 #[derive(Debug)]
@@ -34,8 +35,9 @@ struct DHistHead {
 }
 const DHISTHEAD_SIZE : usize = 16;
 const DHISTHEAD_MAGIC : u32 = 0xA1B2C3D4;
-const DHISTHEAD_DEADMAGIC : u32 = 0xDEADF5E6;
 const DHISTHEAD_VERSION2 : u16 = 2;
+#[allow(dead_code)]
+const DHISTHEAD_DEADMAGIC : u32 = 0xDEADF5E6;
 
 #[derive(Debug, Default, PartialEq)]
 #[repr(C)]
@@ -112,6 +114,7 @@ impl DHistory {
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
+            crc_xor_table:  &*CRC_XOR_TABLE,
         })
     }
 
@@ -178,12 +181,12 @@ fn crc_init() -> Vec<DHash> {
     table
 }
 
-fn crc_hash(msgid: &[u8]) -> DHash {
+fn crc_hash(crc_xor_table: &Vec<DHash>, msgid: &[u8]) -> DHash {
 	let mut hv = DHash{ h1: CRC_HINIT1, h2: CRC_HINIT2 };
     for b in msgid {
         let i = ((hv.h1 >> 24) & 0xff) as usize;
-        hv.h1 = (hv.h1 << 8) ^ (hv.h2 >> 24) ^ CRC_XOR_TABLE[i].h1;
-        hv.h2 = (hv.h2 << 8) ^ (*b as u32) ^ CRC_XOR_TABLE[i].h2;
+        hv.h1 = (hv.h1 << 8) ^ (hv.h2 >> 24) ^ crc_xor_table[i].h1;
+        hv.h2 = (hv.h2 << 8) ^ (*b as u32) ^ crc_xor_table[i].h2;
     }
     // Note from the author of the diablo implementation lib/hash.c :
     // Fold the generated CRC.  Note, this is buggy but it is too late
@@ -355,7 +358,7 @@ impl HistBackend for DHistory {
     // lookup an article in the DHistry database
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
 
-        let hv = crc_hash(msgid);
+        let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^hv.h2) & self.hash_mask) as u64;
         let pos = DHISTHEAD_SIZE as u64 + bucket * 4;
 
@@ -416,7 +419,7 @@ impl HistBackend for DHistory {
     // store an article in the DHistry database
     fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
-        let hv = crc_hash(msgid);
+        let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as u64;
         let bpos = DHISTHEAD_SIZE as u64 + bucket * 4;
 
