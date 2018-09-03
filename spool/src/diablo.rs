@@ -9,8 +9,7 @@ use std::sync::Mutex;
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use byteorder::ByteOrder;
-use byteorder::LittleEndian as LE;
+use byteorder::{ByteOrder,LE};
 
 use time;
 
@@ -72,7 +71,7 @@ const DARTHEAD_SIZE : usize = 24;
 
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
-    let mins = (t[10] as u32) << 24 | (t[11] as u32) << 16 | (t[12] as u32) << 8 | t[13] as u32;
+    let mins = LE::read_u32(&t[10..14]);
     DArtLocation{
         file:   LE::read_u16(&t[0..2]),
         pos:    LE::read_u32(&t[2..6]),
