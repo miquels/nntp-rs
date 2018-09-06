@@ -4,11 +4,9 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [workspace]
-members = [ "spool", "history" ]
+members = [ "history", "spool", "util" ]
 
 [dependencies]
-#nntp-rs-history = { path = "nntp-rs-history" }
-#nntp-rs-spool = { path = "nntp-rs-spool" }
 bytes = "0.4.9"
 futures = "0.1.23"
 futures-cpupool = "0.1.8"
