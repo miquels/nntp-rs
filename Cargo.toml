@@ -4,24 +4,4 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [workspace]
-members = [ "history", "spool", "util" ]
-
-[dependencies]
-bytes = "0.4.9"
-futures = "0.1.23"
-futures-cpupool = "0.1.8"
-lazy_static = "1.1.0"
-libc = "0.2.40"
-log = "0.4.4"
-memchr = "2.0.2"
-net2 = "0.2.33"
-serde = "1.0"
-serde_derive = "1.0"
-tk-listen = "0.2.0"
-tokio = "0.1.8"
-toml = "0.4.6"
-
-# for bin/*
-env_logger = "0.4"
-clap = "2.29.4"
-time = "0.1.39"
+members = [ "history", "server", "spool", "util" ]
