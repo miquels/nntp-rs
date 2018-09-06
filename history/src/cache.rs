@@ -246,22 +246,12 @@ impl FifoMap {
 
 #[cfg(test)]
 mod tests {
-    // run tests using
-    //
-    //      RUST_LOG=nntp_rs_history=debug cargo test -- --nocapture
-    //
-    //  to enable debug logging.
     use super::*;
     use HistStatus;
-    use env_logger;
-
-    #[test]
-    fn test_init() {
-        env_logger::init();
-    }
 
     #[test]
     fn test_simple() {
+        ::tests::logger_init();
         debug!("test_simple()");
         let cache = HCache::new();
         let histent = HistEnt{
@@ -274,14 +264,17 @@ mod tests {
         {
             let mut p = cache.lock_partition(msgid.clone());
             let h = histent.clone();
-            p.store(h);
+            p.store_begin();
+            p.store_commit(h);
         }
         let p = cache.lock_partition(msgid);
-        assert!(p.lookup().unwrap().time == histent.time);
+        let (he, _age) = p.lookup().unwrap();
+        assert!(he.time == histent.time);
     }
 
     #[test]
     fn test_full() {
+        ::tests::logger_init();
         debug!("test_full()");
         let cache = HCache::new();
         let histent = HistEnt{
@@ -296,20 +289,23 @@ mod tests {
             let msgid = format!("<{}@bla>", i);
             let mut h = histent.clone();
             let mut p = cache.lock_partition(&msgid);
-            p.store(h);
+            p.store_begin();
+            p.store_commit(h);
         }
         // first entry should still be there
         let first_msgid = format!("<{}@bla>", 0);
         {
             let p = cache.lock_partition(&first_msgid);
-            assert!(p.lookup().unwrap().time == histent.time);
+            let (he, _age) = p.lookup().unwrap();
+            assert!(he.time == histent.time);
         }
         // add a bunch more.
         for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS*CACHE_LISTLEN {
             let msgid = format!("<{}@bla2>", i);
             let mut h = histent.clone();
             let mut p = cache.lock_partition(&msgid);
-            p.store(h);
+            p.store_begin();
+            p.store_commit(h);
         }
         // first entry should be gone.
         {

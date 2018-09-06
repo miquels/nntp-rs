@@ -146,10 +146,12 @@ impl History {
     // Do not really need to Box the returned future, since we only
     // ever return one type, so return impl Future. Unfortunately we cannot
     // use `impl HistFuture' as return value. So spell it out.
-    fn backend_lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
+    pub(crate) fn backend_lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
         self.inner.cpu_pool.spawn_fn(move || {
+            use std::thread;
+            debug!("history worker on thread {:?}", thread::current().id());
             match inner.backend.lookup(&msgid) {
                 Ok(he) => {
                     if he.status == HistStatus::NotFound {
@@ -239,7 +241,7 @@ impl History {
 
     /// Done writing to the spool. Update the cache-entry and write-through
     /// to the backend storage.
-    pub fn store_commit(&mut self, msgid: &str, he: HistEnt) -> Box<Future<Item=bool, Error=io::Error>> {
+    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> Box<Future<Item=bool, Error=io::Error>> {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
@@ -265,3 +267,64 @@ impl History {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod tests {
+    // run tests using
+    //
+    //      RUST_LOG=nntp_rs_history=debug cargo test -- --nocapture
+    //
+    //  to enable debug logging.
+    use std::sync::Once;
+    use std::time::SystemTime;
+    use env_logger;
+    use super::*;
+
+    static START: Once = Once::new();
+    pub(crate) fn logger_init() {
+        START.call_once(|| env_logger::init() );
+    }
+
+    #[test]
+    fn test_init() {
+        logger_init();
+    }
+
+    #[test]
+    fn test_simple() {
+        logger_init();
+        debug!("history test");
+        let mut h = History::open("memdb", "[memdb]").unwrap();
+        let he = HistEnt{
+            status:     HistStatus::Tentative,
+            time:       SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            head_only:  false,
+            location:   None,
+        };
+        let msgid = "<12345@abcde>";
+        h.store_begin(msgid);
+        let fut = h.store_commit(msgid, he.clone())
+            .then(|res| {
+                match res {
+                    Err(e) => panic!("store_commit: {:?}", e),
+                    Ok(v) => assert!(v == true),
+                }
+                res
+            })
+            .then(|res| {
+                if let Err(e) = res {
+                    panic!("store msgid: {:?}", e);
+                }
+                Box::new(h.backend_lookup(msgid))
+            })
+            .then(|res| {
+                match res {
+                    Err(e) => panic!("lookup msgid: {:?}", e),
+                    Ok(Some(ref e)) => assert!(e.time == he.time),
+                    Ok(None) => panic!("lookup msgid: None result"),
+                }
+                debug!("final result: {:?}", res);
+                res
+            });
+        fut.wait().expect("future returned error");
+	}
+}
