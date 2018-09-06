@@ -126,19 +126,19 @@ impl<'a> HCachePartition<'a> {
     }
 
     /// make entry permanent.
-    pub fn store_commit(&mut self, he: HistEnt) {
+    pub fn store_commit(&mut self, he: HistEnt) -> bool {
         let inner = &mut *self.inner;
         inner.update(HCacheEnt{
             histent: he,
             hash: self.hash,
             when: self.when,
-        });
+        })
     }
 
     /// remove entry.
     pub fn store_rollback(&mut self) {
         let inner = &mut *self.inner;
-        inner.remove(self.hash);
+        inner.remove(self.hash, self.when);
     }
 }
 
@@ -170,16 +170,27 @@ impl FifoMap {
         FifoMap{ buckets, num_buckets, max_listlen, max_age }
     }
 
+    // Get a mutable entry.
+    fn get_mut(&mut self, hash: u64, now: u32) -> Option<&mut HCacheEnt> {
+        let bi = ((((hash >> 16) & 0xffffffff) as u32) % self.num_buckets) as usize;
+        for b in self.buckets[bi].iter_mut() {
+            if b.when + self.max_age < now + 1 {
+                break;
+            }
+            if b.hash == hash {
+                return Some(b);
+            }
+        }
+        None
+    }
+
     // Get an entry.
     fn get(&self, hash: u64, now: u32) -> Option<HCacheEnt> {
         let bi = ((((hash >> 16) & 0xffffffff) as u32) % self.num_buckets) as usize;
-        trace!("FifoMap.get hash={} now={} bi={}", hash, now, bi);
         for b in self.buckets[bi].iter() {
             if b.when + self.max_age < now + 1 {
-                trace!("too old: {} + {} < {}", b.when, self.max_age, now);
                 break;
             }
-            trace!("check {} and {}", b.hash, hash);
             if b.hash == hash {
                 return Some(b.clone());
             }
@@ -198,11 +209,37 @@ impl FifoMap {
     }
 
     // Update an entry.
-    fn update(&mut self, ent: HCacheEnt) {
+    fn update(&mut self, ent: HCacheEnt) -> bool {
+        let mut do_insert = false;
+        let r = match self.get_mut(ent.hash, ent.when) {
+            Some(oent) => {
+                if oent.when >= ent.when - 1 {
+                    // if it's recent enough just update existing entry
+                    oent.histent = ent.histent.clone();
+                } else {
+                    // otherwise insert a new one at the head.
+                    // Must do that outside of this block because of the
+                    // borrow checker - will probably be fixed when we have NLL.
+                    do_insert = true;
+                }
+                true
+            },
+            None => false,
+        };
+        if do_insert {
+            self.insert(ent);
+        }
+        r
     }
 
     // Remove an entry.
-    fn remove(&mut self, hash: u64) {
+    fn remove(&mut self, hash: u64, now: u32) {
+        match self.get_mut(hash, now) {
+            Some(ent) => {
+                ent.histent.status = HistStatus::NotFound;
+            },
+            None => {},
+        }
     }
 
 }

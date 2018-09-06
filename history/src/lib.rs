@@ -238,10 +238,10 @@ impl History {
     pub fn store_commit(&mut self, msgid: &str, he: HistEnt) -> Box<Future<Item=bool, Error=io::Error>> {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
-            partition.store_commit(he.clone());
+            if partition.store_commit(he.clone()) == false {
+                error!("cache store_commit {} failed (fallen out of cache)", msgid);
+            }
         }
-        // XXX FIXME what if the store fails. Should probably add
-        // a .then to handle the situation.
         let inner = self.inner.clone();
         let msgid = msgid.to_string().into_bytes();
         let f = self.inner.cpu_pool.spawn_fn(move || {
