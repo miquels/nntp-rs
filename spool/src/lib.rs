@@ -6,12 +6,14 @@
 #[macro_use] extern crate log;
 #[macro_use] extern crate serde_derive;
 extern crate byteorder;
+extern crate nntp_rs_util as util;
 extern crate serde;
 extern crate time;
 
 use std::io;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 mod diablo;
 
@@ -66,47 +68,31 @@ impl Backend {
     }
 }
 
-
 /// Metaspool is a group of spools.
-#[derive(Default,Debug)]
+#[derive(Deserialize,Default,Debug)]
 pub(crate) struct MetaSpool {
     pub spool:          Vec<u8>,
     pub groups:         Vec<String>,
-    pub maxsize:        u32,
-    pub reallocint:     u32,
+    #[serde(deserialize_with = "util::deserialize_size")]
+    pub maxsize:        u64,
+    #[serde(deserialize_with = "util::deserialize_duration")]
+    pub reallocint:     Duration,
+    #[serde(deserialize_with = "util::deserialize_bool")]
     pub dontstore:      bool,
+    #[serde(deserialize_with = "util::deserialize_bool")]
     pub rejectart:      bool,
-    pub last_spool:     u8,
+    #[serde(skip)]
+    last_spool:         u8,
 }
-
-/// Metaspool instance configuration.
-#[derive(Deserialize,Default,Debug)]
-#[serde(default)]
-pub struct MetaSpoolCfg {
-    pub spool:          Vec<u8>,
-    pub groups:         String,
-    pub maxsize:        String,
-    pub reallocint:     String,
-    pub dontstore:      String,
-    pub rejectarts:     String,
-}
-
-impl MetaSpoolCfg {
-    fn parse(&self) -> io::Result<MetaSpool> {
-        Ok(MetaSpool{
-            spool:  self.spool.clone(),
-            ..Default::default()
-        })
-    }
-}
-
+pub(crate) type MetaSpoolCfg = MetaSpool;
 
 /// Configuration for one spool instance.
 #[derive(Deserialize,Default,Debug,Clone)]
 pub struct SpoolCfg {
     pub backend:    String,
     pub path:       String,
-    pub minfree:    Option<String>,
+    #[serde(deserialize_with = "util::option_deserialize_size")]
+    pub minfree:    Option<u64>,
 }
 
 /// Article storage (spool) functionality.
@@ -117,16 +103,9 @@ pub struct Spool {
 
 impl Spool {
     /// initialize all storage backends.
-    pub fn new(spoolcfg: &HashMap<String, SpoolCfg>, metaspoolcfg: &Vec<MetaSpoolCfg>) -> io::Result<Spool> {
+    pub(crate) fn new(spoolcfg: HashMap<String, SpoolCfg>, metaspool: Vec<MetaSpool>) -> io::Result<Spool> {
 
-        // first parse metaspool definitions.
-        let mut metaspool = Vec::new();
-        for ms in metaspoolcfg {
-            let m = ms.parse()?;
-            metaspool.push(m);
-        }
-
-        // now parse spool definitions.
+        // parse spool definitions.
         let mut m = HashMap::new();
         for (num, cfg) in spoolcfg {
             let n = match num.parse::<u8>() {
@@ -139,7 +118,7 @@ impl Spool {
 
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    diablo::DSpool::new(cfg, n)
+                    diablo::DSpool::new(&cfg, n)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,

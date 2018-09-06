@@ -4,8 +4,9 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [dependencies]
+nntp-rs-util = { path = "../util" }
+byteorder = "1.2.6"
+log = "0.4.4"
 serde = "1.0"
 serde_derive = "1.0"
-log = "0.4.4"
 time = "0.1.39"
-byteorder = "1.2.6"
