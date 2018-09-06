@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use parking_lot::{Mutex,MutexGuard};
@@ -16,13 +15,8 @@ const CACHE_LISTLEN: u32 = 16;
 const CACHE_MAX_AGE: u32 = 300;
 
 /// FIFO size and time limited cache.
+/// The cache is partitioned for parallel access.
 pub struct HCache {
-    inner:          Arc<HCacheInner>,
-}
-
-// Actual cache, wrapped by an Arc.
-// The cache is partitioned for parallel access.
-struct HCacheInner {
     partitions:         Vec<Mutex<FifoMap>>,
     num_partitions:     u32,
 }
@@ -61,20 +55,19 @@ impl HCache {
             partitions.push(Mutex::new(map));
         }
 
-        let hc = HCacheInner{
+        HCache{
             partitions:         partitions,
             num_partitions:     NUM_PARTITIONS,
-        };
-        HCache{ inner: Arc::new(hc) }
+        }
     }
 
     /// Get and lock partition of the cache. With the returned HCachePartition
     /// you can then get/insert HistEnt items in the history and precommit cache.
     pub fn lock_partition(&self, msgid: &str) -> HCachePartition {
         let h = hash_str(msgid);
-        let m = h % (self.inner.num_partitions as u64);
+        let m = h % (self.num_partitions as u64);
         HCachePartition{
-            inner:              self.inner.partitions[m as usize].lock(),
+            inner:              self.partitions[m as usize].lock(),
             hash:               h,
             when:               unixtime(),
         }
