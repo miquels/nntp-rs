@@ -23,6 +23,7 @@ use futures::{Future,future};
 
 mod cache;
 mod diablo;
+mod memdb;
 
 use std::io;
 use std::path::Path;
@@ -80,15 +81,18 @@ pub enum HistStatus {
 impl History {
 
     /// Open history database.
-    pub fn open<T: AsRef<Path>>(tp: &str, path: T) -> io::Result<History> {
-        let h = match tp {
+    pub fn open(tp: &str, path: impl AsRef<Path>) -> io::Result<History> {
+        let h : Box<HistBackend> = match tp {
             "diablo" => {
-                diablo::DHistory::open(path.as_ref())
+                Box::new(diablo::DHistory::open(path.as_ref())?)
+            },
+            "memdb" => {
+                Box::new(memdb::MemDb::new())
             },
             s => {
-                Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))
+                Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))?
             },
-        }?;
+        };
 
         let mut builder = futures_cpupool::Builder::new();
         builder.name_prefix("history-");
@@ -97,7 +101,7 @@ impl History {
         Ok(History{
             inner:  Arc::new(HistoryInner{
                 cache:  HCache::new(),
-                backend:    Box::new(h),
+                backend:    h,
                 cpu_pool:   builder.create(),
             })
         })
