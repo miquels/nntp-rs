@@ -1,0 +1,8 @@
+[package]
+name = "nntp-rs-util"
+version = "0.1.0"
+authors = ["mikevs <mikevs@xs4all.net>"]
+
+[dependencies]
+serde = "1.0.76"
+serde_derive = "1.0.76"
