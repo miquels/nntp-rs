@@ -9,6 +9,7 @@ use std::os::unix::fs::FileExt;
 
 use byteorder::ByteOrder;
 use byteorder::LittleEndian as LE;
+use parking_lot::RwLock;
 
 use nntp_rs_spool as spool;
 use {HistBackend,HistEnt,HistStatus};
@@ -16,7 +17,7 @@ use {HistBackend,HistEnt,HistStatus};
 #[derive(Debug)]
 pub(crate) struct DHistory {
     path:           PathBuf,
-    file:           fs::File,
+    file:           RwLock<fs::File>,
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
@@ -110,7 +111,7 @@ impl DHistory {
 
         Ok(DHistory{
             path:           path.to_owned(),
-            file:           f,
+            file:           RwLock::new(f),
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
@@ -366,11 +367,12 @@ impl HistBackend for DHistory {
         let mut counter = 0;
         let mut found = false;
 
-        let mut idx = read_u32_at(&self.path, &self.file, pos)?;
+        let file = self.file.read();
+        let mut idx = read_u32_at(&self.path, &*file, pos)?;
 
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.path, &self.file, pos)?;
+            dhe = read_dhistent_at(&self.path, &*file, pos)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -417,17 +419,19 @@ impl HistBackend for DHistory {
     }
 
     // store an article in the DHistry database
-    fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
         let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as u64;
         let bpos = DHISTHEAD_SIZE as u64 + bucket * 4;
 
-        let next = read_u32_at(&self.path, &self.file, bpos)?;
+        let mut file = self.file.write();
+
+        let next = read_u32_at(&self.path, &mut *file, bpos)?;
         let dhe = DHistEnt::new(he, hv, next);
 
         // file must be bigger than histhead + hashtable.
-        let mut pos = self.file.seek(io::SeekFrom::End(0))?;
+        let mut pos = file.seek(io::SeekFrom::End(0))?;
         if pos < self.data_offset {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                                       format!("{:?}: corrupt dhistory file", &self.path)));
@@ -437,8 +441,8 @@ impl HistBackend for DHistory {
         let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
         let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
 
-        write_dhistent_at(&self.path, &self.file, pos, dhe)?;
-        write_u32_at(&self.path, &self.file, bpos, idx as u32)?;
+        write_dhistent_at(&self.path, &mut *file, pos, dhe)?;
+        write_u32_at(&self.path, &mut *file, bpos, idx as u32)?;
 
         Ok(())
     }

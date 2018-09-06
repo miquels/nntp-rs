@@ -7,41 +7,48 @@
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
 extern crate byteorder;
-extern crate time;
-extern crate linked_hash_map;
+extern crate futures;
+extern crate futures_cpupool;
 extern crate nntp_rs_spool;
+extern crate parking_lot;
+extern crate time;
+
+#[cfg(test)]
+extern crate env_logger;
+
+use std::sync::Arc;
+
+use futures_cpupool::CpuPool;
+use futures::{Future,future};
 
 mod cache;
 mod diablo;
 
 use std::io;
-use std::sync::{Mutex,RwLock};
 use std::path::Path;
-use std::collections::HashSet;
 
 use nntp_rs_spool as spool;
 use cache::HCache;
 
+const PRECOMMIT_MAX_AGE: u32 = 10;
+
+type HistFuture = Future<Item=Option<HistEnt>, Error=io::Error> + Send;
+
 pub(crate) trait HistBackend: Send + Sync {
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;
-    fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()>;
+    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()>;
 }
 
 /// History database functionality.
+#[derive(Clone)]
 pub struct History {
-    inner:          RwLock<InnerHistory>,
-    upgrade_lock:   Mutex<bool>,
+    inner:      Arc<HistoryInner>,
 }
 
-struct CachedHistory {
-    backend:    Box<HistBackend>,
+pub struct HistoryInner {
     cache:      HCache,
-}
-
-struct InnerHistory {
-    db:         CachedHistory,
-    pc_cache:   HCache,
-    writing:    HashSet<Vec<u8>>,
+    backend:    Box<HistBackend>,
+    cpu_pool:   CpuPool,
 }
 
 /// One history entry.
@@ -60,6 +67,8 @@ pub enum HistStatus {
     Present,
     /// article not present yet but being received right now.
     Tentative,
+    /// article has been received, in flight to storage.
+    Writing,
     /// article not present.
     NotFound,
     /// article was present but has expired.
@@ -68,23 +77,8 @@ pub enum HistStatus {
     Rejected,
 }
 
-impl CachedHistory {
-    fn lookup(&self, msgid: &[u8], now: u64) -> io::Result<HistEnt> {
-        let he = self.cache.lookup(msgid, now);
-        if he.status != HistStatus::NotFound {
-            return Ok(he)
-        }
-        self.backend.lookup(msgid)
-    }
-
-    fn store(&mut self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
-        self.backend.store(msgid, he)?;
-        self.cache.store(msgid, he);
-        Ok(())
-    }
-}
-
 impl History {
+
     /// Open history database.
     pub fn open<T: AsRef<Path>>(tp: &str, path: T) -> io::Result<History> {
         let h = match tp {
@@ -95,135 +89,175 @@ impl History {
                 Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))
             },
         }?;
+
+        let mut builder = futures_cpupool::Builder::new();
+        builder.name_prefix("history-");
+        builder.pool_size(32);
+
         Ok(History{
-            inner: RwLock::new(InnerHistory{
-                db:         CachedHistory{
-                                backend:    Box::new(h),
-                                cache:      HCache::new(64000, 300),
+            inner:  Arc::new(HistoryInner{
+                cache:  HCache::new(),
+                backend:    Box::new(h),
+                cpu_pool:   builder.create(),
+            })
+        })
+    }
+
+    // Find an entry in the history database.
+    fn cache_lookup(&self, msgid: &str, check: bool, phase2: bool) -> Option<HistEnt> {
+        let mut partition = self.inner.cache.lock_partition(msgid);
+        if let Some((mut h, age)) = partition.lookup() {
+            match h.status {
+                HistStatus::Writing => {
+                    if check {
+                        // In the CHECK case, handle this as Tentative.
+                        h.status = HistStatus::Tentative;
+                    } else {
+                        // Otherwise as "not found"
+                        h.status = HistStatus::NotFound;
+                    }
+                    Some(h)
                 },
-                pc_cache:   HCache::new(8000, 30),
-                writing:    HashSet::new(),
-            }),
-            upgrade_lock:  Mutex::new(true),
+                HistStatus::Tentative => {
+                    if age > PRECOMMIT_MAX_AGE {
+                        // Not valid as tentative entry anymore, but we can
+                        // interpret it as a negative cache entry.
+                        h.status = HistStatus::NotFound;
+                        if check {
+                            partition.store_tentative();
+                        }
+                    }
+                    Some(h)
+                },
+                _ => Some(h),
+            }
+        } else {
+            if phase2 {
+                partition.store_tentative();
+            }
+            None
+        }
+    }
+
+    // Do not really need to Box the returned future, since we only
+    // ever return one type, so return impl Future. Unfortunately we cannot
+    // use `impl HistFuture' as return value. So spell it out.
+    fn backend_lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
+        let msgid = msgid.to_string().into_bytes();
+        let inner = self.inner.clone();
+        self.inner.cpu_pool.spawn_fn(move || {
+            match inner.backend.lookup(&msgid) {
+                Ok(he) => {
+                    if he.status == HistStatus::NotFound {
+                        future::ok(None)
+                    } else {
+                        future::ok(Some(he))
+                    }
+                },
+                Err(e) => future::err(e),
+            }
         })
     }
 
     /// Find an entry in the history database.
-    pub fn lookup<T: AsRef<[u8]>>(&self, msgid: T) -> io::Result<HistEnt> {
-        let inner = &*self.inner.read().unwrap();
-        let now = time::now_utc().to_timespec().sec as u64;
-        inner.db.lookup(msgid.as_ref(), now)
-    }
+    pub fn lookup(&self, msgid: &str) -> Box<HistFuture> {
 
-    /// Check if we want to receive an article (by message-id).
-    ///
-    /// Returns the status of the entry in the database.
-    /// If not present, mark the message-id in the precommit
-    /// database as being received imminently.
-    pub fn check<T: AsRef<[u8]>>(&self, msgid: T) -> io::Result<HistStatus> {
-
-        let mut upgrade_lock = None;
-        let msgid = msgid.as_ref();
-        let now;
-
-        {
-            let inner = &* self.inner.read().unwrap();
-
-            // check if this article is being written to spool right now.
-            if inner.writing.contains(msgid) {
-                return Ok(HistStatus::Tentative);
-            }
-
-            now = time::now_utc().to_timespec().sec as u64;
-
-            // check precommit-cache.
-            let he = inner.pc_cache.lookup(msgid, now);
-            if he.status == HistStatus::Tentative {
-                return Ok(HistStatus::Tentative);
-            }
-
-            // check history db
-            let he = inner.db.lookup(msgid, now)?;
-            if he.status != HistStatus::NotFound {
-                return Ok(he.status);
-            }
-
-            // not found, so insert a tentative entry into
-            // the precommit-cache. Need to upgrade the read lock
-            // to a read-write lock first. That means jumping
-            // through a few hoops until we have NLL.
-            let m = self.upgrade_lock.lock().unwrap();
-            upgrade_lock.get_or_insert(m);
+        // First check the cache.
+        if let Some(he) = self.cache_lookup(msgid, false, false) {
+            let f = if he.status == HistStatus::NotFound {
+                None
+            } else {
+                Some(he)
+            };
+            return Box::new(future::ok(f));
         }
 
-        let inner = &mut *self.inner.write().unwrap();
-        let he = HistEnt{
-            status:     HistStatus::Tentative,
-            time:       now,
-            head_only:  false,
-            location:   None,
-        };
-        inner.pc_cache.store(msgid, &he);
-
-        Ok(HistStatus::NotFound)
+        // Not in the cache. We have to do a lookup.
+        Box::new(self.backend_lookup(msgid))
     }
 
-    /// Try to reserve an entry in the history database.
-    ///
-    /// - check if this article is not already in the process of
-    ///   being written to the spool.
-    /// - then check if message-id already exists in history file
-    /// - finally mark article as "being written now".
-    ///
-    /// return true if caller can go ahead.
-    ///
-    /// caller can go ahead and save the article to a spool, then
-    /// call store_commit(), or store_rollback() in case of failure.
-    ///
-    pub fn store_reserve(&self, msgid: &[u8]) -> io::Result<(bool)> {
+    /// This is like `lookup', but it can return HistStatus::Tentative as well.
+    /// It will also put a Tentative entry in the history cache if we did not
+    /// have an entry for this message-id yet.
+    pub fn check(&self, msgid: &str) -> Box<HistFuture> {
 
-        let mut upgrade_lock = None;
-
-        {
-            let inner = &* self.inner.read().unwrap();
-
-            // check if article is already being written to spool
-            if inner.writing.contains(msgid) {
-                return Ok(false);
-            }
-
-            // check history database.
-            let now = time::now_utc().to_timespec().sec as u64;
-            let he = inner.db.lookup(msgid, now)?;
-            if he.status != HistStatus::NotFound {
-                return Ok(false);
-            }
-
-            // not yet in the history db, so mark article as
-            // in the process of being written to the spool.
-            let m = self.upgrade_lock.lock().unwrap();
-            upgrade_lock.get_or_insert(m);
+        // First check the cache.
+        if let Some(he) = self.cache_lookup(msgid, true, false) {
+            let f = if he.status == HistStatus::NotFound {
+                None
+            } else {
+                Some(he)
+            };
+            return Box::new(future::ok(f));
         }
 
-        let inner = &mut *self.inner.write().unwrap();
-        inner.writing.insert(msgid.to_vec());
-
-        Ok(true)
+        // Do a lookup, and after the lookup check the cache again.
+        let this = self.clone();
+        let msgid2 = msgid.to_string();
+        let f = self.backend_lookup(msgid)
+            .map(move |he| {
+                match he {
+                    Some(he) => Some(he),
+                    None => {
+                        match this.cache_lookup(&msgid2, true, true) {
+                            Some(he) => {
+                                if he.status == HistStatus::NotFound {
+                                    None
+                                } else {
+                                    Some(he)
+                                }
+                            },
+                            None => None,
+                        }
+                    }
+                }
+            });
+        Box::new(f)
     }
 
-    /// Called to roll back a "reserve" call.
-    pub fn store_unreserve(&self, msgid: &[u8]) {
-        let inner = &mut *self.inner.write().unwrap();
-        inner.writing.remove(msgid);
-        inner.pc_cache.remove(msgid);
+    /// We have received the article. Before we write it to the spool,
+    /// mark it in the cache with status "Writing".
+    pub fn store_begin(&mut self, msgid: &str) -> bool {
+        let mut partition = self.inner.cache.lock_partition(msgid);
+        if let Some((h, _age)) = partition.lookup() {
+            match h.status {
+                HistStatus::Present |
+                HistStatus::Writing |
+                HistStatus::Expired |
+                HistStatus::Rejected => return false,
+                HistStatus::Tentative |
+                HistStatus::NotFound => {},
+            }
+        }
+        partition.store_begin();
+        true
     }
 
-    /// Commit an entry to the history database.
-    pub fn store_final(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
-        let inner = &mut *self.inner.write().unwrap();
-        inner.writing.remove(msgid);
-        inner.pc_cache.remove(msgid);
-        inner.db.store(msgid, he)
+    /// Done writing to the spool. Update the cache-entry and write-through
+    /// to the backend storage.
+    pub fn store_commit(&mut self, msgid: &str, he: HistEnt) -> Box<Future<Item=bool, Error=io::Error>> {
+        {
+            let mut partition = self.inner.cache.lock_partition(msgid);
+            partition.store_commit(he.clone());
+        }
+        // XXX FIXME what if the store fails. Should probably add
+        // a .then to handle the situation.
+        let inner = self.inner.clone();
+        let msgid = msgid.to_string().into_bytes();
+        let f = self.inner.cpu_pool.spawn_fn(move || {
+            match inner.backend.store(&msgid, &he) {
+                Ok(()) => future::ok(true),
+                Err(e) => future::err(e),
+            }
+        });
+        Box::new(f)
+    }
+
+    /// Something went wrong writing to the spool. Cancel the reservation
+    /// in the cache.
+    pub fn store_rollback(&mut self, msgid: &str) {
+        let mut partition = self.inner.cache.lock_partition(msgid);
+        partition.store_rollback()
     }
 }
 
