@@ -1,6 +1,11 @@
+[server]
+listen = "[::]:1119"
+threads = 1
+
 [history]
 path = "/home/mikevs/tmp/dhistory"
 backend = "diablo"
+threads = 1
 
 [spool.0]
 backend = "diablo"

@@ -81,7 +81,7 @@ pub enum HistStatus {
 impl History {
 
     /// Open history database.
-    pub fn open(tp: &str, path: impl AsRef<Path>) -> io::Result<History> {
+    pub fn open(tp: &str, path: impl AsRef<Path>, threads: Option<usize>) -> io::Result<History> {
         let h : Box<HistBackend> = match tp {
             "diablo" => {
                 Box::new(diablo::DHistory::open(path.as_ref())?)
@@ -96,7 +96,7 @@ impl History {
 
         let mut builder = futures_cpupool::Builder::new();
         builder.name_prefix("history-");
-        builder.pool_size(32);
+        builder.pool_size(threads.unwrap_or(32));
 
         Ok(History{
             inner:  Arc::new(HistoryInner{

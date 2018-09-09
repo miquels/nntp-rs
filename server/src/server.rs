@@ -40,15 +40,15 @@ impl Server {
         trace!("main server running on thread {:?}", thread::current().id());
 
         // Now start a bunch of threads to serve the requests.
+        let num_threads = self.config.server.threads.unwrap_or(num_cpus::get());
         let mut threads = Vec::new();
 
         let addr = listener.local_addr().unwrap();
         let mut first = Some(listener);
 
         let server = Arc::new(self);
-        let num_cpus = num_cpus::get();
 
-        for _ in 0..num_cpus {
+        for _ in 0..num_threads {
 
             // The first listener is passed in, after that we need to
             // create extra listeners here.

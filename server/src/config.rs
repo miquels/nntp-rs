@@ -11,15 +11,24 @@ use toml;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
+    #[serde(default)]
+    pub server:     Server,
     pub spool:      HashMap<String, Spool>,
     pub metaspool:  Vec<MetaSpool>,
     pub history:    HistFile,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct Server {
+    pub listen:     Option<String>,
+    pub threads:    Option<usize>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct HistFile {
     pub path:       String,
     pub backend:    String,
+    pub threads:    Option<usize>,
 }
 
 pub fn read_config(name: &str) -> io::Result<Config> {
