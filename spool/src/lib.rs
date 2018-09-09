@@ -69,22 +69,23 @@ impl Backend {
 }
 
 /// Metaspool is a group of spools.
-#[derive(Deserialize,Default,Debug)]
-pub(crate) struct MetaSpool {
+#[derive(Clone,Deserialize,Default,Debug)]
+pub struct MetaSpool {
     pub spool:          Vec<u8>,
+    #[serde(default)]
     pub groups:         Vec<String>,
-    #[serde(deserialize_with = "util::deserialize_size")]
+    #[serde(default,deserialize_with = "util::deserialize_size")]
     pub maxsize:        u64,
-    #[serde(deserialize_with = "util::deserialize_duration")]
+    #[serde(default,deserialize_with = "util::deserialize_duration")]
     pub reallocint:     Duration,
-    #[serde(deserialize_with = "util::deserialize_bool")]
+    #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub dontstore:      bool,
-    #[serde(deserialize_with = "util::deserialize_bool")]
+    #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub rejectart:      bool,
     #[serde(skip)]
     last_spool:         u8,
 }
-pub(crate) type MetaSpoolCfg = MetaSpool;
+pub type MetaSpoolCfg = MetaSpool;
 
 /// Configuration for one spool instance.
 #[derive(Deserialize,Default,Debug,Clone)]
@@ -103,7 +104,7 @@ pub struct Spool {
 
 impl Spool {
     /// initialize all storage backends.
-    pub(crate) fn new(spoolcfg: HashMap<String, SpoolCfg>, metaspool: Vec<MetaSpool>) -> io::Result<Spool> {
+    pub fn new(spoolcfg: &HashMap<String, SpoolCfg>, metaspool: &Vec<MetaSpool>) -> io::Result<Spool> {
 
         // parse spool definitions.
         let mut m = HashMap::new();
@@ -129,7 +130,7 @@ impl Spool {
         }
         Ok(Spool{
             spool:      m,
-            metaspool:  Mutex::new(metaspool),
+            metaspool:  Mutex::new(metaspool.to_vec()),
         })
     }
 
