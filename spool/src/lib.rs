@@ -6,6 +6,8 @@
 #[macro_use] extern crate log;
 #[macro_use] extern crate serde_derive;
 extern crate byteorder;
+extern crate bytes;
+extern crate libc;
 extern crate nntp_rs_util as util;
 extern crate serde;
 extern crate time;
@@ -14,6 +16,8 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
+
+use bytes::BytesMut;
 
 mod diablo;
 
@@ -25,10 +29,16 @@ pub enum ArtPart {
     Article,
 }
 
-pub(crate) trait SpoolBackend: Send + Sync {
+/// Trait implemented by all spool backends.
+pub trait SpoolBackend: Send + Sync {
     fn get_type(&self) -> Backend;
-    fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<io::Read>>;
+    fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<ArtHandle>>;
     fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc>;
+}
+
+pub trait ArtHandle: Send +Sync {
+    /// Read header, body, or whole article into a BytesMut.
+    fn read(&mut self, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
 }
 
 #[derive(Clone)]
@@ -135,8 +145,8 @@ impl Spool {
     }
 
     /// Open one article. Based on ArtLoc, it finds the
-    /// right spool, and returns a "Read" handle.
-    pub fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<io::Read>> {
+    /// right spool, and returns an ArtHandle trait object.
+    pub fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<ArtHandle>> {
         let be = match self.spool.get(&art_loc.spool as &u8) {
             None => {
                 return Err(io::Error::new(io::ErrorKind::NotFound,
