@@ -1,13 +1,15 @@
 use std;
 use std::io;
 use std::mem;
+use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures_cpupool::CpuPool;
 use futures::{Future,future};
 
 use commands::{Cmd, CmdParser};
 use nntp_codec::{CodecMode, NntpCodecControl};
+use nntp_rs_history::HistStatus;
+use server::Server;
 
 enum NntpState {
     Cmd,
@@ -18,21 +20,21 @@ enum NntpState {
 
 pub struct NntpSession {
     state:          NntpState,
-    cpu_pool:       CpuPool,
     codec_control:  NntpCodecControl,
     parser:         CmdParser,
+    server:         Arc<Server>,
 }
 
 type NntpError = io::Error;
 type NntpFuture<T> = Box<Future<Item=T, Error=NntpError> + Send>;
 
 impl NntpSession {
-    pub fn new(pool: CpuPool, control: NntpCodecControl) -> NntpSession {
+    pub fn new(control: NntpCodecControl, server: Arc<Server>) -> NntpSession {
         NntpSession {
             state:          NntpState::Cmd,
-            cpu_pool:       pool,
             codec_control:  control,
             parser:         CmdParser::new(),
+            server:         server,
         }
     }
 
@@ -109,25 +111,42 @@ impl NntpSession {
         };
 
         match cmd {
-            Cmd::Help => {
-                return Box::new(future::ok(self.parser.help()));
-            },
             Cmd::Capabilities => {
                 return Box::new(future::ok(self.parser.capabilities()));
             },
-            Cmd::Quit => {
-                self.codec_control.quit();
-                return Box::new(future::ok(Bytes::from(&b"205 Bye\r\n"[..])));
+            Cmd::Help => {
+                return Box::new(future::ok(self.parser.help()));
+            },
+            Cmd::Ihave => {
+                self.state = NntpState::Ihave;
+                self.codec_control.set_rd_mode(CodecMode::ReadBlock);
+                return Box::new(future::ok(Bytes::from(&b"335 Send article; end with CRLF DOT CRLF\r\n"[..])));
             },
             Cmd::Post => {
                 self.state = NntpState::Post;
                 self.codec_control.set_rd_mode(CodecMode::ReadBlock);
                 return Box::new(future::ok(Bytes::from(&b"340 Submit article; end with CRLF DOT CRLF\r\n"[..])));
             },
-            Cmd::Ihave => {
-                self.state = NntpState::Ihave;
-                self.codec_control.set_rd_mode(CodecMode::ReadBlock);
-                return Box::new(future::ok(Bytes::from(&b"335 Send article; end with CRLF DOT CRLF\r\n"[..])));
+            Cmd::Quit => {
+                self.codec_control.quit();
+                return Box::new(future::ok(Bytes::from(&b"205 Bye\r\n"[..])));
+            },
+            Cmd::Stat => {
+                let msgid = args[0].to_string();
+                let f = self.server.history.lookup(args[0])
+                    .map(move |result| {
+                        let r = match result {
+                            None => "430 Not found\r\n".to_string(),
+                            Some(he) => {
+                                match &he.status {
+                                    &HistStatus::Present => format!("223 0 {}\r\n", msgid),
+                                    _ => format!("430 {:?}\r\n", he.status),
+                                }
+                            }
+                        };
+                        Bytes::from(r)
+                    });
+                return Box::new(f)
             },
             Cmd::Takethis => {
                 self.state = NntpState::TakeThis;

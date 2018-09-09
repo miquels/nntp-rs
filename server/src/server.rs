@@ -1,154 +1,131 @@
-use std::net::SocketAddr;
-use std::panic::{self, AssertUnwindSafe};
+use std::net::TcpListener;
+use std::panic::AssertUnwindSafe;
 use std::thread;
 use std::time::Duration;
 use std::io;
+use std::process::exit;
+use std::sync::Arc;
 
 use bytes::BytesMut;
-use env_logger;
-use futures_cpupool;
-use futures::{Future,future,Stream};
-use net2::{self,unix::UnixTcpBuilderExt};
+use futures::{Future,Stream};
+use num_cpus;
 use tk_listen::ListenExt;
 use tokio::prelude::*;
 use tokio;
 use tokio::runtime::current_thread;
 
+use bind_socket;
+use config::Config;
 use nntp_codec::NntpCodec;
+use nntp_rs_history::History;
+use nntp_rs_spool::Spool;
 use nntp_session::NntpSession;
 
-fn server() {
+pub struct Server {
+    pub history:    History,
+    pub spool:      Spool,
+    pub config:     Config,
+}
 
-    env_logger::init();
+impl Server {
 
-    // This hook mimics the standard logging hook, it adds some extra
-    // thread-id info, and logs to error!().
-    panic::set_hook(Box::new(|info| {
-        let mut msg = "".to_string();
-        let mut loc = "".to_string();
-        if let Some(s) = info.payload().downcast_ref::<&str>() {
-            msg = "'".to_string() + s + "', ";
-        }
-        if let Some(s) = info.payload().downcast_ref::<String>() {
-            msg = "'".to_string() + &s + "', ";
-        }
-        if let Some(l) = info.location() {
-            loc = format!("{}", l);
-        }
-        let t = thread::current();
-        let name = match t.name() {
-            Some(n) => format!("{} ({:?})", n, t.id()),
-            None => format!("{:?}", t.id()),
-        };
-        if msg == "" && loc == "" {
-            error!("thread '{}' panicked", name);
-        } else {
-            error!("thread '{}' panicked at {}{}", name, msg, loc);
-        }
-    }));
+    /// Create a new Server.
+    pub fn new(config: Config, history: History, spool: Spool) -> Server {
+        Server{ history, spool, config }
+    }
 
-    // pool to run blocking io on.
-    let mut builder = futures_cpupool::Builder::new();
-    builder.name_prefix("filesystem-io-");
-    builder.pool_size(4);
-    let pool = builder.create();
+    /// Run the server.
+    pub fn run(self, listener: TcpListener) -> io::Result<()> {
 
-    trace!("main server running on thread {:?}", thread::current().id());
+        trace!("main server running on thread {:?}", thread::current().id());
 
-    // Now start a bunch of threads to serve the requests.
-    let mut threads = Vec::new();
+        // Now start a bunch of threads to serve the requests.
+        let mut threads = Vec::new();
 
-    for _ in 0..4 {
+        let addr = listener.local_addr().unwrap();
+        let mut first = Some(listener);
 
-        // Bind a listener - multiple times to the same port.
-        let addr : SocketAddr = "0.0.0.0:12345".parse().unwrap();
-        let builder = net2::TcpBuilder::new_v4().expect("could not get IPv4 socket");
-        let builder = builder.reuse_port(true).expect("could not enable REUSE_PORT on socket");
-        let builder = builder.bind(&addr).expect("unable to bind TCP socket");
-        let listener = builder.listen(128).expect("unable to listen() on TCP socket");
+        let server = Arc::new(self);
+        let num_cpus = num_cpus::get();
 
-        let pool = pool.clone();
+        for _ in 0..num_cpus {
 
-        let tid = thread::spawn(move || {
+            // The first listener is passed in, after that we need to
+            // create extra listeners here.
+            let listener = if first.is_some() {
+                first.take().unwrap()
+            } else {
+                bind_socket(&addr).map_err(|e| {
+                    eprintln!("nntp-rs: server: fatal: {}", e);
+                    exit(1);
+                }).unwrap()
+            };
 
-            // tokio runtime for this thread alone.
-            let mut runtime = current_thread::Runtime::new().unwrap();
+            let server = server.clone();
 
-            trace!("current_thread::runtime on {:?}", thread::current().id());
-            let handle = tokio::reactor::Handle::current();
+            let tid = thread::spawn(move || {
 
-            let listener = tokio::net::TcpListener::from_std(listener, &handle)
-                .expect("cannot convert from net2 listener to tokio listener");
+                // tokio runtime for this thread alone.
+                let mut runtime = current_thread::Runtime::new().unwrap();
 
-            // Pull out a stream of sockets for incoming connections
-            let server = listener.incoming()
-                .map_err(|e| {
-                    error!("accept error = {:?}", e);
-                    // don't use .sleep_on_error since tokio_io_pool::Runtime
-                    // is dumb and does not support timers or other tokio goodies.
-                    thread::sleep(Duration::from_millis(100));
-                    e
-                })
-                .map(move |socket| {
+                trace!("current_thread::runtime on {:?}", thread::current().id());
+                let handle = tokio::reactor::Handle::current();
 
-                    // set up codec for reader and writer.
-                    let codec = NntpCodec::new(socket);
-                    let control = codec.control();
-                    let (writer, reader) = codec.split();
+                let listener = tokio::net::TcpListener::from_std(listener, &handle)
+                    .expect("cannot convert from net2 listener to tokio listener");
 
-                    // build an nntp session.
-                    let mut session = NntpSession::new(pool.clone(), control);
+                // Pull out a stream of sockets for incoming connections
+                let nntp_server = listener.incoming()
+                    .sleep_on_error(Duration::from_millis(100))
+                    .map(move |socket| {
 
-                    // fake an "initial command".
-                    let s = Box::new(stream::iter_ok::<_, io::Error>(vec![BytesMut::from(&b"CONNECT"[..])]));
+                        // set up codec for reader and writer.
+                        let codec = NntpCodec::new(socket);
+                        let control = codec.control();
+                        let (writer, reader) = codec.split();
 
-                    let responses = s.chain(reader).and_then(move |inbuf| {
-                        trace!("connection running on thread {:?}", thread::current().id());
-                        session.on_input(inbuf)
-                        /*
-                        // spawn on thread pool
-                        pool.spawn_fn(move || {
-                            let line = std::str::from_utf8(&inbuf[..]).unwrap();
-                            trace!("worker on thread {:?}", thread::current().id());
-                            debug!("got {}", line);
-                            let mut b = Bytes::new();
-                            b.extend_from_slice(line.as_bytes());
-                            future::ok(b)
+                        // build an nntp session.
+                        let mut session = NntpSession::new(control, server.clone());
+
+                        // fake an "initial command".
+                        let s = Box::new(stream::iter_ok::<_, io::Error>(vec![BytesMut::from(&b"CONNECT"[..])]));
+
+                        let responses = s.chain(reader).and_then(move |inbuf| {
+                            trace!("connection running on thread {:?}", thread::current().id());
+                            session.on_input(inbuf)
                         })
-                        */
+                        .map_err(|e| {
+                            warn!("got error from stream: {:?}", e);
+                            e
+                        });
+                        let session = writer.send_all(responses).map_err(|_| ()).map(|_| ());
+
+                        // catch panics and recover.
+                        let session = AssertUnwindSafe(session);
+                        tokio::spawn(session.catch_unwind().then(|result| {
+                            match result {
+                                Ok(f) => f,
+                                Err(_) => {
+                                    error!("thread panicked - recovering");
+                                    Ok(())
+                                },
+                            }
+                        }))
                     })
-                    .map_err(|e| {
-                        trace!("got error from stream: {:?}", e);
-                        e
-                    });
-                    let session = writer.send_all(responses).map_err(|_| ()).map(|_| ());
-                    let session = future::lazy(|| session);
+                    .listen(128);
 
-                    // catch panics and recover.
-                    let session = AssertUnwindSafe(session);
-                    tokio::spawn(session.catch_unwind().then(|result| {
-                        match result {
-                            Ok(f) => f,
-                            Err(_) => {
-                                error!("thread panicked - recovering");
-                                Ok(())
-                            },
-                        }
-                    }))
-                })
-                .listen(128);
+                // And spawn it on the thread-local runtime.
+                let _ = runtime.block_on(nntp_server);
+            });
 
-            // And spawn it on the thread-local runtime.
-            let _ = runtime.block_on(server);
-        });
+            threads.push(tid);
+        }
 
-        threads.push(tid);
+        // and wait for the threads to come home
+        for t in threads.into_iter() {
+            let _ = t.join();
+        }
+        Ok(())
     }
-
-    // and wait for the threads to come home
-    for t in threads.into_iter() {
-        let _ = t.join();
-    }
-
 }
 

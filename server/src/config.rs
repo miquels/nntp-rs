@@ -4,8 +4,8 @@ use std::io;
 use std::fs::File;
 use std::collections::HashMap;
 
-use backends::SpoolCfg as Spool;
-use backends::MetaSpoolCfg as MetaSpool;
+use nntp_rs_spool::SpoolCfg as Spool;
+use nntp_rs_spool::MetaSpoolCfg as MetaSpool;
 
 use toml;
 
