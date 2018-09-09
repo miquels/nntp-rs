@@ -22,8 +22,8 @@ use futures_cpupool::CpuPool;
 use futures::{Future,future};
 
 mod cache;
-mod diablo;
-mod memdb;
+pub mod diablo;
+pub mod memdb;
 
 use std::io;
 use std::path::Path;
@@ -146,7 +146,7 @@ impl History {
     // Do not really need to Box the returned future, since we only
     // ever return one type, so return impl Future. Unfortunately we cannot
     // use `impl HistFuture' as return value. So spell it out.
-    pub(crate) fn backend_lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
+    pub fn lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
         self.inner.cpu_pool.spawn_fn(move || {
@@ -170,7 +170,7 @@ impl History {
     }
 
     /// Find an entry in the history database.
-    pub fn lookup(&self, msgid: &str) -> Box<HistFuture> {
+    pub fn lookup_through_cache(&self, msgid: &str) -> Box<HistFuture> {
 
         // First check the cache.
         if let Some(he) = self.cache_lookup(msgid, false, false) {
@@ -183,7 +183,7 @@ impl History {
         }
 
         // Not in the cache. We have to do a lookup.
-        Box::new(self.backend_lookup(msgid))
+        Box::new(self.lookup(msgid))
     }
 
     /// This is like `lookup', but it can return HistStatus::Tentative as well.
@@ -204,7 +204,7 @@ impl History {
         // Do a lookup, and after the lookup check the cache again.
         let this = self.clone();
         let msgid2 = msgid.to_string();
-        let f = self.backend_lookup(msgid)
+        let f = self.lookup(msgid)
             .map(move |he| {
                 match he {
                     Some(he) => Some(he),
@@ -318,7 +318,7 @@ pub(crate) mod tests {
                 if let Err(e) = res {
                     panic!("store msgid: {:?}", e);
                 }
-                Box::new(h.backend_lookup(msgid))
+                Box::new(h.lookup(msgid))
             })
             .then(|res| {
                 match res {

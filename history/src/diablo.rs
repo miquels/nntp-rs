@@ -15,7 +15,7 @@ use nntp_rs_spool as spool;
 use {HistBackend,HistEnt,HistStatus};
 
 #[derive(Debug)]
-pub(crate) struct DHistory {
+pub struct DHistory {
     path:           PathBuf,
     file:           RwLock<fs::File>,
     hash_size:      u32,
