@@ -1,4 +1,4 @@
-
+use std;
 use std::io;
 use std::fs;
 use std::mem;
@@ -86,7 +86,7 @@ impl DHistory {
         // open file and read first 16 bytes into a DHistHead.
         let f = fs::File::open(path)?;
         let meta = f.metadata()?;
-        let dhh = read_dhisthead_at(path, &f, 0)?;
+        let dhh = read_dhisthead_at(&f, 0)?;
         debug!("{:?} - dhisthead: {:?}", path, &dhh);
 
         // see if header indicates this is a diablo history file.
@@ -204,23 +204,23 @@ fn crc_hash(crc_xor_table: &Vec<DHash>, msgid: &[u8]) -> DHash {
 }
 
 // helper
-fn read_dhisthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DHistHead> {
+fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
     let mut buf = [0u8; DHISTHEAD_SIZE];
     let n = file.read_at(&mut buf, pos)?;
     if n != DHISTHEAD_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("{:?}: short read", path)));
+                                  format!("read_dhisthead_at({}): short read ({})", pos, n)))
     }
     Ok(unsafe { mem::transmute(buf) })
 }
 
 // helper
-fn read_u32_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<u32> {
+fn read_u32_at(file: &fs::File, pos: u64, msgid: &[u8]) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     let n = file.read_at(&mut buf, pos)?;
     if n != 4 {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("{:?}: short read", path)));
+                                  format!("read_u32_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)));
     }
     Ok(unsafe { mem::transmute(buf) })
 }
@@ -232,12 +232,12 @@ fn write_u32_at<N: Debug>(_path: N, file: &fs::File, pos: u64, val: u32) -> io::
 }
 
 // helper
-fn read_dhistent_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DHistEnt> {
+fn read_dhistent_at(file: &fs::File, pos: u64, msgid: &[u8]) -> io::Result<DHistEnt> {
     let mut buf = [0u8; DHISTENT_SIZE];
     let n = file.read_at(&mut buf, pos)?;
     if n != DHISTENT_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("{:?}: short read", path)));
+                                  format!("read_dhistent_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)));
     }
     Ok(unsafe { mem::transmute(buf) })
 }
@@ -368,11 +368,11 @@ impl HistBackend for DHistory {
         let mut found = false;
 
         let file = self.file.read();
-        let mut idx = read_u32_at(&self.path, &*file, pos)?;
+        let mut idx = read_u32_at(&*file, pos, msgid)?;
 
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.path, &*file, pos)?;
+            dhe = read_dhistent_at(&*file, pos, msgid)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -427,7 +427,7 @@ impl HistBackend for DHistory {
 
         let mut file = self.file.write();
 
-        let next = read_u32_at(&self.path, &mut *file, bpos)?;
+        let next = read_u32_at(&mut *file, bpos, msgid)?;
         let dhe = DHistEnt::new(he, hv, next);
 
         // file must be bigger than histhead + hashtable.

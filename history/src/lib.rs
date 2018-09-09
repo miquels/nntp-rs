@@ -151,7 +151,7 @@ impl History {
         let inner = self.inner.clone();
         self.inner.cpu_pool.spawn_fn(move || {
             use std::thread;
-            debug!("history worker on thread {:?}", thread::current().id());
+            trace!("history worker on thread {:?}", thread::current().id());
             match inner.backend.lookup(&msgid) {
                 Ok(he) => {
                     if he.status == HistStatus::NotFound {
@@ -160,7 +160,11 @@ impl History {
                         future::ok(Some(he))
                     }
                 },
-                Err(e) => future::err(e),
+                Err(e) => {
+                    // we simply log an error and return not found.
+                    warn!("backend_lookup: {}", e);
+                    future::ok(None)
+                },
             }
         })
     }
@@ -245,7 +249,7 @@ impl History {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
-                error!("cache store_commit {} failed (fallen out of cache)", msgid);
+                warn!("cache store_commit {} failed (fallen out of cache)", msgid);
             }
         }
         let inner = self.inner.clone();
