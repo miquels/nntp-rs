@@ -14,6 +14,7 @@ use parking_lot::RwLock;
 use nntp_rs_spool as spool;
 use {HistBackend,HistEnt,HistStatus};
 
+/// Diablo compatible history file.
 #[derive(Debug)]
 pub struct DHistory {
     path:           PathBuf,
@@ -80,7 +81,7 @@ lazy_static! {
 
 impl DHistory {
 
-    // open existing history database
+    /// open existing history database
     pub fn open(path: &Path) -> io::Result<DHistory> {
 
         // open file and read first 16 bytes into a DHistHead.
@@ -119,7 +120,7 @@ impl DHistory {
         })
     }
 
-    // create a new history database, only if it doesn't exist yet.
+    /// create a new history database, only if it doesn't exist yet.
     pub fn create(path: &Path, num_buckets: u32) -> io::Result<()> {
 
         let mut file = fs::OpenOptions::new()
@@ -356,7 +357,7 @@ impl DHistEnt {
 
 impl HistBackend for DHistory {
 
-    // lookup an article in the DHistry database
+    /// lookup an article in the DHistory database
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
 
         let hv = crc_hash(self.crc_xor_table, msgid);
@@ -418,7 +419,7 @@ impl HistBackend for DHistory {
         })
     }
 
-    // store an article in the DHistry database
+    /// store an article in the DHistry database
     fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
         let hv = crc_hash(self.crc_xor_table, msgid);

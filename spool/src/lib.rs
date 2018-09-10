@@ -41,10 +41,16 @@ pub trait SpoolBackend: Send + Sync {
     fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc>;
 }
 
+/// Article location.
+/// A lookup in the history database for a message-id returns this struct,
+/// if succesfull
 #[derive(Clone)]
 pub struct ArtLoc {
+    /// Storage type, e.g. Backend::Diablo.
     pub storage_type:   Backend,
+    /// On what spool the article lives (0..99).
     pub spool:          u8,
+    /// The backend-specific, otherwise opaque, storage-token.
     pub token:          Vec<u8>,
 }
 
@@ -59,13 +65,16 @@ impl std::fmt::Debug for ArtLoc {
 }
 
 
+/// Backend storage, e.g. Backend::Diablo, or Backend::Cyclic.
 #[derive(Debug,PartialEq,Clone,Copy)]
 #[repr(u8)]
 pub enum Backend {
+    /// Diablo spool
     Diablo = 0,
-    Reject = 253,
-    DontStore = 254,
-    Unknown = 255,
+    /// Cyclic storage
+    Cyclic = 1,
+    /// Unknown storage (when converting from values >=2)
+    Unknown = 15,
 }
 
 impl Backend {
@@ -73,6 +82,7 @@ impl Backend {
     pub fn from_u8(t: u8) -> Backend {
         match t {
             0 => Backend::Diablo,
+            1 => Backend::Cyclic,
             _ => Backend::Unknown,
         }
     }
@@ -81,17 +91,36 @@ impl Backend {
 /// Metaspool is a group of spools.
 #[derive(Clone,Deserialize,Default,Debug)]
 pub struct MetaSpool {
-    pub spool:          Vec<u8>,
+    /// Allocation strategy: sequential, space, single, weighted.
+    pub allocstrat:     String,
+    /// Article types: control, cancel, binary, base64, yenc etc.
     #[serde(default)]
-    pub groups:         Vec<String>,
-    #[serde(default,deserialize_with = "util::deserialize_size")]
-    pub maxsize:        u64,
-    #[serde(default,deserialize_with = "util::deserialize_duration")]
-    pub reallocint:     Duration,
+    pub arttypes:       String,
+    /// Accept articles that match this metaspool but discard them.
     #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub dontstore:      bool,
+    /// Match articles on Newsgroups: line.
+    #[serde(default)]
+    pub groups:         Vec<String>,
+    /// Match articles on the hash of their message-id.
+    #[serde(default)]
+    pub hashfeed:       String,
+    /// Match based on where we received this article from (label from newsfeeds file).
+    #[serde(default)]
+    pub label:          Vec<String>,
+    /// Match articles if they are smaller than N
+    #[serde(default,deserialize_with = "util::deserialize_size")]
+    pub maxsize:        u64,
+    /// Match articles if they are crossposted in less than N groups
+    #[serde(default)]
+    pub maxcross:       u32,
+    #[serde(default,deserialize_with = "util::deserialize_duration")]
+    pub reallocint:     Duration,
+    /// Spools in this metaspool
+    pub spool:          Vec<u8>,
     #[serde(default,deserialize_with = "util::deserialize_bool")]
-    pub rejectart:      bool,
+    pub rejectarts:     bool,
+
     #[serde(skip)]
     last_spool:         u8,
 }
@@ -100,10 +129,28 @@ pub type MetaSpoolCfg = MetaSpool;
 /// Configuration for one spool instance.
 #[derive(Deserialize,Default,Debug,Clone)]
 pub struct SpoolCfg {
+    /// Backend to use: diablo, cyclic.
     pub backend:    String,
+    /// Path to directory (for diablo) or file/blockdev (for cyclic)
     pub path:       String,
-    #[serde(deserialize_with = "util::option_deserialize_size")]
-    pub minfree:    Option<u64>,
+    /// Weight of this spool.
+    #[serde(default)]
+    pub weight:     u32,
+    /// diablo: minimum free diskspace (K/KB/KiB/M/MB/MiB/G/GB/GiB)
+    #[serde(default, deserialize_with = "util::deserialize_size")]
+    pub minfree:    u64,
+    /// diablo: use an extra level of directories for this spool.
+    #[serde(default)]
+    pub spooldirs:  u32,
+    /// diablo: minimum number of free inodes on this FS.
+    #[serde(default)]
+    pub minfreefiles:   u32,
+    /// diablo: maximum diskspace in use for this spool object (K/KB/KiB/M/MB/MiB/G/GB/GiB)
+    #[serde(default, deserialize_with = "util::deserialize_size")]
+    pub maxsize:    u64,
+    /// diablo: amount of time to keep articles (seconds, or suffix with s/m/h/d).
+    #[serde(default, deserialize_with = "util::deserialize_duration")]
+    pub keeptime:   Duration,
 }
 
 /// Article storage (spool) functionality.
@@ -113,7 +160,7 @@ pub struct Spool {
     inner:      Arc<SpoolInner>,
 }
 
-/// Article storage (spool) functionality.
+// Inner stuff.
 struct SpoolInner {
     spool:      HashMap<u8, Box<SpoolBackend>>,
     metaspool:  Mutex<Vec<MetaSpool>>,

@@ -2,6 +2,7 @@
 //!
 //! Types currently supported:
 //!   - diablo
+//!   - memdb
 //!
 
 #[macro_use] extern crate lazy_static;
@@ -35,8 +36,11 @@ const PRECOMMIT_MAX_AGE: u32 = 10;
 
 type HistFuture = Future<Item=Option<HistEnt>, Error=io::Error> + Send;
 
-pub(crate) trait HistBackend: Send + Sync {
+/// Functionality a backend history database needs to make available.
+pub trait HistBackend: Send + Sync {
+    /// Look an entry up in the history database.
     fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;
+    /// Store an entry (an existing entry will be updated).
     fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()>;
 }
 
@@ -46,7 +50,7 @@ pub struct History {
     inner:      Arc<HistoryInner>,
 }
 
-pub struct HistoryInner {
+struct HistoryInner {
     cache:      HCache,
     backend:    Box<HistBackend>,
     cpu_pool:   CpuPool,
@@ -55,9 +59,13 @@ pub struct HistoryInner {
 /// One history entry.
 #[derive(Debug, Clone)]
 pub struct HistEnt {
+    /// Present, Expired, etc.
     pub status:     HistStatus,
+    /// Unixtime when article was received.
     pub time:       u64,
+    /// Whether this article was received via MODE HEADFEED.
     pub head_only:  bool,
+    /// Location in the article spool.
     pub location:   Option<spool::ArtLoc>,
 }
 
@@ -143,9 +151,8 @@ impl History {
         }
     }
 
-    // Do not really need to Box the returned future, since we only
-    // ever return one type, so return impl Future. Unfortunately we cannot
-    // use `impl HistFuture' as return value. So spell it out.
+    /// Find an entry in the history database. This lookup ignores the
+    /// write-cache, it goes straight to the backend.
     pub fn lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
@@ -169,7 +176,9 @@ impl History {
         })
     }
 
-    /// Find an entry in the history database.
+    /// Find an entry in the history database. This lookup first check the
+    /// write-cache, and if an entry is not found there, queries the
+    /// backend database.
     pub fn lookup_through_cache(&self, msgid: &str) -> Box<HistFuture> {
 
         // First check the cache.
@@ -186,7 +195,7 @@ impl History {
         Box::new(self.lookup(msgid))
     }
 
-    /// This is like `lookup', but it can return HistStatus::Tentative as well.
+    /// This is like `lookup_through_cache`, but it can return HistStatus::Tentative as well.
     /// It will also put a Tentative entry in the history cache if we did not
     /// have an entry for this message-id yet.
     pub fn check(&self, msgid: &str) -> Box<HistFuture> {
