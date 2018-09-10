@@ -36,9 +36,23 @@ pub enum ArtPart {
 
 /// Trait implemented by all spool backends.
 pub trait SpoolBackend: Send + Sync {
+    /// Get the type. E.g. Backend::Diablo.
     fn get_type(&self) -> Backend;
+
+    /// Boilerplate method to let Box<BackendImplementation>::clone() work.
+    fn box_clone(&self) -> Box<SpoolBackend>;
+
+    /// Read one article from the spool.
     fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
-    fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc>;
+
+    /// Write an article to the spool.
+    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc>;
+
+    /// In case the spool has state (like diablo), flush and close any open
+    /// handles and reset the state. Diablo needs this after 'reallocint' seconds.
+    fn write_realloc(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Article location.
@@ -114,6 +128,7 @@ pub struct MetaSpool {
     /// Match articles if they are crossposted in less than N groups
     #[serde(default)]
     pub maxcross:       u32,
+    /// diablo: spool reallocation interval (default 10m).
     #[serde(default,deserialize_with = "util::deserialize_duration")]
     pub reallocint:     Duration,
     /// Spools in this metaspool
@@ -151,6 +166,9 @@ pub struct SpoolCfg {
     /// diablo: amount of time to keep articles (seconds, or suffix with s/m/h/d).
     #[serde(default, deserialize_with = "util::deserialize_duration")]
     pub keeptime:   Duration,
+
+    #[serde(skip)]
+    spool_no:       u8,
 }
 
 /// Article storage (spool) functionality.
@@ -181,9 +199,12 @@ impl Spool {
                 },
             };
 
+            let mut cfg_c = cfg.clone();
+            cfg_c.spool_no = n;
+
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    diablo::DSpool::new(&cfg, n)
+                    diablo::DSpool::new(cfg_c)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,

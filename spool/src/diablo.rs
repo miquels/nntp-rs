@@ -4,7 +4,7 @@ use std::io::{BufRead,BufReader,Read,Write,Seek,SeekFrom};
 use std::fs;
 use std::mem;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc,Mutex};
 
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
@@ -17,18 +17,29 @@ use time;
 
 use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolCfg};
 
-pub(crate) struct DSpool {
+/// A diablo spool instance.
+///
+/// Can be used for reading and writing articles from/to this spool.
+///
+/// It might contain one open file, the file that is currently being
+/// used to write articles to for the owner of this struct.
+pub struct DSpool {
     path:       PathBuf,
     spool_no:   u8,
-    reallocint: u64,
-    // FIXME: for writing, support having "n" spoolfiles open.
-    inner:      Mutex<DSpoolFile>,
-    //minfree:    u64,
+    cfg:        Arc<SpoolCfg>,
+    writer:     Arc<Mutex<DSpoolFile>>,
+}
+
+// Clone implementation for DSpool.
+impl Clone for DSpool {
+    fn clone(&self) -> DSpool {
+        DSpool::new_dspool(self.cfg.clone())
+    }
 }
 
 // A spoolfile.
+#[derive(Default)]
 struct DSpoolFile {
-    time:       u64,
     file:       u16,
     dir:        u32,
     size:       u32,
@@ -176,21 +187,22 @@ impl<T: Read> Read for CrlfXlat<T> {
 }
 
 impl DSpool {
-    pub fn new(cfg: &SpoolCfg, spool_no: u8) -> io::Result<Box<SpoolBackend>> {
-        Ok(Box::new(DSpool{
+
+    fn new_dspool(cfg: Arc<SpoolCfg>) -> DSpool {
+        DSpool{
             path:       PathBuf::from(cfg.path.clone()),
-            spool_no:   spool_no,
-            reallocint: 600,
-            inner:      Mutex::new(DSpoolFile{
-                            time:   0,
-                            file:   0,
-                            dir:    0,
-                            size:   0,
-                            fh:     None,
-                        }),
-        }))
+            spool_no:   cfg.spool_no,
+            cfg:        cfg,
+            writer:     Arc::new(Mutex::new(DSpoolFile::default())),
+        }
     }
 
+    pub fn new(cfg: SpoolCfg) -> io::Result<Box<SpoolBackend>> {
+        Ok(Box::new(DSpool::new_dspool(Arc::new(cfg))))
+    }
+
+    // locate file that holds the article, open it, read the DArtHead struct,
+    // and return the info.
     fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
 
         let loc = to_location(art_loc);
@@ -245,10 +257,22 @@ impl DSpool {
     }
 }
 
+/// SpoolBackend::clone() calls box_clone() on the underlying struct.
+impl Clone for Box<SpoolBackend>
+{
+    fn clone(&self) -> Box<SpoolBackend> {
+        self.box_clone()
+    }
+}
+
 impl SpoolBackend for DSpool {
 
     fn get_type(&self) -> Backend {
         Backend::Diablo
+    }
+
+    fn box_clone(&self) -> Box<SpoolBackend> {
+        Box::new(self.clone())
     }
 
     fn read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: &mut BytesMut) -> io::Result<()> {
@@ -286,29 +310,26 @@ impl SpoolBackend for DSpool {
         Ok(())
     }
 
-    fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc> {
+    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
 
-        // if file is open, see how long we've had it opened. If it's more
-        // than reallocint (default 10 mins) close it and open a new file.
-        // Same if file is > 1GB.
-        let now = time::now_utc().to_timespec().sec as u64;
-        let inner = &mut * self.inner.lock().unwrap();
-        if inner.fh.is_some() {
-            if now - inner.time > self.reallocint || inner.size > 1000000000 {
-                inner.fh.take();
-                inner.size = 0;
+        // if the file is >1GB, close and allocate a new file.
+        let writer = &mut *self.writer.lock().unwrap();
+        if writer.fh.is_some() {
+            if writer.size > 1000000000 {
+                writer.fh.take();
+                writer.size = 0;
             }
         }
 
         // see if we need to create a new file.
-        if inner.fh.is_none() {
+        if writer.fh.is_none() {
 
             // create directory
-            inner.time = now;
-            inner.dir = (now / 60) as u32;
-            inner.dir -= inner.dir % 10;
+            let now = time::now_utc().to_timespec().sec as u64;
+            writer.dir = (now / 60) as u32;
+            writer.dir -= writer.dir % 10;
             let mut path = self.path.clone();
-            path.push(format!("D.{:08x}", inner.dir));
+            path.push(format!("D.{:08x}", writer.dir));
             if let Err(e) = fs::create_dir(&path) {
                 if e.kind() != io::ErrorKind::AlreadyExists {
                     return Err(e);
@@ -316,15 +337,15 @@ impl SpoolBackend for DSpool {
             }
 
             // create file
-            inner.size = 0;
-            inner.file = (now & 0x7fff) as u16;
+            writer.size = 0;
+            writer.file = (now & 0x7fff) as u16;
 
             for _ in 0..1000 {
                 let mut name = path.clone();
-                name.push(format!("B.{:04x}", inner.file));
+                name.push(format!("B.{:04x}", writer.file));
                 match fs::OpenOptions::new().write(true).create_new(true).open(name) {
                     Ok(fh) => {
-                        inner.fh = Some(fh);
+                        writer.fh = Some(fh);
                         break;
                     },
                     Err(e) => {
@@ -333,18 +354,18 @@ impl SpoolBackend for DSpool {
                         }
                     }
                 }
-                inner.file = ((inner.file as u32 + 1) & 0x7fff) as u16;
+                writer.file = ((writer.file as u32 + 1) & 0x7fff) as u16;
             }
 
             // success?
-            if inner.fh.is_none() {
+            if writer.fh.is_none() {
                 return Err(io::Error::new(io::ErrorKind::Other, "cannot create spool file"));
             }
         }
 
-        let pos = inner.size;
+        let pos = writer.size;
         let store_len = (DARTHEAD_SIZE + art.len() + 1) as u32;
-        let mut fh = inner.fh.take().unwrap();
+        let mut fh = writer.fh.take().unwrap();
 
         // write header.
         let mut ah = DArtHead::default();
@@ -357,30 +378,25 @@ impl SpoolBackend for DSpool {
         ah.art_len = art.len() as u32;
         ah.store_len = store_len;
         let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
-        if let Err(e) = fh.write_all(&buf) {
-            return Err(e);
-        }
-        inner.size += DARTHEAD_SIZE as u32;
+        fh.write_all(&buf)?;
+        writer.size += DARTHEAD_SIZE as u32;
 
         // and article itself.
-        if let Err(e) = fh.write_all(art) {
-            return Err(e);
-        }
-        inner.size += art.len() as u32;
+        fh.write_all(art)?;
+        writer.size += art.len() as u32;
 
         // add \0 at the end
-        if let Err(e) = fh.write(b"\0") {
-            return Err(e);
-        }
-        inner.size += 1;
-        inner.fh.get_or_insert(fh);
+        fh.write(b"\0")?;
+        writer.size += 1;
+
+        writer.fh.get_or_insert(fh);
 
         // build storage token
         let t = from_location(DArtLocation{
-            dir:    inner.dir,
-            file:   inner.file,
+            dir:    writer.dir,
+            file:   writer.file,
             pos:    pos as u32,
-            size:   store_len,
+            size:   store_len - 1,
         });
 
         // return article location
@@ -389,6 +405,15 @@ impl SpoolBackend for DSpool {
             spool:          self.spool_no,
             token:          t,
         })
+    }
+
+    fn write_realloc(&self) -> io::Result<()> {
+        let writer = &mut *self.writer.lock().unwrap();
+        if writer.fh.is_some() {
+            writer.fh.take();
+            writer.size = 0;
+        }
+        Ok(())
     }
 }
 
