@@ -7,6 +7,8 @@
 #[macro_use] extern crate serde_derive;
 extern crate byteorder;
 extern crate bytes;
+extern crate futures_cpupool;
+extern crate futures;
 extern crate libc;
 extern crate nntp_rs_util as util;
 extern crate serde;
@@ -14,31 +16,29 @@ extern crate time;
 
 use std::io;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc,Mutex};
 use std::time::Duration;
 
 use bytes::BytesMut;
+use futures_cpupool::CpuPool;
+use futures::{Future,future};
 
 mod diablo;
 
 /// Which part of the article to process: body/head/all
 #[derive(Debug,Clone,Copy,PartialEq)]
 pub enum ArtPart {
+    Article,
     Body,
     Head,
-    Article,
+    Stat,
 }
 
 /// Trait implemented by all spool backends.
 pub trait SpoolBackend: Send + Sync {
     fn get_type(&self) -> Backend;
-    fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<ArtHandle>>;
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
     fn write(&self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc>;
-}
-
-pub trait ArtHandle: Send +Sync {
-    /// Read header, body, or whole article into a BytesMut.
-    fn read(&mut self, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
 }
 
 #[derive(Clone)]
@@ -107,7 +107,14 @@ pub struct SpoolCfg {
 }
 
 /// Article storage (spool) functionality.
+#[derive(Clone)]
 pub struct Spool {
+    cpu_pool:   CpuPool,
+    inner:      Arc<SpoolInner>,
+}
+
+/// Article storage (spool) functionality.
+struct SpoolInner {
     spool:      HashMap<u8, Box<SpoolBackend>>,
     metaspool:  Mutex<Vec<MetaSpool>>,
 }
@@ -138,23 +145,37 @@ impl Spool {
             }?;
             m.insert(n as u8, be);
         }
+
+        let mut builder = futures_cpupool::Builder::new();
+        builder.name_prefix("spool-");
+        builder.pool_size(64);
+
         Ok(Spool{
-            spool:      m,
-            metaspool:  Mutex::new(metaspool.to_vec()),
+            inner: Arc::new(SpoolInner{
+                spool:      m,
+                metaspool:  Mutex::new(metaspool.to_vec()),
+            }),
+            cpu_pool:   builder.create(),
         })
     }
 
-    /// Open one article. Based on ArtLoc, it finds the
-    /// right spool, and returns an ArtHandle trait object.
-    pub fn open(&self, art_loc: &ArtLoc, part: ArtPart) -> io::Result<Box<ArtHandle>> {
-        let be = match self.spool.get(&art_loc.spool as &u8) {
-            None => {
-                return Err(io::Error::new(io::ErrorKind::NotFound,
+    pub fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> impl Future<Item=BytesMut, Error=io::Error> + Send {
+        let inner = self.inner.clone();
+        self.cpu_pool.spawn_fn(move || {
+            use std::thread;
+             trace!("history worker on thread {:?}", thread::current().id());
+            let be = match inner.spool.get(&art_loc.spool as &u8) {
+                None => {
+                    return future::err(io::Error::new(io::ErrorKind::NotFound,
                                    format!("spool {} not found", art_loc.spool)));
-            },
-            Some(be) => be,
-        };
-        be.open(art_loc, part)
+                },
+                Some(be) => be,
+            };
+            match be.read(&art_loc, part, &mut buf) {
+                Ok(()) => future::ok(buf),
+                Err(e) => future::err(e),
+            }
+        })
     }
 
     /// save one article.

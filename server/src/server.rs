@@ -112,7 +112,7 @@ impl Server {
                             }
                         }))
                     })
-                    .listen(128);
+                    .listen(65524);
 
                 // And spawn it on the thread-local runtime.
                 let _ = runtime.block_on(nntp_server);

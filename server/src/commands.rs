@@ -80,17 +80,17 @@ macro_rules! cmd {
 
 // And here it is actually generated.
 cmd!{
-    ( "article",            Article,            0, 1, Capb::Always,          "[%M]" ),
+    ( "article",            Article,            0, 1, Capb::Reader,          "[%M]" ),
     ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
     ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
     ( "authinfo",           Authinfo,           1, 0, Capb::Authinfo,        "" ),
-    ( "body",               Body,               0, 1, Capb::Always,          "[%M]" ),
+    ( "body",               Body,               0, 1, Capb::Reader,          "[%M]" ),
     ( "capabilities",       Capabilities,       0, 1, Capb::Always,          "[keyword]" ),
     ( "check",              Check,              1, 1, Capb::Streaming,       "%m" ),
     ( "date",               Date,               0, 0, Capb::Always,          "" ),
     ( "group",              Group,              1, 1, Capb::Reader,          "newsgroup" ),
     ( "hdr",                Hdr ,               3, 3, Capb::Hdr,             "[%R]" ),
-    ( "Head",               Head,               0, 1, Capb::Always,          "[%M]" ),
+    ( "head",               Head,               0, 1, Capb::Always,          "[%M]" ),
     ( "help",               Help,               0, 0, Capb::Always,          "" ),
     ( "ihave",              Ihave,              1, 1, Capb::Ihave,           "%m" ),
     ( "last",               Last,               0, 0, Capb::Reader,          "" ),

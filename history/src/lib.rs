@@ -62,7 +62,7 @@ pub struct HistEnt {
 }
 
 /// Status of a history entry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HistStatus {
     /// article is present
     Present,
