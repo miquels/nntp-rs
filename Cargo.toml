@@ -1,22 +1,7 @@
 [package]
-name = "nntp"
+name = "nntp-rs"
 version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 
 [workspace]
-members = [ "backends" ]
-
-[dependencies]
-backends = { path = "backends" }
-lazy_static = "1.0.0"
-toml = "0.4.6"
-serde = "1.0"
-serde_derive = "1.0"
-log = "0.3"
-memchr = "2.0.1"
-libc = "0.2.40"
-
-# for bin/*
-env_logger = "0.4"
-clap = "2.29.4"
-time = "0.1.39"
+members = [ "history", "server", "spool", "util" ]
