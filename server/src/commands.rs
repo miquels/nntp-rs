@@ -21,13 +21,12 @@ pub enum Capb {
     StartTls        = 0x00200,
     Streaming       = 0x00400,
     Version         = 0x00800,
-    XPat            = 0x01000,
-    ListActive      = 0x02000,
-    ListActiveTimes = 0x04000,
-    ListDistribPats = 0x08000,
-    ModeHeadfeed    = 0x10000,
-    ModeReader      = 0x20000,
-    ModeStream      = 0x40000,
+    ListActive      = 0x01000,
+    ListActiveTimes = 0x02000,
+    ListDistribPats = 0x04000,
+    ModeHeadfeed    = 0x08000,
+    ModeReader      = 0x10000,
+    ModeStream      = 0x20000,
 }
 
 #[derive(Debug)]
@@ -83,7 +82,7 @@ cmd!{
     ( "article",            Article,            0, 1, Capb::Reader,          "[%M]" ),
     ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
     ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
-    ( "authinfo",           Authinfo,           1, 0, Capb::Authinfo,        "" ),
+    ( "authinfo",           Authinfo,           1, 0, Capb::Never   ,        "" ),
     ( "body",               Body,               0, 1, Capb::Reader,          "[%M]" ),
     ( "capabilities",       Capabilities,       0, 1, Capb::Always,          "[keyword]" ),
     ( "check",              Check,              1, 1, Capb::Streaming,       "%m" ),
@@ -116,7 +115,7 @@ cmd!{
     ( "takethis",           Takethis,           1, 1, Capb::Streaming,       "%m" ),
     ( "xhdr",               XHdr ,              3, 3, Capb::Hdr,             "[%R]" ),
     ( "xover",              XOver,              0, 1, Capb::Over,            "[%r]" ),
-    ( "xpat",               XPat,               3, 0, Capb::XPat,            "header %R pattern [pattern..]" )
+    ( "xpat",               XPat,               3, 0, Capb::Hdr,             "header %R pattern [pattern..]" )
 }
 
 // initialize globals.
@@ -294,7 +293,7 @@ impl CmdParser {
             out.put("MODE-READER\r\n");
         }
         if (self.caps & Capb::NewNews as usize) > 0 {
-            out.put("NEWSNEWS\r\n");
+            out.put("NEWNEWS\r\n");
         }
         if (self.caps & Capb::Over as usize) > 0 {
             out.put("OVER\r\n");
