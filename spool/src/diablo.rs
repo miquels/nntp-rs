@@ -1,10 +1,12 @@
 
+use std::fs;
 use std::io;
 use std::io::{BufRead,BufReader,Read,Write,Seek,SeekFrom};
-use std::fs;
 use std::mem;
 use std::path::PathBuf;
-use std::sync::{Arc,Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize,Ordering};
+use std::time::{Duration,SystemTime};
 
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
@@ -12,48 +14,39 @@ use std::os::unix::fs::FileExt;
 use byteorder::{ByteOrder,LE};
 use bytes::{BufMut,BytesMut};
 use libc;
+use parking_lot::{Mutex,RwLock};
 
 use time;
 
 use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolCfg};
 
+const MAX_WRITERS : usize = 16;
+
 /// A diablo spool instance.
 ///
 /// Can be used for reading and writing articles from/to this spool.
-///
-/// It might contain one open file, the file that is currently being
-/// used to write articles to for the owner of this struct.
 pub struct DSpool {
     path:       PathBuf,
     spool_no:   u8,
+    reallocint: u64,
     cfg:        Arc<SpoolCfg>,
-    writer:     Arc<Mutex<DSpoolFile>>,
+    writers:    RwLock<Arc<Writers>>,
 }
 
-// Clone implementation for DSpool.
-impl Clone for DSpool {
-    fn clone(&self) -> DSpool {
-        DSpool::new_dspool(self.cfg.clone())
-    }
+// Files we have open for writing.
+#[derive(Default)]
+struct Writers {
+    files:      [Mutex<DSpoolFile>; MAX_WRITERS],
+    sizes:      [AtomicUsize; MAX_WRITERS],
+    slot:       u64,
 }
 
-// A spoolfile.
+// A spoolfile being written to (if fh.is_some())
 #[derive(Default)]
 struct DSpoolFile {
     file:       u16,
     dir:        u32,
-    size:       u32,
     fh:         Option<fs::File>,
-}
-
-// article location, this struct is serialized/deserialized
-// in the entry for this article in the history file.
-#[derive(Debug)]
-struct DArtLocation {
-    dir:    u32,
-    file:   u16,
-    pos:    u32,
-    size:   u32,
 }
 
 // Article header. This struct is stored on disk followed by the article.
@@ -86,6 +79,16 @@ struct DArtHead {
 }
 const DARTHEAD_SIZE : usize = 24;
 
+// article location, this struct is serialized/deserialized
+// in the entry for this article in the history file.
+#[derive(Debug)]
+struct DArtLocation {
+    dir:    u32,
+    file:   u16,
+    pos:    u32,
+    size:   u32,
+}
+
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
     let mins = LE::read_u32(&t[10..14]);
@@ -114,6 +117,312 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
                                   format!("{:?}: short read", path)));
     }
     Ok(unsafe { mem::transmute(buf) })
+}
+
+/// This is the main backend implementation.
+impl DSpool {
+
+    /// Create a new diablo-type spool backend.
+    pub fn new(cfg: SpoolCfg, reallocint: Option<Duration>) -> io::Result<Box<SpoolBackend>> {
+        let reallocint = reallocint.unwrap_or(Duration::from_secs(600));
+        let ds = DSpool{
+            path:       PathBuf::from(cfg.path.clone()),
+            spool_no:   cfg.spool_no,
+            reallocint: reallocint.as_secs(),
+            cfg:        Arc::new(cfg),
+            writers:    RwLock::new(Arc::new(Writers::default())),
+        };
+        Ok(Box::new(ds))
+    }
+
+    // locate file that holds the article, open it, read the DArtHead struct,
+    // and return the info.
+    fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
+
+        let loc = to_location(art_loc);
+        debug!("art location: {:?}", loc);
+        let flnm = format!("D.{:08x}/B.{:04x}", loc.dir, loc.file);
+        let mut path = self.path.clone();
+        path.push(flnm);
+        let file = fs::File::open(&path)?;
+
+        // tell kernel to read the headers, or the entire file.
+        let size = match part {
+            ArtPart::Stat => 0,
+            ArtPart::Head => 16384,
+            ArtPart::Article | ArtPart::Body => loc.size,
+        };
+        if size > 0 {
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                libc::posix_fadvise(file.as_raw_fd(), loc.pos as libc::off_t,
+                                size as libc::off_t, libc::POSIX_FADV_WILLNEED);
+            }
+        }
+
+        let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
+
+        debug!("art header: {:?}", dh);
+
+        // lots of sanity checks !
+        if dh.magic1 != 0xff || dh.magic2 != 0x99 ||
+            dh.version != 1 || dh.head_len != 24 {
+            warn!("read({:?}): bad magic in header", dh);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic in header"));
+        }
+        if dh.store_type != 1 && dh.store_type != 4 {
+            warn!("read({:?}): unsupported store type", dh);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported store type"));
+        }
+        if dh.arthdr_len > dh.art_len {
+            warn!("read({:?}): arthdr_len > art_len", dh);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid art_len or arthdr_len"));
+        }
+        if dh.art_len + DARTHEAD_SIZE as u32 > dh.store_len {
+            warn!("read({:?}): art_len + DARTHEAD_SIZE > store_len", dh);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid art_len or store_len"));
+        }
+        // store_len includes \0 after the article, the histfile loc entry doesn't.
+        if dh.store_len - 1 > loc.size {
+            warn!("read({:?}): article on disk larger than in history entry {:?}", dh, loc);
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid store_len"));
+        }
+        Ok((dh, loc, file))
+    }
+
+    // Read an article. 
+    // SpoolBackend::read() forwards to this method.
+    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: &mut BytesMut) -> io::Result<()> {
+
+        let (head, loc, mut file) = self.open(art_loc, &part)?;
+
+        let (start, len) = match part {
+            ArtPart::Stat => return Ok(()),
+            ArtPart::Head => {
+                (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len)
+            },
+            ArtPart::Article => {
+                (loc.pos + DARTHEAD_SIZE as u32, head.art_len)
+            },
+            ArtPart::Body => {
+                let body_off = if head.store_type == 1 {
+                    head.arthdr_len + 1
+                } else {
+                    head.arthdr_len + 2
+                };
+                (loc.pos + DARTHEAD_SIZE as u32 + body_off, head.art_len - body_off)
+            }
+        };
+        file.seek(SeekFrom::Start(start as u64))?;
+        let reader = file.try_clone()?.take(len as u64);
+
+        if head.store_type == 1 {
+            buf.reserve((len + len / 50) as usize);
+            let reader = CrlfXlat::new(reader);
+            read_to_bufmut(reader, &mut buf)?;
+        } else {
+            buf.reserve(len as usize);
+            read_to_bufmut(reader, &mut buf)?;
+        }
+        Ok(())
+    }
+
+    // Write an article. 
+    // SpoolBackend::write() forwards to this method.
+    fn do_write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
+
+        // get a refcounted handle to the writers.
+        let writers = {
+            let w = self.writers.read();
+            w.clone()
+        };
+
+        // check if we need to move to the next timeslot.
+        let now = unixtime();
+        let slot = now - (now % self.reallocint);
+        let writers = {
+            if writers.slot != 0 && writers.slot != slot {
+                let mut w = self.writers.write();
+                *w = Arc::new(Writers{
+                    slot:   slot,
+                    ..Default::default()
+                });
+                w.clone()
+            } else {
+                writers
+            }
+        };
+
+        // sort the open files in order of size.
+        let mut v : Vec<(usize, usize)> =
+            writers.sizes.iter()
+            .map(|s| s.load(Ordering::Relaxed))
+            .enumerate()
+            .collect();
+        v.sort_unstable_by(|&(_, a), &(_, b)| a.cmp(&b));
+
+        // find an open, unlocked file.
+        let mut available = None;
+        let mut file = None;
+        let mut file_idx = 0;
+
+        for idx in 0..v.len() {
+            let (i, s) = v[idx];
+            if s == 0 {
+                // still available
+                available = Some(idx);
+            } else {
+                // opened, try to lock it.
+                if let Some(l) = writers.files[i].try_lock() {
+                    file_idx = i;
+                    file = Some(l);
+                    break;
+                }
+            }
+        }
+
+        let mut file = match file {
+            Some(f) => f,
+            None => {
+                // we could not lock an already open file
+                let idx = match available {
+                    // do we still have free slots
+                    Some(i) => i,
+                    // if not, then we pick one of the
+                    // first 4 slots at random.
+                    None => (time::now().tm_nsec % 4) as usize,
+                };
+                let (i, _) = v[idx];
+                file_idx = i;
+
+                // and lock it
+                writers.files[i].lock()
+            },
+        };
+
+        // if the file is >1GB, close and allocate a new file.
+        if file.fh.is_some() {
+            let sz = writers.sizes[file_idx].load(Ordering::SeqCst);
+            if sz > 1_000_000_000 {
+                file.fh.take();
+                writers.sizes[file_idx].store(0, Ordering::SeqCst);
+            }
+        }
+
+        // see if we need to create a new file.
+        if file.fh.is_none() {
+
+            // create directory
+            let now = unixtime() as u32;
+            file.dir = (now / 60) as u32;
+            file.dir -= file.dir % 10; // XXX FIXME reallocint?
+            let mut path = self.path.clone();
+            path.push(format!("D.{:08x}", file.dir));
+            if let Err(e) = fs::create_dir(&path) {
+                if e.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(e);
+                }
+            }
+
+            // create file
+            file.file = (now & 0x7fff) as u16;
+            for _ in 0..1000 {
+                let mut name = path.clone();
+                name.push(format!("B.{:04x}", file.file));
+                match fs::OpenOptions::new().append(true).create_new(true).open(name) {
+                    Ok(fh) => {
+                        file.fh = Some(fh);
+                        break;
+                    },
+                    Err(e) => {
+                        if e.kind() != io::ErrorKind::AlreadyExists {
+                            return Err(e);
+                        }
+                    }
+                }
+                file.file = ((file.file as u32 + 1) & 0x7fff) as u16;
+            }
+
+            // success?
+            if file.fh.is_none() {
+                return Err(io::Error::new(io::ErrorKind::Other, "cannot create spool file"));
+            }
+        }
+
+        let mut fh = file.fh.take().unwrap();
+        let meta = fh.metadata()?;
+        let pos = meta.len();
+        let store_len = (DARTHEAD_SIZE + art.len() + 1) as u32;
+
+        // write header.
+        let mut ah = DArtHead::default();
+        ah.magic1 = 0xff;
+        ah.magic1 = 0x99;
+        ah.version = 1;
+        ah.head_len = DARTHEAD_SIZE as u8;
+        ah.store_type = 4;
+        ah.arthdr_len = hdr_len as u32;
+        ah.art_len = art.len() as u32;
+        ah.store_len = store_len;
+        let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
+        fh.write_all(&buf)?;
+
+        // and article itself.
+        fh.write_all(art)?;
+
+        // add \0 at the end
+        fh.write(b"\0")?;
+
+        // update file sizes array
+        let sz = pos + store_len as u64;
+        writers.sizes[file_idx].store(sz as usize, Ordering::SeqCst);
+
+        // store filehandle.
+        file.fh.get_or_insert(fh);
+
+        // build storage token
+        let t = from_location(DArtLocation{
+            dir:    file.dir,
+            file:   file.file,
+            pos:    pos as u32,
+            size:   store_len - 1,
+        });
+
+        // return article location
+        Ok(ArtLoc{
+            storage_type:   Backend::Diablo,
+            spool:          self.spool_no,
+            token:          t,
+        })
+    }
+
+    fn do_flush(&self) -> io::Result<()> {
+        let mut w = self.writers.write();
+        if w.slot != 0 {
+            // drop previous writers.
+            *w = Arc::new(Writers::default());
+        }
+        Ok(())
+    }
+}
+
+impl SpoolBackend for DSpool {
+
+    fn get_type(&self) -> Backend {
+        Backend::Diablo
+    }
+
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()> {
+        self.do_read(art_loc, part, buf)
+    }
+
+    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
+        self.do_write(art, hdr_len)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.do_flush()
+    }
 }
 
 // A reader-wrapper that translates CR to CRLF.
@@ -186,237 +495,6 @@ impl<T: Read> Read for CrlfXlat<T> {
     }
 }
 
-impl DSpool {
-
-    fn new_dspool(cfg: Arc<SpoolCfg>) -> DSpool {
-        DSpool{
-            path:       PathBuf::from(cfg.path.clone()),
-            spool_no:   cfg.spool_no,
-            cfg:        cfg,
-            writer:     Arc::new(Mutex::new(DSpoolFile::default())),
-        }
-    }
-
-    pub fn new(cfg: SpoolCfg) -> io::Result<Box<SpoolBackend>> {
-        Ok(Box::new(DSpool::new_dspool(Arc::new(cfg))))
-    }
-
-    // locate file that holds the article, open it, read the DArtHead struct,
-    // and return the info.
-    fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
-
-        let loc = to_location(art_loc);
-        debug!("art location: {:?}", loc);
-        let flnm = format!("D.{:08x}/B.{:04x}", loc.dir, loc.file);
-        let mut path = self.path.clone();
-        path.push(flnm);
-        let file = fs::File::open(&path)?;
-
-        // tell kernel to read the headers, or the entire file.
-        let size = match part {
-            ArtPart::Stat => 0,
-            ArtPart::Head => 16384,
-            ArtPart::Article | ArtPart::Body => loc.size,
-        };
-        if size > 0 {
-            unsafe {
-                use std::os::unix::io::AsRawFd;
-                libc::posix_fadvise(file.as_raw_fd(), loc.pos as libc::off_t,
-                                size as libc::off_t, libc::POSIX_FADV_WILLNEED);
-            }
-        }
-
-        let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
-
-        debug!("art header: {:?}", dh);
-
-        // lots of sanity checks !
-        if dh.magic1 != 0xff || dh.magic2 != 0x99 ||
-            dh.version != 1 || dh.head_len != 24 {
-            warn!("read({:?}): bad magic in header", dh);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic in header"));
-        }
-        if dh.store_type != 1 && dh.store_type != 4 {
-            warn!("read({:?}): unsupported store type", dh);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported store type"));
-        }
-        if dh.arthdr_len > dh.art_len {
-            warn!("read({:?}): arthdr_len > art_len", dh);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid art_len or arthdr_len"));
-        }
-        if dh.art_len + DARTHEAD_SIZE as u32 > dh.store_len {
-            warn!("read({:?}): art_len + DARTHEAD_SIZE > store_len", dh);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid art_len or store_len"));
-        }
-        // store_len includes \0 after the article, the histfile loc entry doesn't.
-        if dh.store_len - 1 > loc.size {
-            warn!("read({:?}): article on disk larger than in history entry {:?}", dh, loc);
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid store_len"));
-        }
-        Ok((dh, loc, file))
-    }
-}
-
-/// SpoolBackend::clone() calls box_clone() on the underlying struct.
-impl Clone for Box<SpoolBackend>
-{
-    fn clone(&self) -> Box<SpoolBackend> {
-        self.box_clone()
-    }
-}
-
-impl SpoolBackend for DSpool {
-
-    fn get_type(&self) -> Backend {
-        Backend::Diablo
-    }
-
-    fn box_clone(&self) -> Box<SpoolBackend> {
-        Box::new(self.clone())
-    }
-
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: &mut BytesMut) -> io::Result<()> {
-
-        let (head, loc, mut file) = self.open(art_loc, &part)?;
-
-        let (start, len) = match part {
-            ArtPart::Stat => return Ok(()),
-            ArtPart::Head => {
-                (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len)
-            },
-            ArtPart::Article => {
-                (loc.pos + DARTHEAD_SIZE as u32, head.art_len)
-            },
-            ArtPart::Body => {
-                let body_off = if head.store_type == 1 {
-                    head.arthdr_len + 1
-                } else {
-                    head.arthdr_len + 2
-                };
-                (loc.pos + DARTHEAD_SIZE as u32 + body_off, head.art_len - body_off)
-            }
-        };
-        file.seek(SeekFrom::Start(start as u64))?;
-        let reader = file.try_clone()?.take(len as u64);
-
-        if head.store_type == 1 {
-            buf.reserve((len + len / 50) as usize);
-            let reader = CrlfXlat::new(reader);
-            read_to_bufmut(reader, &mut buf)?;
-        } else {
-            buf.reserve(len as usize);
-            read_to_bufmut(reader, &mut buf)?;
-        }
-        Ok(())
-    }
-
-    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
-
-        // if the file is >1GB, close and allocate a new file.
-        let writer = &mut *self.writer.lock().unwrap();
-        if writer.fh.is_some() {
-            if writer.size > 1000000000 {
-                writer.fh.take();
-                writer.size = 0;
-            }
-        }
-
-        // see if we need to create a new file.
-        if writer.fh.is_none() {
-
-            // create directory
-            let now = time::now_utc().to_timespec().sec as u64;
-            writer.dir = (now / 60) as u32;
-            writer.dir -= writer.dir % 10;
-            let mut path = self.path.clone();
-            path.push(format!("D.{:08x}", writer.dir));
-            if let Err(e) = fs::create_dir(&path) {
-                if e.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(e);
-                }
-            }
-
-            // create file
-            writer.size = 0;
-            writer.file = (now & 0x7fff) as u16;
-
-            for _ in 0..1000 {
-                let mut name = path.clone();
-                name.push(format!("B.{:04x}", writer.file));
-                match fs::OpenOptions::new().write(true).create_new(true).open(name) {
-                    Ok(fh) => {
-                        writer.fh = Some(fh);
-                        break;
-                    },
-                    Err(e) => {
-                        if e.kind() != io::ErrorKind::AlreadyExists {
-                            return Err(e);
-                        }
-                    }
-                }
-                writer.file = ((writer.file as u32 + 1) & 0x7fff) as u16;
-            }
-
-            // success?
-            if writer.fh.is_none() {
-                return Err(io::Error::new(io::ErrorKind::Other, "cannot create spool file"));
-            }
-        }
-
-        let pos = writer.size;
-        let store_len = (DARTHEAD_SIZE + art.len() + 1) as u32;
-        let mut fh = writer.fh.take().unwrap();
-
-        // write header.
-        let mut ah = DArtHead::default();
-        ah.magic1 = 0xff;
-        ah.magic1 = 0x99;
-        ah.version = 1;
-        ah.head_len = DARTHEAD_SIZE as u8;
-        ah.store_type = 4;
-        ah.arthdr_len = hdr_len as u32;
-        ah.art_len = art.len() as u32;
-        ah.store_len = store_len;
-        let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
-        fh.write_all(&buf)?;
-        writer.size += DARTHEAD_SIZE as u32;
-
-        // and article itself.
-        fh.write_all(art)?;
-        writer.size += art.len() as u32;
-
-        // add \0 at the end
-        fh.write(b"\0")?;
-        writer.size += 1;
-
-        writer.fh.get_or_insert(fh);
-
-        // build storage token
-        let t = from_location(DArtLocation{
-            dir:    writer.dir,
-            file:   writer.file,
-            pos:    pos as u32,
-            size:   store_len - 1,
-        });
-
-        // return article location
-        Ok(ArtLoc{
-            storage_type:   Backend::Diablo,
-            spool:          self.spool_no,
-            token:          t,
-        })
-    }
-
-    fn write_realloc(&self) -> io::Result<()> {
-        let writer = &mut *self.writer.lock().unwrap();
-        if writer.fh.is_some() {
-            writer.fh.take();
-            writer.size = 0;
-        }
-        Ok(())
-    }
-}
-
 // helper function.
 fn read_to_bufmut(mut reader: impl Read, buf: &mut BytesMut) -> io::Result<()> {
     loop {
@@ -434,3 +512,9 @@ fn read_to_bufmut(mut reader: impl Read, buf: &mut BytesMut) -> io::Result<()> {
     }
     Ok(())
 }
+
+// helper function
+fn unixtime() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+}
+

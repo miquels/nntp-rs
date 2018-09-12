@@ -11,6 +11,7 @@ extern crate futures_cpupool;
 extern crate futures;
 extern crate libc;
 extern crate nntp_rs_util as util;
+extern crate parking_lot;
 extern crate serde;
 extern crate time;
 
@@ -39,9 +40,6 @@ pub trait SpoolBackend: Send + Sync {
     /// Get the type. E.g. Backend::Diablo.
     fn get_type(&self) -> Backend;
 
-    /// Boilerplate method to let Box<BackendImplementation>::clone() work.
-    fn box_clone(&self) -> Box<SpoolBackend>;
-
     /// Read one article from the spool.
     fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
 
@@ -50,7 +48,7 @@ pub trait SpoolBackend: Send + Sync {
 
     /// In case the spool has state (like diablo), flush and close any open
     /// handles and reset the state. Diablo needs this after 'reallocint' seconds.
-    fn write_realloc(&self) -> io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         Ok(())
     }
 }
@@ -199,12 +197,22 @@ impl Spool {
                 },
             };
 
+            // make a copy of the config with spool_no filled in.
             let mut cfg_c = cfg.clone();
             cfg_c.spool_no = n;
 
+            // find the metaspool.
+            let ms = metaspool.iter().find(|m| m.spool.contains(&n));
+
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    diablo::DSpool::new(cfg_c)
+                    let r_int = ms.and_then(|ms|
+                                            if ms.reallocint.as_secs() == 0 {
+                                                None
+                                            } else {
+                                                Some(ms.reallocint)
+                                            });
+                    diablo::DSpool::new(cfg_c, r_int)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,
