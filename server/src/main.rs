@@ -16,6 +16,7 @@ extern crate tokio;
 
 extern crate nntp_rs_history;
 extern crate nntp_rs_spool;
+extern crate nntp_rs_util;
 
 pub mod commands;
 pub mod config;

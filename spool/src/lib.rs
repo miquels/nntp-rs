@@ -103,6 +103,8 @@ impl Backend {
 /// Metaspool is a group of spools.
 #[derive(Clone,Deserialize,Default,Debug)]
 pub struct MetaSpool {
+    /// name of this metaspool.
+    pub name:           String,
     /// Allocation strategy: sequential, space, single, weighted.
     pub allocstrat:     String,
     /// Article types: control, cancel, binary, base64, yenc etc.
@@ -166,7 +168,7 @@ pub struct SpoolCfg {
     pub keeptime:   Duration,
 
     #[serde(skip)]
-    spool_no:       u8,
+    pub spool_no:   u8,
 }
 
 /// Article storage (spool) functionality.
@@ -239,7 +241,7 @@ impl Spool {
         let inner = self.inner.clone();
         self.cpu_pool.spawn_fn(move || {
             use std::thread;
-             trace!("history worker on thread {:?}", thread::current().id());
+            trace!("spool reader on thread {:?}", thread::current().id());
             let be = match inner.spool.get(&art_loc.spool as &u8) {
                 None => {
                     return future::err(io::Error::new(io::ErrorKind::NotFound,
@@ -255,20 +257,21 @@ impl Spool {
     }
 
     /// save one article.
-    pub fn write(&mut self, art: &[u8], hdr_len: usize, head_only: bool) -> io::Result<ArtLoc> {
-        unimplemented!()
-    }/*
-        // XXX should return an error here, really.
-        if self.metaspool.len() == 0 {
-            return Ok(ArtLoc{
-                storage_type:   Backend::Reject,
-                spool:          0,
-                token:          Vec::new(),
-            });
-        }
+    pub fn write(& self, art: BytesMut, hdr_len: usize, _head_only: bool) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
 
-        // XXX for now just take the first metaspool
-        let mut m = 
-    */
+        //if self.inner.metaspool.len() == 0 {
+        //    return Err(io::Error::new(io::ErrorKind::InvalidData, "no metaspools defined"));
+        //}
+
+        // Here we should select the correct metaspool for the article.
+
+        let inner = self.inner.clone();
+        self.cpu_pool.spawn_fn(move || {
+            use std::thread;
+            trace!("spool writer on thread {:?}", thread::current().id());
+            let spool = inner.spool.get(&0).unwrap();
+            spool.write(&art[..], hdr_len)
+        })
+    }
 }
 

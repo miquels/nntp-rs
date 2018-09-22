@@ -23,6 +23,8 @@ path = "/news/spool/news/P.02"
 minfree = "10G"
 
 [[metaspool]]
+name = "bin"
+allocstrat = "sequential"
 spool = [ 1, 2, 3 ]
 groups = [ "*" ]
 maxsize = "64K"

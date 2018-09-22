@@ -22,6 +22,7 @@ toml = "0.4.6"
 
 nntp-rs-history = { path = "../history" }
 nntp-rs-spool = { path = "../spool" }
+nntp-rs-util = { path = "../util" }
 num_cpus = "1.8.0"
 time = "0.1.40"
 
