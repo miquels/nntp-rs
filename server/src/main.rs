@@ -20,6 +20,7 @@ extern crate nntp_rs_util;
 
 pub mod commands;
 pub mod config;
+pub mod headers;
 pub mod nntp_codec;
 pub mod nntp_session;
 pub mod server;
