@@ -1,6 +1,7 @@
 [server]
 listen = "[::]:1119"
 threads = 1
+dnewsfeeds = "dnewsfeeds"
 
 [history]
 path = "/home/mikevs/tmp/dhistory"

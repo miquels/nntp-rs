@@ -80,12 +80,13 @@ impl Server {
                     .map(move |socket| {
 
                         // set up codec for reader and writer.
+                        let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
                         let codec = NntpCodec::new(socket);
                         let control = codec.control();
                         let (writer, reader) = codec.split();
 
                         // build an nntp session.
-                        let mut session = NntpSession::new(control, server.clone());
+                        let mut session = NntpSession::new(peer, control, server.clone());
 
                         // fake an "initial command".
                         let s = Box::new(stream::iter_ok::<_, io::Error>(vec![BytesMut::from(&b"CONNECT"[..])]));

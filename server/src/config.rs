@@ -55,7 +55,8 @@ pub fn read_config(name: &str) -> io::Result<Config> {
     
     let mut cfg : TomlConfig = match toml::from_str(&buffer) {
         Ok(v) => v,
-        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e.to_string())),
+        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                            format!("{}: {}", name, e))),
     };
 
     let mut feeds = read_dnewsfeeds(&cfg.server.dnewsfeeds)?;

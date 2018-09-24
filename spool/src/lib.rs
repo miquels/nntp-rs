@@ -107,6 +107,7 @@ pub struct SpoolCfg {
     #[serde(default)]
     pub spool:      HashMap<String, SpoolDef>,
     /// List of spool groups (metaspool in diablo).
+    #[serde(default)]
     pub spoolgroup: Vec<MetaSpool>,
     #[serde(skip)]
     #[doc(hidden)]

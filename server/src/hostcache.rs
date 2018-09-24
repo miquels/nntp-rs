@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt;
+use std::io;
 use std::net::IpAddr;
 use std::sync::{Arc,mpsc};
 use std::time::Duration;
@@ -222,7 +223,8 @@ impl HostCache {
                         // Transient error, retry soon.
                         _ => {
                     */
-                            warn!("resolver: lookup {}: {:?}", host, e);
+                            let err : io::Error = e.into();
+                            warn!("resolver: lookup {}: {}", host, err);
                             (o_addrs, 0)
                     /*
                         },

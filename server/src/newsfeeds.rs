@@ -73,13 +73,13 @@ impl NewsFeeds {
     }
 
     /// Look up a peer by IP address.
-    pub fn find_peer(&self, ipaddr: IpAddr) -> Option<&NewsPeer> {
-        if let Some(name) =  self.hcache.lookup(&ipaddr) {
+    pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<&NewsPeer> {
+        if let Some(name) =  self.hcache.lookup(ipaddr) {
             return self.peer_map.get(&name).map(|idx| &self.peers[*idx]);
         }
         for e in &self.peers {
             for n in &e.innet {
-                if n.contains(&ipaddr) {
+                if n.contains(ipaddr) {
                     return Some(e);
                 }
             }

@@ -1,6 +1,7 @@
 use std;
 use std::io;
 use std::mem;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -25,26 +26,40 @@ pub struct NntpSession {
     codec_control:  NntpCodecControl,
     parser:         CmdParser,
     server:         Arc<Server>,
+    remote:         SocketAddr,
 }
 
 type NntpError = io::Error;
 type NntpFuture<T> = Box<Future<Item=T, Error=NntpError> + Send>;
 
 impl NntpSession {
-    pub fn new(control: NntpCodecControl, server: Arc<Server>) -> NntpSession {
+    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Arc<Server>) -> NntpSession {
         NntpSession {
             state:          NntpState::Cmd,
             codec_control:  control,
             parser:         CmdParser::new(),
             server:         server,
+            remote:         peer,
         }
     }
 
     /// Initial connect. Here we decide if we want to accept this
     /// connection, or refuse it.
     pub fn on_connect(&mut self, ) -> NntpFuture<Bytes> {
+        let remote = self.remote.ip();
+        let feed = match self.server.config.newsfeeds.find_peer(&remote) {
+            None => {
+                self.codec_control.quit();
+                info!("connrefused reason=unknownpeer addr={} ", remote);
+                let msg = format!("502 permission denied to {}\r\n", remote); 
+                return Box::new(future::ok(Bytes::from(msg.as_bytes())))
+            },
+            Some(f) => f,
+        };
         self.parser.add_cap(Capb::Reader);
-        Box::new(future::ok(Bytes::from(&b"200 Welcome\r\n"[..])))
+        info!("connstart peer={} addr={} ", feed.label, remote);
+        let msg = format!("200 Welcome {}\r\n", feed.label);
+        Box::new(future::ok(Bytes::from(msg.as_bytes())))
     }
 
     /// Called when we got an error writing to the socket.
