@@ -27,6 +27,7 @@ pub struct NntpSession {
     parser:         CmdParser,
     server:         Arc<Server>,
     remote:         SocketAddr,
+    peer_idx:       usize,
 }
 
 type NntpError = io::Error;
@@ -40,6 +41,7 @@ impl NntpSession {
             parser:         CmdParser::new(),
             server:         server,
             remote:         peer,
+            peer_idx:       0,
         }
     }
 
@@ -47,18 +49,19 @@ impl NntpSession {
     /// connection, or refuse it.
     pub fn on_connect(&mut self, ) -> NntpFuture<Bytes> {
         let remote = self.remote.ip();
-        let feed = match self.server.config.newsfeeds.find_peer(&remote) {
+        let (idx, feed) = match self.server.config.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
                 info!("connrefused reason=unknownpeer addr={} ", remote);
                 let msg = format!("502 permission denied to {}\r\n", remote); 
                 return Box::new(future::ok(Bytes::from(msg.as_bytes())))
             },
-            Some(f) => f,
+            Some(x) => x,
         };
+        self.peer_idx = idx;
         self.parser.add_cap(Capb::Reader);
         info!("connstart peer={} addr={} ", feed.label, remote);
-        let msg = format!("200 Welcome {}\r\n", feed.label);
+        let msg = format!("200 {} hoi {}\r\n", self.server.config.server.hostname, feed.label);
         Box::new(future::ok(Bytes::from(msg.as_bytes())))
     }
 
@@ -130,6 +133,9 @@ impl NntpSession {
 
         match cmd {
             Cmd::Article | Cmd::Body | Cmd::Head | Cmd::Stat => {
+                if args.len() == 0 {
+                    return Box::new(future::ok(Bytes::from(&b"412 Not in a newsgroup\r\n"[..])));
+                }
                 let (code, part) = match cmd {
                     Cmd::Article => (220, ArtPart::Article),
                     Cmd::Head => (221, ArtPart::Head),

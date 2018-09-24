@@ -3,9 +3,10 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io;
 
+use dconfig::*;
 use newsfeeds::NewsFeeds;
 use nntp_rs_spool::SpoolCfg;
-use dconfig::*;
+use nntp_rs_util as util;
 
 use toml;
 
@@ -32,6 +33,8 @@ pub struct Config {
 /// Server config table in Toml config file.
 #[derive(Deserialize, Debug, Default)]
 pub struct Server {
+    #[serde(default)]
+    pub hostname:       String,
     pub listen:         Option<String>,
     pub threads:        Option<usize>,
     pub dspool_ctl:     Option<String>,
@@ -52,12 +55,19 @@ pub fn read_config(name: &str) -> io::Result<Config> {
     let mut f = File::open(name)?;
     let mut buffer = String::new();
     f.read_to_string(&mut buffer)?;
-    
+
     let mut cfg : TomlConfig = match toml::from_str(&buffer) {
         Ok(v) => v,
         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData,
                                             format!("{}: {}", name, e))),
     };
+
+    if cfg.server.hostname == "" {
+        cfg.server.hostname = match util::hostname() {
+            Some(h) => h,
+            None => "unconfigured".to_string(),
+        }
+    }
 
     let mut feeds = read_dnewsfeeds(&cfg.server.dnewsfeeds)?;
     if let Some(ref dhosts) = cfg.server.diablo_hosts {

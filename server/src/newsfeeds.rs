@@ -73,14 +73,18 @@ impl NewsFeeds {
     }
 
     /// Look up a peer by IP address.
-    pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<&NewsPeer> {
+    ///
+    /// Returns a tuple consisting of the index into the peers vector
+    /// and a reference to the NewsPeer instance.
+    pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
         if let Some(name) =  self.hcache.lookup(ipaddr) {
-            return self.peer_map.get(&name).map(|idx| &self.peers[*idx]);
+            return self.peer_map.get(&name).map(|idx| (*idx, &self.peers[*idx]));
         }
-        for e in &self.peers {
+        for i in 0 .. self.peers.len() {
+            let e = &self.peers[i];
             for n in &e.innet {
                 if n.contains(ipaddr) {
-                    return Some(e);
+                    return Some((i, e));
                 }
             }
         }
@@ -132,6 +136,8 @@ pub struct NewsPeer {
     pub headfeed:           bool,
     pub genlines:           bool,
     pub preservebytes:      bool,
+
+    pub index:              usize,
 }
 pub type GroupDef = NewsPeer;
 
