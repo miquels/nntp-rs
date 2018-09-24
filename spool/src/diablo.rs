@@ -18,7 +18,7 @@ use parking_lot::{Mutex,RwLock};
 
 use time;
 
-use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolCfg};
+use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolDef};
 
 const MAX_WRITERS : usize = 16;
 
@@ -29,7 +29,7 @@ pub struct DSpool {
     path:       PathBuf,
     spool_no:   u8,
     reallocint: u64,
-    cfg:        Arc<SpoolCfg>,
+    cfg:        Arc<SpoolDef>,
     writers:    RwLock<Arc<Writers>>,
 }
 
@@ -123,7 +123,7 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
 impl DSpool {
 
     /// Create a new diablo-type spool backend.
-    pub fn new(cfg: SpoolCfg, reallocint: Option<Duration>) -> io::Result<Box<SpoolBackend>> {
+    pub fn new(cfg: SpoolDef, reallocint: Option<Duration>) -> io::Result<Box<SpoolBackend>> {
         let reallocint = reallocint.unwrap_or(Duration::from_secs(600));
         let ds = DSpool{
             path:       PathBuf::from(cfg.path.clone()),

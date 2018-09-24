@@ -1,5 +1,4 @@
 use wildmat;
-use regex::{self,Regex,RegexSet};
 
 #[derive(Clone,Copy,PartialEq,Eq)]
 pub enum MatchResult {

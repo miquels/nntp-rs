@@ -25,4 +25,7 @@ nntp-rs-spool = { path = "../spool" }
 nntp-rs-util = { path = "../util" }
 num_cpus = "1.8.0"
 time = "0.1.40"
+dns-lookup = "0.9.1"
+ipnet = "2.0.0"
+parking_lot = "0.6.4"
 

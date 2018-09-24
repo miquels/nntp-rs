@@ -4,11 +4,14 @@
 #[macro_use] extern crate log;
 #[macro_use] extern crate serde_derive;
 extern crate bytes;
+extern crate dns_lookup;
 extern crate env_logger;
 extern crate futures_cpupool;
+extern crate ipnet;
 extern crate memchr;
 extern crate net2;
 extern crate num_cpus;
+extern crate parking_lot;
 extern crate toml;
 extern crate time;
 extern crate tk_listen;
@@ -20,7 +23,10 @@ extern crate nntp_rs_util;
 
 pub mod commands;
 pub mod config;
+pub mod dconfig;
 pub mod headers;
+pub mod hostcache;
+pub mod newsfeeds;
 pub mod nntp_codec;
 pub mod nntp_session;
 pub mod server;
@@ -54,7 +60,7 @@ fn main() -> io::Result<()> {
          eprintln!("nntp-rs: history {}: {}", config.history.path, e);
          exit(1);
     }).unwrap();
-    let spool = Spool::new(&config.spool, &config.metaspool).map_err(|e| {
+    let spool = Spool::new(&config.spool).map_err(|e| {
          eprintln!("nntp-rs: initializing spool: {}", e);
          exit(1);
     }).unwrap();

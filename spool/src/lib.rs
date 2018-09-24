@@ -100,6 +100,28 @@ impl Backend {
     }
 }
 
+/// Complete spool configuration.
+#[derive(Clone,Deserialize,Default,Debug)]
+pub struct SpoolCfg {
+    /// Map of spools. Index is a number 0..99.
+    #[serde(default)]
+    pub spool:      HashMap<String, SpoolDef>,
+    /// List of spool groups (metaspool in diablo).
+    pub spoolgroup: Vec<MetaSpool>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    // used internally, and by dspool.ctl.
+    pub groupmap:   Vec<GroupMap>,
+}
+
+// used internally, and by dspool.ctl.
+#[doc(hidden)]
+#[derive(Clone,Default,Debug)]
+pub struct GroupMap {
+    pub groups:     String,
+    pub spoolgroup: String,
+}
+
 /// Metaspool is a group of spools.
 #[derive(Clone,Deserialize,Default,Debug)]
 pub struct MetaSpool {
@@ -139,11 +161,10 @@ pub struct MetaSpool {
     #[serde(skip)]
     last_spool:         u8,
 }
-pub type MetaSpoolCfg = MetaSpool;
 
 /// Configuration for one spool instance.
 #[derive(Deserialize,Default,Debug,Clone)]
-pub struct SpoolCfg {
+pub struct SpoolDef {
     /// Backend to use: diablo, cyclic.
     pub backend:    String,
     /// Path to directory (for diablo) or file/blockdev (for cyclic)
@@ -186,11 +207,11 @@ struct SpoolInner {
 
 impl Spool {
     /// initialize all storage backends.
-    pub fn new(spoolcfg: &HashMap<String, SpoolCfg>, metaspool: &Vec<MetaSpool>) -> io::Result<Spool> {
+    pub fn new(spoolcfg: &SpoolCfg) -> io::Result<Spool> {
 
         // parse spool definitions.
         let mut m = HashMap::new();
-        for (num, cfg) in spoolcfg {
+        for (num, cfg) in &spoolcfg.spool {
             let n = match num.parse::<u8>() {
                 Ok(n) if n < 100 => n,
                 _ => {
@@ -204,7 +225,7 @@ impl Spool {
             cfg_c.spool_no = n;
 
             // find the metaspool.
-            let ms = metaspool.iter().find(|m| m.spool.contains(&n));
+            let ms = spoolcfg.spoolgroup.iter().find(|m| m.spool.contains(&n));
 
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
@@ -231,7 +252,7 @@ impl Spool {
         Ok(Spool{
             inner: Arc::new(SpoolInner{
                 spool:      m,
-                metaspool:  Mutex::new(metaspool.to_vec()),
+                metaspool:  Mutex::new(spoolcfg.spoolgroup.clone()),
             }),
             cpu_pool:   builder.create(),
         })
