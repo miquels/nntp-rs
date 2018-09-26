@@ -18,6 +18,10 @@ use newsfeeds::NewsFeeds;
 const DNS_REFRESH_SECS : u64 = 3600;
 const DNS_MAX_TEMPERROR_SECS : u64 = 86400;
 
+lazy_static! {
+    static ref HOST_CACHE: HostCache = HostCache::new();
+}
+
 #[derive(Clone,Default,Debug)]
 struct HostEntry {
     label:      String,
@@ -47,8 +51,8 @@ enum Message {
 }
 
 impl HostCache {
-    /// Initialize a new HostCache instance.
-    pub fn new() -> HostCache {
+    // Initialize a new HostCache instance.
+    fn new() -> HostCache {
         let (tx, rx) = mpsc::channel();
         let inner = HostCacheInner{
             tx:         tx,
@@ -64,6 +68,11 @@ impl HostCache {
             hc2.resolver_thread(rx);
         });
         hc
+    }
+
+    /// Get an instance of the host cache. This is a reference, 
+    pub fn get() -> HostCache {
+        HOST_CACHE.clone()
     }
 
     /// add entries to the cache with data from a (new) NewsFeeds struct.

@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use bytes::BytesMut;
 use futures::{Future,Stream};
 use num_cpus;
 use parking_lot::Mutex;
@@ -18,10 +17,10 @@ use tokio::runtime::current_thread;
 
 use bind_socket;
 use config;
-use nntp_codec::{NntpCodec,CodecMode};
+use nntp_codec::{NntpCodec,NntpInput};
 use nntp_rs_history::History;
 use nntp_rs_spool::Spool;
-use nntp_session::{NntpSession,NntpState};
+use nntp_session::NntpSession;
 
 #[derive(Clone)]
 pub struct Server {
@@ -93,32 +92,26 @@ impl Server {
                         let (writer, reader) = codec.split();
 
                         // build an nntp session.
-                        let session = NntpSession::new(peer, control.clone(), server.clone());
-                        let session = Arc::new(Mutex::new(session));
-                        let session2 = session.clone();
+                        let mut session = NntpSession::new(peer, control.clone(), server.clone());
 
-                        // fake an "initial command".
-                        let s = Box::new(stream::iter_ok::<_, io::Error>(vec![BytesMut::from(&b"CONNECT"[..])]));
-                        let responses = s.chain(reader).and_then(move |inbuf| {
-                            session.lock().on_input(inbuf)
-                        })
-                        .map(move |r| {
-                            match r.nextstate {
-                                NntpState::Post|
-                                NntpState::Ihave|
-                                NntpState::TakeThis => {
-                                    session2.lock().set_state(r.nextstate);
-                                    control.set_rd_mode(CodecMode::ReadBlock);
-                                },
-                                NntpState::Cmd => {},
+                        let responses = reader.then(move |result| {
+                            match result {
+                                Err(e) => session.on_read_error(e),
+                                Ok(input) => match input {
+                                    NntpInput::Connect => session.on_connect(),
+                                    NntpInput::WriteError(e) => session.on_write_error(e),
+                                    NntpInput::Eof => session.on_eof(),
+                                    buf @ NntpInput::Line(_)|
+                                    buf @ NntpInput::Block(_) => session.on_input(buf),
+                                }
                             }
-                            r.data
                         })
-                        .map_err(|e| {
-                            warn!("got error from stream: {:?}", e);
-                            e
-                        });
-                        let session = writer.send_all(responses).map_err(|_| ()).map(|_| ());
+                        .map(move |r| r.data);
+
+                        let session = writer
+                            .send_all(responses)
+                            .map_err(move |e| control.write_error(e))
+                            .map(|_| ());
 
                         let session = AssertUnwindSafe(session);
                         handle.spawn(session.catch_unwind().then(|result| {

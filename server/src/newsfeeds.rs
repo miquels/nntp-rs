@@ -50,7 +50,7 @@ impl NewsFeeds {
             peer_map:       HashMap::new(),
             groupdefs:      Vec::new(),
             groupdef_map:   HashMap::new(),
-            hcache:         HostCache::new(),
+            hcache:         HostCache::get(),
             timestamp:      util::unixtime_ms(),
         }
     }

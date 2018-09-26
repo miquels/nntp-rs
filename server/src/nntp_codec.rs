@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::{Bytes, BytesMut};
 use futures::{Async, AsyncSink,  Poll, Stream, Sink, StartSend};
 use memchr::memchr;
+use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
@@ -24,10 +25,24 @@ enum State {
 /// Reading mode.
 #[derive(Debug,PartialEq,Eq)]
 pub enum CodecMode {
-    ReadLine    = 1,
-    ReadBlock   = 2,
-    #[doc = "hidden"]
-    Quit        = 3,
+    /// Initial mode
+    Connect     = 1,
+    /// in "read line" mode.
+    ReadLine    = 2,
+    /// in "read multiline block" mode
+    ReadBlock   = 3,
+    /// at next read, return quit.
+    Quit        = 4,
+    /// report write error.
+    WriteError  = 5,
+}
+
+pub enum NntpInput {
+    Connect,
+    Eof,
+    WriteError(io::Error),
+    Line(BytesMut),
+    Block(BytesMut),
 }
 
 /// NntpCodec implements both Stream to receive and Sink to send either
@@ -50,6 +65,7 @@ pub struct NntpCodec {
 #[derive(Clone)]
 pub struct NntpCodecControl {
     rd_mode:        Arc<AtomicUsize>,
+    error:          Arc<Mutex<Option<io::Error>>>,
 }
 
 impl NntpCodec {
@@ -93,7 +109,7 @@ impl NntpCodec {
         }
     }
 
-    fn read_line(&mut self) -> Result<Async<Option<BytesMut>>, io::Error> {
+    fn read_line(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
         // resume where we left off.
         let bufpos = self.rd_pos;
         let buflen = self.rd.len();
@@ -109,10 +125,10 @@ impl NntpCodec {
         };
         let buf = self.rd.split_to(nl_pos + 1);
         self.rd_pos = 0;
-        Ok(Async::Ready(Some(buf)))
+        Ok(Async::Ready(Some(NntpInput::Line(buf))))
     }
 
-    fn read_block(&mut self) -> Result<Async<Option<BytesMut>>, io::Error> {
+    fn read_block(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
 
         // resume where we left off.
         let mut bufpos = self.rd_pos;
@@ -189,7 +205,7 @@ impl NntpCodec {
                 self.rd_overflow = false;
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "Overflow"));
             }
-            return Ok(Async::Ready(Some(buf)));
+            return Ok(Async::Ready(Some(NntpInput::Block(buf))));
         }
 
         // continue
@@ -256,36 +272,61 @@ impl NntpCodecControl {
 
     pub fn new() -> NntpCodecControl {
         NntpCodecControl {
-            rd_mode:    Arc::new(AtomicUsize::new(CodecMode::ReadLine as usize)),
+            rd_mode:    Arc::new(AtomicUsize::new(CodecMode::Connect as usize)),
+            error:      Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn set_rd_mode(&self, mode: CodecMode) {
+    pub fn set_mode(&self, mode: CodecMode) {
         self.rd_mode.store(mode as usize, Ordering::SeqCst);
     }
 
-    pub fn get_rd_mode(&self) -> CodecMode {
+    pub fn get_mode(&self) -> CodecMode {
         CodecMode::from(self.rd_mode.load(Ordering::SeqCst))
     }
 
     pub fn quit(&self) {
         self.rd_mode.store(CodecMode::Quit as usize, Ordering::SeqCst);
     }
+
+    pub fn write_error(&self, e: io::Error) {
+        *self.error.lock() = Some(e);
+        self.rd_mode.store(CodecMode::WriteError as usize, Ordering::SeqCst);
+    }
 }
 
-/// This is the reading part, we return a stream of BytesMut that can be either
-/// a single line or a multi-line block. The data is returned unmodified, so
-/// with CRLF line-endings. And for multi-line blocks, still dotstuffed, and
-/// including the final CRLF DOT CRLF.
+/// This is the reading part, we return a stream of NntpInputs. Those can be:
+///
+/// - NntpInput::Connect:               returned once at the start
+/// - NntpInput::Eof:                   end-of-file seen.
+/// - NntpInput::WriteError(io::Error): the output writing routines reported an error.
+/// - NntpInput::Line(BytesMut):        single command line
+/// - NntpInput::Block(BytesMut):       multiline block
+///
 impl Stream for NntpCodec {
-    type Item = BytesMut;
+    type Item = NntpInput;
     type Error = io::Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
 
-        let rd_mode = self.control.get_rd_mode();
-        if rd_mode == CodecMode::Quit {
-            return Ok(Async::Ready(None));
+        let rd_mode = self.control.get_mode();
+        match rd_mode {
+            CodecMode::Connect => {
+                self.control.set_mode(CodecMode::ReadLine);
+                return Ok(Async::Ready(Some(NntpInput::Connect)));
+            },
+            CodecMode::WriteError => {
+                let e = match self.control.error.lock().take() {
+                    Some(e) => e,
+                    None => {
+                        error!("nntp_codec::poll: CodecMode::WriteError but no error available");
+                        io::Error::new(io::ErrorKind::Other, "write error")
+                    },
+                };
+                return Ok(Async::Ready(Some(NntpInput::WriteError(e))));
+            },
+            CodecMode::Quit => return Ok(Async::Ready(None)),
+            _ => {},
         }
 
         // read as much data as we can.
@@ -293,14 +334,17 @@ impl Stream for NntpCodec {
 
         // other side closed.
         if sock_closed {
-            // we were still processing data .. this was unexpected!
-            if self.rd.len() > 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
-            }
-            // return a zero-sized buffer to indicate EOF once
             if self.rd_state != State::Eof {
+                // we were still processing data .. this was unexpected!
+                if self.rd.len() > 0 {
+                    self.rd_state = State::Eof;
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
+                }
+
+                // return an end-of-file indication once, the next poll will
+                // return end-of-stream.
                 self.rd_state = State::Eof;
-                return Ok(Async::Ready(Some(BytesMut::new())))
+                return Ok(Async::Ready(Some(NntpInput::Eof)));
             }
             // end stream.
             return Ok(Async::Ready(None));
@@ -310,7 +354,7 @@ impl Stream for NntpCodec {
         match rd_mode {
             CodecMode::ReadLine => self.read_line(),
             CodecMode::ReadBlock => self.read_block(),
-            CodecMode::Quit => unreachable!(),
+            _ => unreachable!(),
         }
     }
 }
@@ -338,9 +382,11 @@ impl Sink for NntpCodec {
 impl From<usize> for CodecMode {
     fn from(value: usize) -> Self {
         match value {
-            1 => CodecMode::ReadLine,
-            2 => CodecMode::ReadBlock,
-            3 => CodecMode::Quit,
+            1 => CodecMode::Connect,
+            2 => CodecMode::ReadLine,
+            3 => CodecMode::ReadBlock,
+            4 => CodecMode::Quit,
+            5 => CodecMode::WriteError,
             _ => unimplemented!(),
         }
     }

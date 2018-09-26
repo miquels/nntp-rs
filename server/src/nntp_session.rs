@@ -11,7 +11,7 @@ use time;
 use commands::{Capb, Cmd, CmdParser};
 use config::{self,Config};
 use newsfeeds::{NewsFeeds,NewsPeer};
-use nntp_codec::{CodecMode, NntpCodecControl};
+use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
 use nntp_rs_history::HistStatus;
 use nntp_rs_spool::ArtPart;
 use server::Server;
@@ -37,26 +37,20 @@ pub struct NntpSession {
 
 pub struct NntpResult {
     pub data:       Bytes,
-    pub nextstate:  NntpState,
 }
 
 impl NntpResult {
-    fn switch(s: &str, nextstate: NntpState) -> NntpResult {
+    fn text(s: &str) -> NntpResult {
         let mut b = Bytes::with_capacity(s.len() + 2);
         b.extend_from_slice(s.as_bytes());
         b.extend_from_slice(&b"\r\n"[..]);
         NntpResult{
             data:       b,
-            nextstate:  nextstate,
         }
-    }
-    fn text(s: &str) -> NntpResult {
-        NntpResult::switch(s, NntpState::Cmd)
     }
     fn bytes(b: Bytes) -> NntpResult {
         NntpResult{
             data:       b,
-            nextstate:  NntpState::Cmd,
         }
     }
     fn empty() -> NntpResult {
@@ -134,18 +128,33 @@ impl NntpSession {
 
     /// Called when we got an error writing to the socket.
     /// Log an error, clean up, and exit.
-    pub fn on_output_error(&self, _err: io::Error) {
+    pub fn on_write_error(&self, _err: io::Error) -> NntpFuture {
+        println!("nntp_session.on_write_error");
+        Box::new(future::ok(NntpResult::empty()))
     }
 
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
-    pub fn on_input_error(&self, _err: io::Error) {
+    pub fn on_read_error(&self, _err: io::Error) -> NntpFuture {
+        println!("nntp_session.on_read_error");
+        Box::new(future::ok(NntpResult::empty()))
+    }
+
+    /// Call on end-of-file.
+    pub fn on_eof(&self) -> NntpFuture {
+        println!("nntp_session.on_eof");
+        Box::new(future::ok(NntpResult::empty()))
     }
 
     /// Called when a line or block has been received.
-    pub fn on_input(&mut self, input: BytesMut) -> NntpFuture {
+    pub fn on_input(&mut self, input: NntpInput) -> NntpFuture {
+        let input = match input {
+            NntpInput::Line(d) => d,
+            NntpInput::Block(d) => d,
+            _ => unreachable!(),
+        };
         let state = mem::replace(&mut self.state, NntpState::Cmd);
-        self.codec_control.set_rd_mode(CodecMode::ReadLine);
+        self.codec_control.set_mode(CodecMode::ReadLine);
         match state {
             NntpState::Cmd => self.cmd(input),
             NntpState::Post => self.post_body(input),
@@ -160,15 +169,6 @@ impl NntpSession {
         let line = match std::str::from_utf8(&input[..]) {
             Ok(l) => {
                 if !l.ends_with("\r\n") {
-                    // special case: initial connect.
-                    if l == "CONNECT" {
-                        return self.on_connect();
-                    }
-                    // another special case: end-of-file.
-                    if l == "" {
-                        self.codec_control.quit();
-                        return Box::new(future::ok(NntpResult::empty()));
-                    }
                     // allow QUIT even with improper line-ending.
                     let l = l.trim_right();
                     if !l.eq_ignore_ascii_case("quit") && l != "" {
@@ -251,6 +251,7 @@ impl NntpSession {
             },
             Cmd::Ihave => {
                 let ok = "335 Send article; end with CRLF DOT CRLF";
+                let codec_control = self.codec_control.clone();
                 let fut = self.server.history.check(args[0])
                     .map(move |he| {
                         let r = match he {
@@ -265,10 +266,9 @@ impl NntpSession {
                             }
                         };
                         if r == ok {
-                            NntpResult::switch(r, NntpState::Ihave)
-                        } else {
-                            NntpResult::text(r)
+                            codec_control.set_mode(CodecMode::ReadBlock);
                         }
+                        NntpResult::text(r)
                     });
                 return Box::new(fut);
             },
@@ -292,15 +292,17 @@ impl NntpSession {
                 return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
             },
             Cmd::Post => {
+                self.codec_control.set_mode(CodecMode::ReadBlock);
                 let ok = "340 Submit article; end with CRLF DOT CRLF";
-                return Box::new(future::ok(NntpResult::switch(ok, NntpState::Post)));
+                return Box::new(future::ok(NntpResult::text(ok)));
             },
             Cmd::Quit => {
                 self.codec_control.quit();
                 return Box::new(future::ok(NntpResult::text("205 Bye")));
             },
             Cmd::Takethis => {
-                return Box::new(future::ok(NntpResult::switch("", NntpState::TakeThis)));
+                self.codec_control.set_mode(CodecMode::ReadBlock);
+                return Box::new(future::ok(NntpResult::empty()));
             },
             _ => {},
         }
