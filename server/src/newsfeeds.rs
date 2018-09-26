@@ -20,6 +20,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use hostcache::HostCache;
+use nntp_rs_util as util;
 
 use ipnet::IpNet;
 
@@ -35,6 +36,7 @@ pub struct NewsFeeds {
     pub groupdefs:      Vec<GroupDef>,
     pub groupdef_map:   HashMap<String, usize>,
 
+    pub timestamp:      u64,
     hcache:             HostCache,
 }
 
@@ -49,6 +51,7 @@ impl NewsFeeds {
             groupdefs:      Vec::new(),
             groupdef_map:   HashMap::new(),
             hcache:         HostCache::new(),
+            timestamp:      util::unixtime_ms(),
         }
     }
 

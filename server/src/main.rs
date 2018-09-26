@@ -51,11 +51,14 @@ fn main() -> io::Result<()> {
     ).get_matches();
 
     let cfg_file = matches.value_of("CONFIG").unwrap_or("config.toml");
-    let config = config::read_config(cfg_file).map_err(|e| {
+    if let Err(e) = config::read_config(cfg_file) {
         eprintln!("{}", e);
         exit(1);
-    }).unwrap();
+    }
+    let config = config::get_config();
 
+    // open history file. this will remain open as long as we run,
+    // configuration file changes do not influence that.
     let hist = History::open(&config.history.backend, config.history.path.clone(), config.history.threads).map_err(|e| {
          eprintln!("nntp-rs: history {}: {}", config.history.path, e);
          exit(1);
@@ -81,7 +84,7 @@ fn main() -> io::Result<()> {
     handle_panic();
 
     // and start server.
-    let server = server::Server::new(config, hist, spool);
+    let server = server::Server::new(hist, spool);
     server.run(listener)
 }
 

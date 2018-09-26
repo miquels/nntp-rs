@@ -4,7 +4,6 @@ use std::thread;
 use std::time::Duration;
 use std::io;
 use std::process::exit;
-use std::sync::Arc;
 
 use bytes::BytesMut;
 use futures::{Future,Stream};
@@ -15,38 +14,37 @@ use tokio;
 use tokio::runtime::current_thread;
 
 use bind_socket;
-use config::Config;
+use config;
 use nntp_codec::NntpCodec;
 use nntp_rs_history::History;
 use nntp_rs_spool::Spool;
 use nntp_session::NntpSession;
 
+#[derive(Clone)]
 pub struct Server {
     pub history:    History,
     pub spool:      Spool,
-    pub config:     Config,
 }
 
 impl Server {
 
     /// Create a new Server.
-    pub fn new(config: Config, history: History, spool: Spool) -> Server {
-        Server{ history, spool, config }
+    pub fn new(history: History, spool: Spool) -> Server {
+        Server{ history, spool }
     }
 
     /// Run the server.
     pub fn run(self, listener: TcpListener) -> io::Result<()> {
 
         trace!("main server running on thread {:?}", thread::current().id());
+        let config = config::get_config();
 
         // Now start a bunch of threads to serve the requests.
-        let num_threads = self.config.server.threads.unwrap_or(num_cpus::get());
+        let num_threads = config.server.threads.unwrap_or(num_cpus::get());
         let mut threads = Vec::new();
 
         let addr = listener.local_addr().unwrap();
         let mut first = Some(listener);
-
-        let server = Arc::new(self);
 
         for _ in 0..num_threads {
 
@@ -61,7 +59,7 @@ impl Server {
                 }).unwrap()
             };
 
-            let server = server.clone();
+            let server = self.clone();
 
             let tid = thread::spawn(move || {
 

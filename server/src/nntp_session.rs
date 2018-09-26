@@ -9,6 +9,8 @@ use futures::{Future,future};
 use time;
 
 use commands::{Capb, Cmd, CmdParser};
+use config::{self,Config};
+use newsfeeds::{NewsFeeds,NewsPeer};
 use nntp_codec::{CodecMode, NntpCodecControl};
 use nntp_rs_history::HistStatus;
 use nntp_rs_spool::ArtPart;
@@ -25,8 +27,10 @@ pub struct NntpSession {
     state:          NntpState,
     codec_control:  NntpCodecControl,
     parser:         CmdParser,
-    server:         Arc<Server>,
+    server:         Server,
     remote:         SocketAddr,
+    newsfeeds:      Arc<NewsFeeds>,
+    config:         Arc<Config>,
     peer_idx:       usize,
 }
 
@@ -34,22 +38,30 @@ type NntpError = io::Error;
 type NntpFuture<T> = Box<Future<Item=T, Error=NntpError> + Send>;
 
 impl NntpSession {
-    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Arc<Server>) -> NntpSession {
+    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server) -> NntpSession {
+        let newsfeeds = config::get_newsfeeds();
+        let config = config::get_config();
         NntpSession {
             state:          NntpState::Cmd,
             codec_control:  control,
             parser:         CmdParser::new(),
             server:         server,
             remote:         peer,
+            newsfeeds:      newsfeeds,
+            config:         config,
             peer_idx:       0,
         }
+    }
+
+    fn peer(&self) -> &NewsPeer {
+        &self.newsfeeds.peers[self.peer_idx]
     }
 
     /// Initial connect. Here we decide if we want to accept this
     /// connection, or refuse it.
     pub fn on_connect(&mut self, ) -> NntpFuture<Bytes> {
         let remote = self.remote.ip();
-        let (idx, feed) = match self.server.config.newsfeeds.find_peer(&remote) {
+        let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
                 info!("connrefused reason=unknownpeer addr={} ", remote);
@@ -60,8 +72,9 @@ impl NntpSession {
         };
         self.peer_idx = idx;
         self.parser.add_cap(Capb::Reader);
-        info!("connstart peer={} addr={} ", feed.label, remote);
-        let msg = format!("200 {} hoi {}\r\n", self.server.config.server.hostname, feed.label);
+        info!("connstart peer={} addr={} ", peer.label, remote);
+        let code = if peer.readonly { 201 } else { 200 };
+        let msg = format!("{} {} hello {}\r\n", code, self.config.server.hostname, peer.label);
         Box::new(future::ok(Bytes::from(msg.as_bytes())))
     }
 
