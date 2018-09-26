@@ -84,9 +84,17 @@ impl NntpSession {
             return Box::new(future::ok(Bytes::from(msg.as_bytes())))
         }
 
-        self.parser.add_cap(Capb::Reader);
         info!("connstart peer={} addr={} ", peer.label, remote);
-        let code = if peer.readonly { 201 } else { 200 };
+        let code = if peer.readonly {
+            201
+        } else {
+            self.parser.add_cap(Capb::Ihave);
+            self.parser.add_cap(Capb::Streaming);
+            200
+        };
+        if peer.headfeed {
+            self.parser.add_cap(Capb::ModeHeadfeed);
+        }
         let msg = format!("{} {} hello {}\r\n", code, self.config.server.hostname, peer.label);
         Box::new(future::ok(Bytes::from(msg.as_bytes())))
     }
@@ -173,6 +181,9 @@ impl NntpSession {
                 return self.read_article(part, args[0], buf);
             },
             Cmd::Capabilities => {
+                if args.len() > 0 && !self.parser.is_keyword(args[0]) {
+                    return Box::new(future::ok(Bytes::from(&b"501 invalid keyword\r\n"[..])));
+                }
                 return Box::new(future::ok(self.parser.capabilities()));
             },
             Cmd::Date => {

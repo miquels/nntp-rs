@@ -12,6 +12,7 @@ extern crate memchr;
 extern crate net2;
 extern crate num_cpus;
 extern crate parking_lot;
+extern crate regex;
 extern crate toml;
 extern crate time;
 extern crate tk_listen;

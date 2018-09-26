@@ -28,4 +28,5 @@ time = "0.1.40"
 dns-lookup = "0.9.1"
 ipnet = "2.0.0"
 parking_lot = "0.6.4"
+regex = "1.0.5"
 

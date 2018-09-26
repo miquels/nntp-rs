@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::str;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use regex::Regex;
 
 /// Capabilities.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -79,11 +80,11 @@ macro_rules! cmd {
 
 // And here it is actually generated.
 cmd!{
-    ( "article",            Article,            0, 1, Capb::Reader,          "[%M]" ),
+    ( "article",            Article,            0, 1, Capb::Always,          "[%M]" ),
     ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
     ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
     ( "authinfo",           Authinfo,           1, 0, Capb::Never   ,        "" ),
-    ( "body",               Body,               0, 1, Capb::Reader,          "[%M]" ),
+    ( "body",               Body,               0, 1, Capb::Always,          "[%M]" ),
     ( "capabilities",       Capabilities,       0, 1, Capb::Always,          "[keyword]" ),
     ( "check",              Check,              1, 1, Capb::Streaming,       "%m" ),
     ( "date",               Date,               0, 0, Capb::Always,          "" ),
@@ -105,7 +106,7 @@ cmd!{
     ( "mode reader",        Mode_Reader,        0, 0, Capb::ModeReader,      "" ),
     ( "mode stream",        Mode_Stream,        0, 0, Capb::Streaming,       "" ),
     ( "mode",               Mode,               1, 0, Capb::Never,           "" ),
-    ( "newgroups",          NewGroups,          1, 4, Capb::Reader,          "[yy]YYMMDD HHMMSS [GMT]" ),
+    ( "newgroups",          NewGroups,          1, 4, Capb::Reader,          "[yy]yymmdd hhmmss [GMT]" ),
     ( "newnews",            NewNews,            1, 5, Capb::NewNews,         " %w [yy]yymmdd <hhmmss> [GMT]" ),
     ( "next",               Next,               0, 0, Capb::Reader,          "" ),
     ( "over",               Over,               0, 1, Capb::Over,            "[%r]" ),
@@ -144,6 +145,7 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
 pub struct CmdParser {
     caps:       usize,
     cmd_map:    &'static HashMap<String, CmdDef>,
+    keyword_re: Regex,
 }
 
 impl CmdParser {
@@ -152,6 +154,7 @@ impl CmdParser {
         CmdParser{
             caps:       Capb::Always as usize,
             cmd_map:    &*CMD_MAP,
+            keyword_re: Regex::new("^[A-Za-z][A-Za-z0-9.-]{2,}$").unwrap(),
         }
     }
 
@@ -163,6 +166,11 @@ impl CmdParser {
     /// Remove a capability.
     pub fn remove_cap(&mut self, caps: Capb) {
         self.caps &= !(caps as usize);
+    }
+
+    /// is this a valid keyword.
+    pub fn is_keyword(&self, kw: &str) -> bool {
+        self.keyword_re.is_match(kw)
     }
 
     /// Command parsing and checking.
