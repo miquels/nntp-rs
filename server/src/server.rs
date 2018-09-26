@@ -18,10 +18,10 @@ use tokio::runtime::current_thread;
 
 use bind_socket;
 use config;
-use nntp_codec::NntpCodec;
+use nntp_codec::{NntpCodec,CodecMode};
 use nntp_rs_history::History;
 use nntp_rs_spool::Spool;
-use nntp_session::NntpSession;
+use nntp_session::{NntpSession,NntpState};
 
 #[derive(Clone)]
 pub struct Server {
@@ -73,11 +73,12 @@ impl Server {
 
                 // tokio runtime for this thread alone.
                 let mut runtime = current_thread::Runtime::new().unwrap();
+                let handle = runtime.handle();
 
                 trace!("current_thread::runtime on {:?}", thread::current().id());
-                let handle = tokio::reactor::Handle::current();
+                let reactor_handle = tokio::reactor::Handle::default();
 
-                let listener = tokio::net::TcpListener::from_std(listener, &handle)
+                let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
                     .expect("cannot convert from net2 listener to tokio listener");
 
                 // Pull out a stream of sockets for incoming connections
@@ -92,14 +93,26 @@ impl Server {
                         let (writer, reader) = codec.split();
 
                         // build an nntp session.
-                        let mut session = NntpSession::new(peer, control, server.clone());
+                        let session = NntpSession::new(peer, control.clone(), server.clone());
+                        let session = Arc::new(Mutex::new(session));
+                        let session2 = session.clone();
 
                         // fake an "initial command".
                         let s = Box::new(stream::iter_ok::<_, io::Error>(vec![BytesMut::from(&b"CONNECT"[..])]));
-
                         let responses = s.chain(reader).and_then(move |inbuf| {
-                            trace!("connection running on thread {:?}", thread::current().id());
-                            session.on_input(inbuf)
+                            session.lock().on_input(inbuf)
+                        })
+                        .map(move |r| {
+                            match r.nextstate {
+                                NntpState::Post|
+                                NntpState::Ihave|
+                                NntpState::TakeThis => {
+                                    session2.lock().set_state(r.nextstate);
+                                    control.set_rd_mode(CodecMode::ReadBlock);
+                                },
+                                NntpState::Cmd => {},
+                            }
+                            r.data
                         })
                         .map_err(|e| {
                             warn!("got error from stream: {:?}", e);
@@ -107,9 +120,8 @@ impl Server {
                         });
                         let session = writer.send_all(responses).map_err(|_| ()).map(|_| ());
 
-                        // catch panics and recover.
                         let session = AssertUnwindSafe(session);
-                        tokio::spawn(session.catch_unwind().then(|result| {
+                        handle.spawn(session.catch_unwind().then(|result| {
                             match result {
                                 Ok(f) => f,
                                 Err(_) => {
@@ -117,7 +129,7 @@ impl Server {
                                     Ok(())
                                 },
                             }
-                        }))
+                        })).map_err(|_| ())
                     })
                     .listen(65524);
 

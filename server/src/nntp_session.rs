@@ -16,7 +16,7 @@ use nntp_rs_history::HistStatus;
 use nntp_rs_spool::ArtPart;
 use server::Server;
 
-enum NntpState {
+pub enum NntpState {
     Cmd,
     Post,
     Ihave,
@@ -35,8 +35,37 @@ pub struct NntpSession {
     active:         bool,
 }
 
+pub struct NntpResult {
+    pub data:       Bytes,
+    pub nextstate:  NntpState,
+}
+
+impl NntpResult {
+    fn switch(s: &str, nextstate: NntpState) -> NntpResult {
+        let mut b = Bytes::with_capacity(s.len() + 2);
+        b.extend_from_slice(s.as_bytes());
+        b.extend_from_slice(&b"\r\n"[..]);
+        NntpResult{
+            data:       b,
+            nextstate:  nextstate,
+        }
+    }
+    fn text(s: &str) -> NntpResult {
+        NntpResult::switch(s, NntpState::Cmd)
+    }
+    fn bytes(b: Bytes) -> NntpResult {
+        NntpResult{
+            data:       b,
+            nextstate:  NntpState::Cmd,
+        }
+    }
+    fn empty() -> NntpResult {
+        NntpResult::bytes(Bytes::new())
+    }
+}
+
 type NntpError = io::Error;
-type NntpFuture<T> = Box<Future<Item=T, Error=NntpError> + Send>;
+type NntpFuture = Box<Future<Item=NntpResult, Error=NntpError> + Send>;
 
 impl NntpSession {
     pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server) -> NntpSession {
@@ -55,20 +84,24 @@ impl NntpSession {
         }
     }
 
+    pub fn set_state(&mut self, state: NntpState) {
+        self.state = state;
+    }
+
     fn thispeer(&self) -> &NewsPeer {
         &self.newsfeeds.peers[self.peer_idx]
     }
 
     /// Initial connect. Here we decide if we want to accept this
     /// connection, or refuse it.
-    pub fn on_connect(&mut self, ) -> NntpFuture<Bytes> {
+    pub fn on_connect(&mut self, ) -> NntpFuture {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
                 info!("connrefused reason=unknownpeer addr={}", remote);
-                let msg = format!("502 permission denied to {}\r\n", remote); 
-                return Box::new(future::ok(Bytes::from(msg.as_bytes())))
+                let msg = format!("502 permission denied to {}", remote); 
+                return Box::new(future::ok(NntpResult::text(&msg)));
             },
             Some(x) => x,
         };
@@ -80,8 +113,8 @@ impl NntpSession {
             self.codec_control.quit();
             info!("connrefused reason=maxconnect peer={} conncount={} addr={}",
                   peer.label, count - 1 , remote);
-            let msg = format!("502 too many connections from {} (max {})\r\n", peer.label, count - 1);
-            return Box::new(future::ok(Bytes::from(msg.as_bytes())))
+            let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
+            return Box::new(future::ok(NntpResult::text(&msg)))
         }
 
         info!("connstart peer={} addr={} ", peer.label, remote);
@@ -95,8 +128,8 @@ impl NntpSession {
         if peer.headfeed {
             self.parser.add_cap(Capb::ModeHeadfeed);
         }
-        let msg = format!("{} {} hello {}\r\n", code, self.config.server.hostname, peer.label);
-        Box::new(future::ok(Bytes::from(msg.as_bytes())))
+        let msg = format!("{} {} hello {}", code, self.config.server.hostname, peer.label);
+        Box::new(future::ok(NntpResult::text(&msg)))
     }
 
     /// Called when we got an error writing to the socket.
@@ -110,7 +143,7 @@ impl NntpSession {
     }
 
     /// Called when a line or block has been received.
-    pub fn on_input(&mut self, input: BytesMut) -> NntpFuture<Bytes> {
+    pub fn on_input(&mut self, input: BytesMut) -> NntpFuture {
         let state = mem::replace(&mut self.state, NntpState::Cmd);
         self.codec_control.set_rd_mode(CodecMode::ReadLine);
         match state {
@@ -122,7 +155,7 @@ impl NntpSession {
     }
 
     /// Process NNTP command
-    fn cmd(&mut self, input: BytesMut) -> NntpFuture<Bytes> {
+    fn cmd(&mut self, input: BytesMut) -> NntpFuture {
 
         let line = match std::str::from_utf8(&input[..]) {
             Ok(l) => {
@@ -134,25 +167,25 @@ impl NntpSession {
                     // another special case: end-of-file.
                     if l == "" {
                         self.codec_control.quit();
-                        return Box::new(future::ok(Bytes::from(&b""[..])));
+                        return Box::new(future::ok(NntpResult::empty()));
                     }
                     // allow QUIT even with improper line-ending.
                     let l = l.trim_right();
                     if !l.eq_ignore_ascii_case("quit") && l != "" {
                         // otherwise complain
-                        return Box::new(future::ok(Bytes::from(&b"500 Lines must end with CRLF\r\n"[..])));
+                        return Box::new(future::ok(NntpResult::text("500 Lines must end with CRLF")));
                     }
                     l
                 } else {
                     &l[0..l.len()-2]
                 }
             },
-            Err(_) => return Box::new(future::ok(Bytes::from(&b"500 Invalid UTF-8\r\n"[..]))),
+            Err(_) => return Box::new(future::ok(NntpResult::text("500 Invalid UTF-8"))),
         };
 
         // ignore empty lines. most servers behave like this.
         if line.len() == 0 {
-            return Box::new(future::ok(Bytes::new()));
+            return Box::new(future::ok(NntpResult::empty()));
         }
 
         let (cmd, args) = match self.parser.parse(line) {
@@ -160,7 +193,7 @@ impl NntpSession {
                 let mut b = BytesMut::with_capacity(e.len() + 2);
                 b.put(e);
                 b.put("\r\n");
-                return Box::new(future::ok(b.freeze()));
+                return Box::new(future::ok(NntpResult::bytes(b.freeze())));
             },
             Ok(v) => v,
         };
@@ -168,7 +201,7 @@ impl NntpSession {
         match cmd {
             Cmd::Article | Cmd::Body | Cmd::Head | Cmd::Stat => {
                 if args.len() == 0 {
-                    return Box::new(future::ok(Bytes::from(&b"412 Not in a newsgroup\r\n"[..])));
+                    return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
                 }
                 let (code, part) = match cmd {
                     Cmd::Article => (220, ArtPart::Article),
@@ -182,98 +215,130 @@ impl NntpSession {
             },
             Cmd::Capabilities => {
                 if args.len() > 0 && !self.parser.is_keyword(args[0]) {
-                    return Box::new(future::ok(Bytes::from(&b"501 invalid keyword\r\n"[..])));
+                    return Box::new(future::ok(NntpResult::text("501 invalid keyword")));
                 }
-                return Box::new(future::ok(self.parser.capabilities()));
+                return Box::new(future::ok(NntpResult::bytes(self.parser.capabilities())));
+            },
+            Cmd::Check => {
+                let msgid = args[0].to_string();
+                let fut = self.server.history.check(args[0])
+                    .map(move |he| {
+                        match he {
+                            None => format!("238 {}", msgid),
+                            Some(he) => match he.status {
+                                HistStatus::Present|
+                                HistStatus::Expired|
+                                HistStatus::Rejected => format!("438 {}", msgid),
+                                HistStatus::Tentative|
+                                HistStatus::Writing => format!("431 {}", msgid),
+                                HistStatus::NotFound => format!("238 {}", msgid),
+                            }
+                        }
+                    })
+                    .map(|s| NntpResult::text(&s));
+                return Box::new(fut);
             },
             Cmd::Date => {
                 let tm = time::now_utc();
-                let fmt = tm.strftime("%Y%m%d%H%M%S\r\n").unwrap();
-                return Box::new(future::ok(Bytes::from(format!("111 {}", fmt))));
+                let fmt = tm.strftime("%Y%m%d%H%M%S").unwrap();
+                return Box::new(future::ok(NntpResult::text(&format!("111 {}", fmt))));
             },
             Cmd::Group => {
-                return Box::new(future::ok(Bytes::from(&b"503 Not implemented\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("503 Not implemented")));
             },
             Cmd::Help => {
-                return Box::new(future::ok(self.parser.help()));
+                return Box::new(future::ok(NntpResult::bytes(self.parser.help())));
             },
             Cmd::Ihave => {
-                // XXX Testing reading blocks
-                self.state = NntpState::Ihave;
-                self.codec_control.set_rd_mode(CodecMode::ReadBlock);
-                return Box::new(future::ok(Bytes::from(&b"335 Send article; end with CRLF DOT CRLF\r\n"[..])));
+                let ok = "335 Send article; end with CRLF DOT CRLF";
+                let fut = self.server.history.check(args[0])
+                    .map(move |he| {
+                        let r = match he {
+                            None => ok,
+                            Some(he) => match he.status {
+                                HistStatus::Present|
+                                HistStatus::Expired|
+                                HistStatus::Rejected => "435 Duplicate",
+                                HistStatus::Tentative|
+                                HistStatus::Writing => "436 Retry later",
+                                HistStatus::NotFound => ok,
+                            }
+                        };
+                        if r == ok {
+                            NntpResult::switch(r, NntpState::Ihave)
+                        } else {
+                            NntpResult::text(r)
+                        }
+                    });
+                return Box::new(fut);
             },
             Cmd::Last => {
-                return Box::new(future::ok(Bytes::from(&b"412 Not in a newsgroup\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
             },
             Cmd::List_Newsgroups => {
-                return Box::new(future::ok(Bytes::from(&b"503 Not maintaining a newsgroups file\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("503 Not maintaining a newsgroups file")));
             },
             Cmd::ListGroup => {
                 if args.len() == 0 {
-                    return Box::new(future::ok(Bytes::from(&b"412 Not in a newsgroup\r\n"[..])));
+                    return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
                 } else {
-                    return Box::new(future::ok(Bytes::from(&b"503 Not implemented\r\n"[..])));
+                    return Box::new(future::ok(NntpResult::text("503 Not implemented")));
                 }
             },
             Cmd::NewGroups => {
-                return Box::new(future::ok(Bytes::from(&b"503 Not maintaining an active file\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("503 Not maintaining an active file")));
             },
             Cmd::Next => {
-                return Box::new(future::ok(Bytes::from(&b"412 Not in a newsgroup\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
             },
             Cmd::Post => {
-                self.state = NntpState::Post;
-                self.codec_control.set_rd_mode(CodecMode::ReadBlock);
-                return Box::new(future::ok(Bytes::from(&b"340 Submit article; end with CRLF DOT CRLF\r\n"[..])));
+                let ok = "340 Submit article; end with CRLF DOT CRLF";
+                return Box::new(future::ok(NntpResult::switch(ok, NntpState::Post)));
             },
             Cmd::Quit => {
                 self.codec_control.quit();
-                return Box::new(future::ok(Bytes::from(&b"205 Bye\r\n"[..])));
+                return Box::new(future::ok(NntpResult::text("205 Bye")));
             },
             Cmd::Takethis => {
-                // XXX Testing reading blocks
-                self.state = NntpState::TakeThis;
-                self.codec_control.set_rd_mode(CodecMode::ReadBlock);
-                return Box::new(future::ok(Bytes::new()));
+                return Box::new(future::ok(NntpResult::switch("", NntpState::TakeThis)));
             },
             _ => {},
         }
 
-        Box::new(future::ok(Bytes::from(&b"500 What?\r\n"[..])))
+        Box::new(future::ok(NntpResult::text("500 What?")))
     }
 
     /// POST body has been received.
-    fn post_body(&self, _input: BytesMut) -> NntpFuture<Bytes> {
-         Box::new(future::ok(Bytes::from(&b"441 Posting failed\r\n"[..])))
+    fn post_body(&self, _input: BytesMut) -> NntpFuture {
+         Box::new(future::ok(NntpResult::text("441 Posting failed")))
     }
 
     /// IHAVE body has been received.
-    fn ihave_body(&self, _input: BytesMut) -> NntpFuture<Bytes> {
-         Box::new(future::ok(Bytes::from(&b"435 Transfer rejected\r\n"[..])))
+    fn ihave_body(&self, _input: BytesMut) -> NntpFuture {
+         Box::new(future::ok(NntpResult::text("435 Transfer rejected")))
     }
 
     /// TAKETHIS body has been received.
-    fn takethis_body(&self, _input: BytesMut) -> NntpFuture<Bytes> {
-         Box::new(future::ok(Bytes::from(&b"600 Takethis rejected\r\n"[..])))
+    fn takethis_body(&self, _input: BytesMut) -> NntpFuture {
+         Box::new(future::ok(NntpResult::text("600 Takethis rejected")))
     }
 
-    fn read_article<'a>(&self, part: ArtPart, msgid: &'a str, buf: BytesMut) -> NntpFuture<Bytes> {
+    fn read_article<'a>(&self, part: ArtPart, msgid: &'a str, buf: BytesMut) -> NntpFuture {
 
         let spool = self.server.spool.clone();
         let f = self.server.history.lookup(msgid)
             .map_err(|_e| {
-                "430 Not found\r\n".to_string()
+                "430 Not found".to_string()
             })
             .and_then(move |result| {
                 match result {
-                    None => future::err("430 Not found\r\n".to_string()),
+                    None => future::err("430 Not found".to_string()),
                     Some(he) => {
                         match (he.status, he.location) {
                             (HistStatus::Present, Some(loc)) => {
                                 future::ok(loc)
                             },
-                            _ => future::err(format!("430 {:?}\r\n", he.status))
+                            _ => future::err(format!("430 {:?}", he.status))
                         }
                     },
                 }
@@ -284,12 +349,12 @@ impl NntpSession {
                         if part == ArtPart::Head {
                             buf.extend_from_slice(b".\r\n");
                         }
-                        buf.freeze()
+                        NntpResult::bytes(buf.freeze())
                     }).map_err(|_e| {
-                        "430 Not found\r\n".to_string()
+                        "430 Not found".to_string()
                     })
             })
-            .or_else(|e| future::ok(Bytes::from(e)));
+            .or_else(|e| future::ok(NntpResult::text(&e)));
 
        Box::new(f)
     }
