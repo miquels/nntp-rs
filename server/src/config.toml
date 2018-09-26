@@ -1,6 +1,8 @@
 [server]
 listen = "[::]:1119"
 threads = 1
+
+[paths]
 dnewsfeeds = "dnewsfeeds"
 
 [history]

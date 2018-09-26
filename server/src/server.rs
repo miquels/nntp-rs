@@ -1,13 +1,16 @@
+use std::collections::HashMap;
+use std::io;
 use std::net::TcpListener;
 use std::panic::AssertUnwindSafe;
+use std::process::exit;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::io;
-use std::process::exit;
 
 use bytes::BytesMut;
 use futures::{Future,Stream};
 use num_cpus;
+use parking_lot::Mutex;
 use tk_listen::ListenExt;
 use tokio::prelude::*;
 use tokio;
@@ -24,13 +27,18 @@ use nntp_session::NntpSession;
 pub struct Server {
     pub history:    History,
     pub spool:      Spool,
+    pub conns:      Arc<Mutex<HashMap<String, usize>>>
 }
 
 impl Server {
 
     /// Create a new Server.
     pub fn new(history: History, spool: Spool) -> Server {
-        Server{ history, spool }
+        Server{
+            history,
+            spool,
+            conns: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Run the server.
@@ -125,6 +133,37 @@ impl Server {
             let _ = t.join();
         }
         Ok(())
+    }
+
+    /// Increment the connection counter for this peer, and return the new value.
+    pub fn add_connection(&self, peername: &str) -> usize {
+        let mut conns = self.conns.lock();
+        let c = match conns.get_mut(peername) {
+            Some(val) => {
+                *val += 1;
+                *val
+            },
+            None => 1,
+        };
+        if c == 1 {
+            conns.insert(peername.to_string(), c);
+        }
+        c
+    }
+
+    /// Decrement the connection counter for this peer.
+    pub fn remove_connection(&self, peername: &str) {
+        let mut conns = self.conns.lock();
+        let c = match conns.get_mut(peername) {
+            Some(val) => {
+                *val -= 1;
+                *val
+            },
+            None => 0,
+        };
+        if c == 0 {
+            conns.remove(peername);
+        }
     }
 }
 

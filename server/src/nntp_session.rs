@@ -32,6 +32,7 @@ pub struct NntpSession {
     newsfeeds:      Arc<NewsFeeds>,
     config:         Arc<Config>,
     peer_idx:       usize,
+    active:         bool,
 }
 
 type NntpError = io::Error;
@@ -50,10 +51,11 @@ impl NntpSession {
             newsfeeds:      newsfeeds,
             config:         config,
             peer_idx:       0,
+            active:         false,
         }
     }
 
-    fn peer(&self) -> &NewsPeer {
+    fn thispeer(&self) -> &NewsPeer {
         &self.newsfeeds.peers[self.peer_idx]
     }
 
@@ -64,13 +66,24 @@ impl NntpSession {
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
-                info!("connrefused reason=unknownpeer addr={} ", remote);
+                info!("connrefused reason=unknownpeer addr={}", remote);
                 let msg = format!("502 permission denied to {}\r\n", remote); 
                 return Box::new(future::ok(Bytes::from(msg.as_bytes())))
             },
             Some(x) => x,
         };
         self.peer_idx = idx;
+
+        let count = self.server.add_connection(&peer.label);
+        self.active = true;
+        if count > peer.maxconnect as usize {
+            self.codec_control.quit();
+            info!("connrefused reason=maxconnect peer={} conncount={} addr={}",
+                  peer.label, count - 1 , remote);
+            let msg = format!("502 too many connections from {} (max {})\r\n", peer.label, count - 1);
+            return Box::new(future::ok(Bytes::from(msg.as_bytes())))
+        }
+
         self.parser.add_cap(Capb::Reader);
         info!("connstart peer={} addr={} ", peer.label, remote);
         let code = if peer.readonly { 201 } else { 200 };
@@ -268,6 +281,15 @@ impl NntpSession {
             .or_else(|e| future::ok(Bytes::from(e)));
 
        Box::new(f)
+    }
+}
+
+impl Drop for NntpSession {
+    fn drop(&mut self) {
+        if self.active {
+            let name = &self.thispeer().label;
+            self.server.remove_connection(name);
+        }
     }
 }
 
