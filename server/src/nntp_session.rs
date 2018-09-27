@@ -377,27 +377,36 @@ impl NntpSession {
             return NntpResult::text_fut(&format!("439 {}", self.msgid));
         }
 
-        let (headers, body) = parser.into_headers(input);
+        let (mut headers, body) = parser.into_headers(input);
         println!("Newsgroups header: {:#?}", headers.newsgroups());
 
-        let msgid = match headers.message_id() {
+        match headers.message_id() {
             None => {
                 debug!("bad message-id header");
                 return NntpResult::text_fut(&format!("439 {}", self.msgid));
             },
-            Some(m) => m,
-        };
-        if msgid != &self.msgid {
-            debug!("nntp message-id doesn't match article message-id");
-            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+            Some(msgid) => {
+                if msgid != &self.msgid {
+                    debug!("nntp message-id doesn't match article message-id");
+                    return NntpResult::text_fut(&format!("439 {}", self.msgid));
+                }
+            },
         }
 
-        let date = headers.get_str(HeaderName::Date).unwrap();
-        let dp = util::DateParser::new();
-        if dp.parse(&date).is_none() {
-            error!("could not parse date header {}", date);
-            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+        {
+            let date = headers.get_str(HeaderName::Date).unwrap();
+            let dp = util::DateParser::new();
+            if dp.parse(&date).is_none() {
+                error!("could not parse date header {}", date);
+                return NntpResult::text_fut(&format!("439 {}", self.msgid));
+            }
         }
+
+        let path = {
+            let p = headers.get_str(HeaderName::Path).unwrap();
+            format!("{}!{}", self.config.server.hostname, p)
+        };
+        headers.update(HeaderName::Path, path.as_bytes());
 
         // start phase 1, unless another peer got in before us.
         if self.server.history.store_begin(&self.msgid) == false {

@@ -322,7 +322,7 @@ impl Headers {
 
     /// Get the value of a header as an UTF-8 string.
     pub fn get_str(&self, name: HeaderName) -> Option<&str> {
-        str::from_utf8(self.get(name)?).ok()
+        str::from_utf8(self.get(name)?).map(|s| s.trim()).ok()
     }
 
     /// Update the value of a header. This means replace-or-append.
