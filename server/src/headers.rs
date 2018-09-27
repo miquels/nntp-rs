@@ -428,18 +428,28 @@ impl Headers {
     }
 
     /// Newsgroups.
-    pub fn newsgroups(&self) -> Option<Vec<&str>> {
-        let groups = self.get_str(HeaderName::Newsgroups)?;
-        let g = groups
-            .split(",")
+    fn split_header(&self, header: HeaderName, sep: &str) -> Option<Vec<&str>> {
+        let elems = self.get_str(header)?;
+        let e = elems
+            .split(sep)
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
-        if g.is_empty() {
+        if e.is_empty() {
             None
         } else {
-            Some(g)
+            Some(e)
         }
+    }
+
+    /// Newsgroups.
+    pub fn newsgroups(&self) -> Option<Vec<&str>> {
+        self.split_header(HeaderName::Newsgroups, ",")
+    }
+
+    /// Path.
+    pub fn path(&self) -> Option<Vec<&str>> {
+        self.split_header(HeaderName::Path, "!")
     }
 }
 
