@@ -10,12 +10,15 @@ use time;
 
 use commands::{Capb, Cmd, CmdParser};
 use config::{self,Config};
+use headers::{HeaderName,HeadersParser};
 use newsfeeds::{NewsFeeds,NewsPeer};
 use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
-use nntp_rs_history::HistStatus;
+use nntp_rs_history::{HistEnt,HistStatus};
 use nntp_rs_spool::ArtPart;
 use server::Server;
+use nntp_rs_util as util;
 
+#[derive(Debug,PartialEq,Eq)]
 pub enum NntpState {
     Cmd,
     Post,
@@ -31,6 +34,7 @@ pub struct NntpSession {
     remote:         SocketAddr,
     newsfeeds:      Arc<NewsFeeds>,
     config:         Arc<Config>,
+    msgid:          String,
     peer_idx:       usize,
     active:         bool,
 }
@@ -48,11 +52,17 @@ impl NntpResult {
             data:       b,
         }
     }
+
+    fn text_fut(s: &str) -> NntpFuture {
+        Box::new(future::ok(NntpResult::text(s)))
+    }
+
     fn bytes(b: Bytes) -> NntpResult {
         NntpResult{
             data:       b,
         }
     }
+
     fn empty() -> NntpResult {
         NntpResult::bytes(Bytes::new())
     }
@@ -73,6 +83,7 @@ impl NntpSession {
             remote:         peer,
             newsfeeds:      newsfeeds,
             config:         config,
+            msgid:          String::new(),
             peer_idx:       0,
             active:         false,
         }
@@ -95,7 +106,7 @@ impl NntpSession {
                 self.codec_control.quit();
                 info!("connrefused reason=unknownpeer addr={}", remote);
                 let msg = format!("502 permission denied to {}", remote); 
-                return Box::new(future::ok(NntpResult::text(&msg)));
+                return NntpResult::text_fut(&msg);
             },
             Some(x) => x,
         };
@@ -108,7 +119,7 @@ impl NntpSession {
             info!("connrefused reason=maxconnect peer={} conncount={} addr={}",
                   peer.label, count - 1 , remote);
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
-            return Box::new(future::ok(NntpResult::text(&msg)))
+            return NntpResult::text_fut(&msg)
         }
 
         info!("connstart peer={} addr={} ", peer.label, remote);
@@ -149,8 +160,27 @@ impl NntpSession {
     /// Called when a line or block has been received.
     pub fn on_input(&mut self, input: NntpInput) -> NntpFuture {
         let input = match input {
-            NntpInput::Line(d) => d,
-            NntpInput::Block(d) => d,
+            NntpInput::Line(d) => {
+                // Bit of a hack, but doing this correctly is way too much
+                // trouble to support IHAVE.
+                if self.state == NntpState::Ihave {
+                    self.state = NntpState::Cmd;
+                }
+                if self.state != NntpState::Cmd {
+                    error!("got NntpInput::Line while in state {:?}", self.state);
+                    self.codec_control.set_mode(CodecMode::Quit);
+                    return NntpResult::text_fut("400 internal state out of sync");
+                }
+                d
+            },
+            NntpInput::Block(d) => {
+                if self.state == NntpState::Cmd {
+                    error!("got NntpInput::Block while in state {:?}", self.state);
+                    self.codec_control.set_mode(CodecMode::Quit);
+                    return NntpResult::text_fut("400 internal state out of sync");
+                }
+                d
+            },
             _ => unreachable!(),
         };
         let state = mem::replace(&mut self.state, NntpState::Cmd);
@@ -252,6 +282,8 @@ impl NntpSession {
             Cmd::Ihave => {
                 let ok = "335 Send article; end with CRLF DOT CRLF";
                 let codec_control = self.codec_control.clone();
+                self.state = NntpState::Ihave;
+                self.msgid = args[0].to_string();
                 let fut = self.server.history.check(args[0])
                     .map(move |he| {
                         let r = match he {
@@ -293,7 +325,9 @@ impl NntpSession {
             },
             Cmd::Post => {
                 self.codec_control.set_mode(CodecMode::ReadBlock);
+                self.state = NntpState::Post;
                 let ok = "340 Submit article; end with CRLF DOT CRLF";
+                self.msgid = args[0].to_string();
                 return Box::new(future::ok(NntpResult::text(ok)));
             },
             Cmd::Quit => {
@@ -302,6 +336,8 @@ impl NntpSession {
             },
             Cmd::Takethis => {
                 self.codec_control.set_mode(CodecMode::ReadBlock);
+                self.state = NntpState::TakeThis;
+                self.msgid = args[0].to_string();
                 return Box::new(future::ok(NntpResult::empty()));
             },
             _ => {},
@@ -321,8 +357,82 @@ impl NntpSession {
     }
 
     /// TAKETHIS body has been received.
-    fn takethis_body(&self, _input: BytesMut) -> NntpFuture {
-         Box::new(future::ok(NntpResult::text("600 Takethis rejected")))
+    fn takethis_body(&self, input: BytesMut) -> NntpFuture {
+        let mut parser = HeadersParser::new();
+        let len = match parser.parse(&input, false, true) {
+            None => {
+                error!("failure parsing header, None returned");
+                0
+            },
+            Some(Ok(n)) => n,
+            Some(Err(e)) => {
+                error!("parsing headers: {}", e);
+                0
+            },
+        };
+        if len == 0 {
+            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+        }
+
+        let (headers, body) = parser.into_headers(input);
+        println!("Newsgroups header: {:#?}", headers.newsgroups());
+
+        let msgid = match headers.message_id() {
+            None => {
+                debug!("bad message-id header");
+                return NntpResult::text_fut(&format!("439 {}", self.msgid));
+            },
+            Some(m) => m,
+        };
+        if msgid != &self.msgid {
+            debug!("nntp message-id doesn't match article message-id");
+            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+        }
+
+        let date = headers.get_str(HeaderName::Date).unwrap();
+        let dp = util::DateParser::new();
+        if dp.parse(&date).is_none() {
+            error!("could not parse date header {}", date);
+            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+        }
+
+        // start phase 1, unless another peer got in before us.
+        if self.server.history.store_begin(&self.msgid) == false {
+            return NntpResult::text_fut(&format!("439 {}", self.msgid));
+        }
+
+        let recv_time = util::unixtime();
+        let msgid = Arc::new(self.msgid.clone());
+        let msgid2 = msgid.clone();
+        let msgid3 = msgid.clone();
+        let history = self.server.history.clone();
+        let history2 = self.server.history.clone();
+
+        // store the article.
+        let mut buffer = BytesMut::new();
+        headers.header_bytes(&mut buffer);
+        let fut = self.server.spool.write(buffer, body)
+            .and_then(move |artloc| {
+                let he = HistEnt{
+                    status:     HistStatus::Present,
+                    time:       recv_time,
+                    head_only:  false,
+                    location:   Some(artloc),
+                };
+                history.store_commit(&msgid, he)
+            }).and_then(move |_| {
+                NntpResult::text_fut(&format!("239 {}", &msgid2))
+            }).then(move |result| {
+                match result {
+                    Err(e) => {
+                        error!("takethis {}: write: {}", &msgid3, e);
+                        history2.store_rollback(&msgid3);
+                        NntpResult::text_fut(&format!("439 {}", &msgid3))
+                    },
+                    Ok(_) => NntpResult::text_fut(&format!("239 {}", &msgid3)),
+                }
+            });
+        Box::new(fut)
     }
 
     fn read_article<'a>(&self, part: ArtPart, msgid: &'a str, buf: BytesMut) -> NntpFuture {

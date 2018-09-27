@@ -229,7 +229,7 @@ impl DSpool {
 
     // Write an article. 
     // SpoolBackend::write() forwards to this method.
-    fn do_write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
+    fn do_write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
 
         // get a refcounted handle to the writers.
         let writers = {
@@ -349,26 +349,30 @@ impl DSpool {
             }
         }
 
+        let hdr_len = headers.len();
+        let art_len = headers.len() + body.len();
+
         let mut fh = file.fh.take().unwrap();
         let meta = fh.metadata()?;
         let pos = meta.len();
-        let store_len = (DARTHEAD_SIZE + art.len() + 1) as u32;
+        let store_len = (DARTHEAD_SIZE + art_len + 1) as u32;
 
         // write header.
         let mut ah = DArtHead::default();
         ah.magic1 = 0xff;
-        ah.magic1 = 0x99;
+        ah.magic2 = 0x99;
         ah.version = 1;
         ah.head_len = DARTHEAD_SIZE as u8;
         ah.store_type = 4;
         ah.arthdr_len = hdr_len as u32;
-        ah.art_len = art.len() as u32;
+        ah.art_len = art_len as u32;
         ah.store_len = store_len;
         let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
         fh.write_all(&buf)?;
 
         // and article itself.
-        fh.write_all(art)?;
+        fh.write_all(headers)?;
+        fh.write_all(body)?;
 
         // add \0 at the end
         fh.write(b"\0")?;
@@ -416,8 +420,8 @@ impl SpoolBackend for DSpool {
         self.do_read(art_loc, part, buf)
     }
 
-    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc> {
-        self.do_write(art, hdr_len)
+    fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
+        self.do_write(headers, body)
     }
 
     fn flush(&self) -> io::Result<()> {

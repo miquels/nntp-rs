@@ -236,7 +236,7 @@ impl History {
 
     /// We have received the article. Before we write it to the spool,
     /// mark it in the cache with status "Writing".
-    pub fn store_begin(&mut self, msgid: &str) -> bool {
+    pub fn store_begin(&self, msgid: &str) -> bool {
         let mut partition = self.inner.cache.lock_partition(msgid);
         if let Some((h, _age)) = partition.lookup() {
             match h.status {
@@ -254,7 +254,7 @@ impl History {
 
     /// Done writing to the spool. Update the cache-entry and write-through
     /// to the backend storage.
-    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> Box<Future<Item=bool, Error=io::Error>> {
+    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Item=bool, Error=io::Error> {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
@@ -269,12 +269,12 @@ impl History {
                 Err(e) => future::err(e),
             }
         });
-        Box::new(f)
+        f
     }
 
     /// Something went wrong writing to the spool. Cancel the reservation
     /// in the cache.
-    pub fn store_rollback(&mut self, msgid: &str) {
+    pub fn store_rollback(&self, msgid: &str) {
         let mut partition = self.inner.cache.lock_partition(msgid);
         partition.store_rollback()
     }

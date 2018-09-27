@@ -44,7 +44,7 @@ pub trait SpoolBackend: Send + Sync {
     fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
 
     /// Write an article to the spool.
-    fn write(&self, art: &[u8], hdr_len: usize) -> io::Result<ArtLoc>;
+    fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc>;
 
     /// In case the spool has state (like diablo), flush and close any open
     /// handles and reset the state. Diablo needs this after 'reallocint' seconds.
@@ -278,8 +278,12 @@ impl Spool {
         })
     }
 
-    /// save one article.
-    pub fn write(& self, art: BytesMut, hdr_len: usize, _head_only: bool) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
+    /// Write one article to the spool.
+    ///
+    /// NOTE: we stay as close to wireformat as possible. So
+    /// - head_only: body is empty.
+    /// - !headonly: body includes hdr/body seperator, ends in .\r\n
+    pub fn write(&self, headers: BytesMut, body: BytesMut) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
 
         //if self.inner.metaspool.len() == 0 {
         //    return Err(io::Error::new(io::ErrorKind::InvalidData, "no metaspools defined"));
@@ -292,7 +296,7 @@ impl Spool {
             use std::thread;
             trace!("spool writer on thread {:?}", thread::current().id());
             let spool = inner.spool.get(&0).unwrap();
-            spool.write(&art[..], hdr_len)
+            spool.write(&headers[..], &body[..])
         })
     }
 }

@@ -85,7 +85,7 @@ impl DHistory {
     pub fn open(path: &Path) -> io::Result<DHistory> {
 
         // open file and read first 16 bytes into a DHistHead.
-        let f = fs::File::open(path)?;
+        let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
         let meta = f.metadata()?;
         let dhh = read_dhisthead_at(&f, 0)?;
         debug!("{:?} - dhisthead: {:?}", path, &dhh);
@@ -437,6 +437,7 @@ impl HistBackend for DHistory {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                                       format!("{:?}: corrupt dhistory file", &self.path)));
         }
+
         // calculate hashtable index and write pos.
         pos -= self.data_offset;
         let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;

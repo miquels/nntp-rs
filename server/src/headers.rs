@@ -46,13 +46,13 @@ nntp_headers! {
     ( Other,        "" )
 }
 
-const MANDATORY_HEADERS: [HeaderName; 6] = [
-    HeaderName::Date,
-    HeaderName::From,
-    HeaderName::MessageId,
-    HeaderName::Newsgroups,
-    HeaderName::Path,
-    HeaderName::Subject,
+const MANDATORY_HEADERS: [(HeaderName, bool); 6] = [
+    (HeaderName::Date,          true),
+    (HeaderName::From,          false),
+    (HeaderName::MessageId,     true),
+    (HeaderName::Newsgroups,    true),
+    (HeaderName::Path,          true),
+    (HeaderName::Subject,       false),
 ];
 
 // initialize globals.
@@ -104,15 +104,18 @@ impl HeadersParser {
 
     /// Parse a &[u8] buffer into header information.
     ///
-    /// Returns None if the buffer does not contain a complete header
-    /// yet, indicating that perhaps more data needs to be read
-    /// from the network.
+    /// Returns None if last == false and the buffer does not contain a
+    /// complete header yet, indicating that perhaps more data needs to
+    /// be read from the network.
     ///
     /// Returns Some(Ok(len)) where len is the length of the header, up
     /// to but not including the empty line seperating header and body.
     ///
     /// Returns Some(Err(e)) if there was a parse error.
-    pub fn parse(&mut self, buf: &[u8], last: bool) -> Option<io::Result<u64>> {
+    ///
+    /// If there is no empty line after the header, that is an error,
+    /// unless no_body_ok == true.
+    pub fn parse(&mut self, buf: &[u8], no_body_ok: bool, last: bool) -> Option<io::Result<u64>> {
 
         // Parse into NL delimited lines.
         let nlines = buf.len() / 30;
@@ -120,24 +123,22 @@ impl HeadersParser {
         let mut pos = 0usize;
         loop {
             let nl = match memchr(b'\n', &buf[pos..]) {
-                Some(nl) => {
-                    // empty lines signals end-of-headers.
-                    if nl == 0 || (nl == 1 && buf[pos] == b'\r') {
-                        break;
-                    }
-                    nl
-                },
+                Some(nl) => nl,
                 None => {
                     // Not complete yet? Try again later.
                     if !last {
                         return None;
                     }
-                    // End of data here means end-of-header.
+                    // End of data here means the header ended without an empty
+                    // line between header and body.
                     if pos == buf.len() {
-                        break;
+                        if no_body_ok {
+                            break;
+                        }
+                        return Some(Err(io::Error::new(io::ErrorKind::Other, "No header end")));
                     }
                     // Well this was unexpected.
-                    return Some(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF")));
+                    return Some(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Unexpected EOF")));
                 },
             };
 
@@ -188,9 +189,6 @@ impl HeadersParser {
                 }
                 p += 1;
             }
-            if p == b.len() {
-                return Some(Err(io::Error::new(io::ErrorKind::InvalidData, "mangled headers")));
-            }
             let hvalue_idx = Range{ start: header_idx.start + p, end: header_idx.end };
 
             // is this a well-known header?
@@ -215,11 +213,24 @@ impl HeadersParser {
         }
         self.hlen = pos;
 
-        // check for all mandatory headers.
-        for wk in &MANDATORY_HEADERS {
-            if self.well_known[*wk as usize].is_none() {
-                return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
-                                        format!("missing {} header", header_name(wk)))));
+        // check that all mandatory headers are present. some of those
+        // must also be valid utf8 and non-empty.
+        for (ref wk, utf8) in &MANDATORY_HEADERS {
+            let idx = match self.well_known[*wk as usize] {
+                None => return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
+                                        format!("missing {} header", header_name(wk))))),
+                Some(idx) => idx as usize,
+            };
+            if *utf8 {
+                let hvalue_idx = self.hpos[idx].value.clone();
+                if hvalue_idx.start == hvalue_idx.end {
+                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
+                                        format!("empty {} header", header_name(wk)))));
+                }
+                if str::from_utf8(&buf[hvalue_idx]).is_err() {
+                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
+                                        format!("non-utf8 data in {} header", header_name(wk)))));
+                }
             }
         }
 
@@ -229,18 +240,14 @@ impl HeadersParser {
 
     /// This method consumes self and the BytesMut with the header data,
     /// and returns a Header and the remaining data (e.g. the body).
+    ///
+    /// Note that the body starts with the empty line seperating header and body.
     pub fn into_headers(mut self, buffer: BytesMut) -> (Headers, BytesMut) {
         if !self.ok {
             panic!("HeadersParser::parse() returned error, you can't call into_headers()!");
         }
         self.buf = buffer;
-        let mut ret = self.buf.split_off(self.hlen);
-        // eat header-body separator.
-        if ret.len() >= 2 && &ret[..2] == &b"\r\n"[..] {
-            ret.advance(2);
-        } else if ret.len() >= 1 && ret[0] == b'\n' {
-            ret.advance(1);
-        }
+        let ret = self.buf.split_off(self.hlen);
         (Headers(self), ret)
     }
 }
@@ -276,18 +283,46 @@ impl Headers {
     /// If the header value is not valid utf-8, we translate bytes > 126
     /// into their Unicode code points. That will work as long as the header
     /// value is iso-8859-1, for other encodings you are SOL.
-    pub fn get_str<'a>(&'a self, name: HeaderName) -> Option<Cow<'a, str>> {
+    ///
+    /// If the article has Content-Type header with a charset field,
+    /// we might try decoding using that character set. But oh well.
+    pub fn get_str_lossy<'a>(&'a self, name: HeaderName) -> Option<Cow<'a, str>> {
         let hdr = self.get(name)?;
         Some(match str::from_utf8(hdr) {
-            Ok(s) => Cow::from(s),
+            Ok(s) => Cow::from(s.trim()),
             Err(_) => {
-                let mut s = String::new();
-                for b in hdr.iter() {
-                    s.push(*b as char);
+
+                // trim_right()
+                let mut end = hdr.len();
+                while end > 0 {
+                    let b = hdr[end-1];
+                    if b != b' ' && b != b'\t' && b != b'\r' && b != b'\n' {
+                        break;
+                    }
+                    end -= 1;
+                }
+                // trim_left()
+                let mut start = 0;
+                while start < end {
+                    let b = hdr[start];
+                    if b != b' ' && b != b'\t' && b != b'\r' && b != b'\n' {
+                        break;
+                    }
+                    start += 1;
+                }
+
+                let mut s = String::with_capacity((end-start)*2);
+                for b in hdr[start..end].iter() {
+                        s.push(*b as char);
                 }
                 Cow::from(s)
             }
         })
+    }
+
+    /// Get the value of a header as an UTF-8 string.
+    pub fn get_str(&self, name: HeaderName) -> Option<&str> {
+        str::from_utf8(self.get(name)?).ok()
     }
 
     /// Update the value of a header. This means replace-or-append.
@@ -381,6 +416,29 @@ impl Headers {
         match self.get(HeaderName::Newsgroups) {
             None => 0,
             Some(p) => p.iter().filter(|p| *p == &b',').count() + 1,
+        }
+    }
+
+    /// Message-ID
+    pub fn message_id(&self) -> Option<&str> {
+        let msgid = self.get_str(HeaderName::MessageId)?;
+        let b = msgid.find('<')?;
+        let e = msgid[b..].find('>')?;
+        Some(&msgid[b..b+e+1])
+    }
+
+    /// Newsgroups.
+    pub fn newsgroups(&self) -> Option<Vec<&str>> {
+        let groups = self.get_str(HeaderName::Newsgroups)?;
+        let g = groups
+            .split(",")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        if g.is_empty() {
+            None
+        } else {
+            Some(g)
         }
     }
 }

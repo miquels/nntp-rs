@@ -43,7 +43,7 @@ use nntp_rs_history::History;
 use nntp_rs_spool::Spool;
 
 fn main() -> io::Result<()> {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     let matches = clap_app!(nntp_rs =>
         (version: "0.1")
