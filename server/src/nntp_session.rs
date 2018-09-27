@@ -317,6 +317,9 @@ impl NntpSession {
                     return Box::new(future::ok(NntpResult::text("503 Not implemented")));
                 }
             },
+            Cmd::Mode_Stream => {
+                return NntpResult::text_fut("203 Streaming permitted");
+            }
             Cmd::NewGroups => {
                 return Box::new(future::ok(NntpResult::text("503 Not maintaining an active file")));
             },
