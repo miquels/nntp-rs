@@ -22,6 +22,7 @@ extern crate nntp_rs_history;
 extern crate nntp_rs_spool;
 extern crate nntp_rs_util;
 
+pub mod arttype;
 pub mod commands;
 pub mod config;
 pub mod dconfig;
