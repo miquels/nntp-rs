@@ -16,6 +16,7 @@
 //!
 use std::default::Default;
 use std::collections::HashMap;
+use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -74,6 +75,21 @@ impl NewsFeeds {
     /// Update the hostcache, after changes to self.
     pub fn update_hostcache(&self) {
         self.hcache.update(&self);
+    }
+
+    /// resolve references in WildMatLists.
+    pub fn resolve_references(&mut self) {
+        let mut empty = WildMatList::default();
+        for idx in 0..self.peers.len() {
+            let mut this = mem::replace(&mut self.peers[idx].groups, empty);
+            this.resolve(&self.groupdefs);
+            empty = mem::replace(&mut self.peers[idx].groups, this);
+        }
+        for idx in 0..self.groupdefs.len() {
+            let mut this = mem::replace(&mut self.groupdefs[idx], empty);
+            this.resolve(&self.groupdefs);
+            empty = mem::replace(&mut self.groupdefs[idx], this);
+        }
     }
 
     /// Look up a peer by IP address.

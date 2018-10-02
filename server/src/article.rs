@@ -459,6 +459,7 @@ impl Headers {
 pub struct Article {
     pub arttype:    ArtType,
     pub data:       BytesMut,
+    pub msgid:      String,
     pub lines:      u32,
     pub len:        usize,
 }

@@ -75,6 +75,7 @@ pub struct NntpCodec {
 pub struct NntpCodecControl {
     rd_mode:        Arc<AtomicUsize>,
     error:          Arc<Mutex<Option<io::Error>>>,
+    msgid:          Arc<Mutex<Option<String>>>,
 }
 
 impl NntpCodec {
@@ -236,6 +237,7 @@ impl NntpCodec {
         match self.read_block(true) {
             Ok(Async::Ready(Some(NntpInput::Block(buf)))) => {
                 let article = Article{
+                    msgid:      self.control.get_msgid(),
                     len:        buf.len(),
                     data:       buf,
                     arttype:    self.arttype_scanner.art_type(),
@@ -310,6 +312,7 @@ impl NntpCodecControl {
         NntpCodecControl {
             rd_mode:    Arc::new(AtomicUsize::new(CodecMode::Connect as usize)),
             error:      Arc::new(Mutex::new(None)),
+            msgid:      Arc::new(Mutex::new(None)),
         }
     }
 
@@ -319,6 +322,14 @@ impl NntpCodecControl {
 
     pub fn get_mode(&self) -> CodecMode {
         CodecMode::from(self.rd_mode.load(Ordering::SeqCst))
+    }
+
+    pub fn set_msgid(&self, msgid: &str) {
+        *self.msgid.lock() = Some(msgid.to_string())
+    }
+
+    pub fn get_msgid(&self) -> String {
+        self.msgid.lock().take().unwrap_or("".to_string())
     }
 
     pub fn quit(&self) {

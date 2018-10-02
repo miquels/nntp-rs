@@ -53,7 +53,7 @@ impl FromStr for WildPat {
 fn wtype(s: &str) -> (&str, MatchResult) {
     match s.as_bytes()[0] {
         // this is a non-resolved reference that never matches. hacky.
-        b'=' => ("", MatchResult::NoMatch),
+        b'=' => (".", MatchResult::NoMatch),
 
         b'!' => (&s[1..], MatchResult::NoMatch),
         b'@' => (&s[1..], MatchResult::Poison),

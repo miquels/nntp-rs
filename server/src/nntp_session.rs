@@ -37,7 +37,6 @@ pub struct NntpSession {
     remote:         SocketAddr,
     newsfeeds:      Arc<NewsFeeds>,
     config:         Arc<Config>,
-    msgid:          String,
     peer_idx:       usize,
     active:         bool,
 }
@@ -80,10 +79,6 @@ enum ArtAccept {
     Accept,
     // reject and store rejection in history file.
     Reject,
-    // try again later please
-    Defer,
-    // reject and do not store rejection in history file.
-    Discard,
 }
 
 impl NntpSession {
@@ -98,7 +93,6 @@ impl NntpSession {
             remote:         peer,
             newsfeeds:      newsfeeds,
             config:         config,
-            msgid:          String::new(),
             peer_idx:       0,
             active:         false,
         }
@@ -306,8 +300,9 @@ impl NntpSession {
             Cmd::Ihave => {
                 let ok = "335 Send article; end with CRLF DOT CRLF";
                 let codec_control = self.codec_control.clone();
+                codec_control.set_mode(CodecMode::ReadArticle);
+                codec_control.set_msgid(args[0]);
                 self.state = NntpState::Ihave;
-                self.msgid = args[0].to_string();
                 let fut = self.server.history.check(args[0])
                     .map(move |he| {
                         let r = match he {
@@ -322,7 +317,7 @@ impl NntpSession {
                             }
                         };
                         if r == ok {
-                            codec_control.set_mode(CodecMode::ReadBlock);
+                            codec_control.set_mode(CodecMode::ReadArticle);
                         }
                         NntpResult::text(r)
                     });
@@ -345,26 +340,22 @@ impl NntpSession {
                 return NntpResult::text_fut("203 Streaming permitted");
             }
             Cmd::NewGroups => {
-                return Box::new(future::ok(NntpResult::text("503 Not maintaining an active file")));
+                return NntpResult::text_fut("503 Not maintaining an active file");
             },
             Cmd::Next => {
-                return Box::new(future::ok(NntpResult::text("412 Not in a newsgroup")));
+                return NntpResult::text_fut("412 Not in a newsgroup");
             },
             Cmd::Post => {
-                self.codec_control.set_mode(CodecMode::ReadBlock);
-                self.state = NntpState::Post;
-                let ok = "340 Submit article; end with CRLF DOT CRLF";
-                self.msgid = args[0].to_string();
-                return Box::new(future::ok(NntpResult::text(ok)));
+                return NntpResult::text_fut("500 Not implemented");
             },
             Cmd::Quit => {
                 self.codec_control.quit();
-                return Box::new(future::ok(NntpResult::text("205 Bye")));
+                return NntpResult::text_fut("205 Bye");
             },
             Cmd::Takethis => {
-                self.codec_control.set_mode(CodecMode::ReadBlock);
+                self.codec_control.set_mode(CodecMode::ReadArticle);
+                self.codec_control.set_msgid(args[0]);
                 self.state = NntpState::TakeThis;
-                self.msgid = args[0].to_string();
                 return Box::new(future::ok(NntpResult::empty()));
             },
             _ => {},
@@ -384,31 +375,28 @@ impl NntpSession {
     }
 
     /// TAKETHIS body has been received.
-    fn takethis_body(&self, input: Article) -> NntpFuture {
-        let msgid = self.msgid.clone();
-        let fut = self.process_article(input)
+    fn takethis_body(&self, mut art: Article) -> NntpFuture {
+        let fut = self.received_article(&mut art)
             .and_then(move |status| {
                 let code = match status {
                     ArtAccept::Accept => 239,
-                    ArtAccept::Defer => 431,
                     ArtAccept::Reject => 439,
-                    ArtAccept::Discard => 439,
                 };
-                NntpResult::text_fut(&format!("{} {}", code, msgid))
+                NntpResult::text_fut(&format!("{} {}", code, art.msgid))
             });
         Box::new(fut)
     }
 
-    // Process article: see if we want it, find out if it needs to be sent to other peers.
-    fn process_article(&self, mut art: Article) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
+    // Received article: see if we want it, find out if it needs to be sent to other peers.
+    fn received_article(&self, art: &mut Article) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
 
         let recv_time = util::unixtime();
 
         // parse article.
-        let (headers, body) = match self.process_headers(&mut art) {
+        let (headers, body) = match self.process_headers(art) {
             Err(e) => {
 
-                logger::incoming_reject(&self.thispeer().label, &self.msgid, &art, e);
+                logger::incoming_reject(&self.thispeer().label, &art, e);
 
                 return match e {
 
@@ -423,7 +411,7 @@ impl NntpSession {
 
                     // all other errors. add a reject entry to the history file.
                     _ => {
-                        if self.server.history.store_begin(&self.msgid) == false {
+                        if self.server.history.store_begin(&art.msgid) == false {
                             return Box::new(future::ok(ArtAccept::Reject));
                         }
                         let he = HistEnt{
@@ -433,7 +421,7 @@ impl NntpSession {
                             location:   None,
                         };
                         let fut = self.server.history
-                            .store_commit(&self.msgid, he)
+                            .store_commit(&art.msgid, he)
                             .and_then(|_| future::ok(ArtAccept::Reject));
                         return Box::new(fut);
                     },
@@ -443,11 +431,11 @@ impl NntpSession {
         };
 
         // start phase 1, unless another peer got in before us.
-        if self.server.history.store_begin(&self.msgid) == false {
+        if self.server.history.store_begin(&art.msgid) == false {
             return Box::new(future::ok(ArtAccept::Reject));
         }
 
-        let msgid = Arc::new(self.msgid.clone());
+        let msgid = art.msgid.clone();
         let msgid2 = msgid.clone();
         let history = self.server.history.clone();
         let history2 = self.server.history.clone();
@@ -497,7 +485,7 @@ impl NntpSession {
         {
             let msgid_ok = match headers.message_id() {
                 None => false,
-                Some(msgid) => msgid == &self.msgid,
+                Some(msgid) => msgid == &art.msgid,
             };
             if !msgid_ok {
                 return Err(ArtError::MsgIdMismatch);
@@ -516,6 +504,7 @@ impl NntpSession {
             }
         }
 
+        let new_path;
         let mut mm : Option<String> = None;
         let thispeer = self.thispeer();
 
@@ -529,25 +518,32 @@ impl NntpSession {
             }
 
             // see if the article matches the IFILTER label.
+            let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
             if let Some(ref ifilter) = self.newsfeeds.infilter {
-                let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
                 if ifilter.wants(art, &[], &mut grouplist) {
                     return Err(ArtError::IncomingFilter);
                 }
             }
-        }
-
-        // build a new path.
-        let path = {
 
             let mut pathelems = headers.path().ok_or(ArtError::NoPath)?; // .clone();
+
+            // Now check which of our peers wants a copy.
+            let peers = &self.newsfeeds.peers;
+            let mut v = Vec::with_capacity(peers.len());
+            for idx in 0 .. peers.len() {
+                let peer = &peers[idx];
+                if peer.wants(art, &pathelems, &mut grouplist) {
+                    v.push(idx as u32);
+                }
+            }
+            logger::incoming_accept(&self.thispeer().label, &art, peers, &v);
 
             // should match one of the pathaliases.
             if !thispeer.nomismatch {
                 let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
                 if !is_match {
                     info!("{} {} Path element fails to match aliases: {} in {}",
-                        thispeer.label, self.remote, pathelems[0], self.msgid);
+                        thispeer.label, self.remote, pathelems[0], art.msgid);
                     mm.get_or_insert(format!("{}.MISMATCH", self.remote));
                     pathelems.insert(0, mm.as_ref().unwrap());
                 }
@@ -555,11 +551,12 @@ impl NntpSession {
 
             // insert our own name.
             pathelems.insert(0, &self.config.server.hostname);
-            pathelems.join("!")
-        };
+            new_path = pathelems.join("!");
+        }
 
         // update.
-        headers.update(HeaderName::Path, path.as_bytes());
+        headers.update(HeaderName::Path, new_path.as_bytes());
+
 
         Ok((headers, body))
     }

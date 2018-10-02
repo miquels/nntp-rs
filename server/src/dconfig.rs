@@ -154,6 +154,8 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         DNState::GroupDef => Err(invalid_data!("{}: unexpected EOF in groupdef {}", info, nf.label))?,
     }
 
+    feeds.resolve_references();
+
     Ok(feeds)
 }
 
