@@ -88,6 +88,7 @@ pub fn monotime_ms() -> u64 {
 	1000 * ts.tv_sec as u64 + (ts.tv_nsec / 1000000) as u64
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use test::{Bencher, black_box};
@@ -135,4 +136,4 @@ mod tests {
         });
     }
 }
-
+*/

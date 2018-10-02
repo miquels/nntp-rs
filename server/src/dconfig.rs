@@ -5,6 +5,7 @@
 //! - dnewsfeeds, diablo.hosts -> read into a `NewsFeeds` struct.
 //! - dspool.ctl -> read into a `SpoolCfg` struct.
 //!
+use std::collections::HashMap;
 use std::default::Default;
 use std::fmt::{Debug,Display};
 use std::fs::{self,File};
@@ -13,7 +14,9 @@ use std::io::{self, BufReader};
 use std::str::FromStr;
 use std::time::Duration;
 
+use arttype::ArtType;
 use newsfeeds::*;
+use nntp_rs_util::WildMatList;
 use nntp_rs_util as util;
 use nntp_rs_spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
 
@@ -30,6 +33,12 @@ enum DNState {
     GroupDef,
 }
 
+#[derive(Default)]
+struct GroupDef {
+    label:      String,
+    groups:     WildMatList,
+}
+
 /// Read a NewsFeeds from a "dnewsfeeds" file.
 pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
 
@@ -41,8 +50,11 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
     let mut feeds = NewsFeeds::new();
     let mut nf = NewsPeer::new();
     let mut global = NewsPeer::new();
+    let mut gdef = GroupDef::default();
     let mut state = DNState::Init;
     let mut info = String::new();
+
+    let mut groupdef_map : HashMap<String, ()> = HashMap::new();
 
     for line in file.lines() {
         line_no += 1;
@@ -88,20 +100,21 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
                             _ => {},
                         }
                         state = DNState::Label;
+                        nf.label = words[1].to_string();
                     },
                     "groupdef" => {
                         if words.len() != 2 {
                             Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
                         }
-                        if feeds.groupdef_map.contains_key(words[0]) {
+                        if groupdef_map.contains_key(words[0]) {
                             Err(invalid_data!("{}: {}: duplicate groupdef", info, words[1]))?;
                         }
                         state = DNState::GroupDef;
+                        gdef.label = words[1].to_string();
                     },
                     _ => Err(invalid_data!("{}: unknown keyword {} (expect label/groupdef)",
                                     info, words[0]))?,
                 }
-                nf.label = words[1].to_string();
             },
             DNState::Label => {
                 if words[0] == "end" {
@@ -123,15 +136,13 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
             DNState::GroupDef => {
                 if words[0] == "end" {
                     state = DNState::Init;
-                    feeds.groupdef_map.insert(nf.label.clone(), feeds.groupdefs.len());
-                    feeds.groupdefs.push(nf);
-                    nf = NewsPeer::new();
+                    let label = gdef.label.clone();
+                    gdef.groups.set_name(&label);
+                    groupdef_map.insert(label, ());
+                    feeds.groupdefs.push(gdef.groups);
+                    gdef = GroupDef::default();
                 } else {
-                    if !groupdef_ok(&words) {
-                        Err(invalid_data!("{}: {} not allowed in groupdef {}",
-                                          info, words[0], words[1]))?;
-                    }
-                    set_newspeer_item(&mut nf, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
+                    set_groupdef_item(&mut gdef, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
                 }
             },
         }
@@ -194,19 +205,6 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-// is this allowed in a groupdef?
-// this is very restricted, actual diablo allows a lot more.
-fn groupdef_ok(words: &[&str]) -> bool {
-    match words[0] {
-        "groups"|
-        "addgroup"|
-        "delgroup"|
-        "delgroupany"|
-        "groupref" => true,
-        _ => false,
-    }
 }
 
 // read_dspool_ctl state.
@@ -342,11 +340,10 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "maxconnect" => peer.maxconnect = parse_num::<u32>(words)?,
         "readonly" => peer.readonly = parse_bool(words)?,
 
-        "filter" => parse_list(&mut peer.filter, words, ",")?,
-        "nofilter" => peer.filter.push("!".to_string() + &parse_string(words)?),
+        "filter" => peer.filter.push(parse_string(words)?),
+        "nofilter" => peer.filter.push(&format!("!{}", parse_string(words)?)),
         "nomismatch" => peer.nomismatch = parse_bool(words)?,
         "precomreject" => peer.precomreject = parse_bool(words)?,
-        "noprecomreject" => peer.precomreject = !parse_bool(words)?,
 
         "maxcross" => peer.maxcross = parse_num::<u32>(words)?,
         "maxpath" => peer.maxpath = parse_num::<u32>(words)?,
@@ -354,7 +351,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "minsize" => peer.maxsize = parse_size(words)?,
         "mincross" => peer.mincross = parse_num::<u32>(words)?,
         "minpath" => peer.minpath = parse_num::<u32>(words)?,
-        "arttypes" => parse_list(&mut peer.arttypes, words, " \t:,")?,
+        "arttypes" => parse_arttype(&mut peer.arttypes, words)?,
         "hashfeed" => peer.hashfeed = parse_string(words)?,
         "requiregroup" => peer.requiregroups.push(parse_string(words)?),
 
@@ -362,7 +359,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "adddist" => peer.distributions.push(parse_string(words)?),
         "deldist" => peer.distributions.push("!".to_string() + &parse_string(words)?),
 
-        "groups" => parse_list(&mut peer.groups, words, ",")?,
+        //"groups" => parse_num_list(&mut peer.groups.patterns, words, ",")?,
         "addgroup" => peer.groups.push(parse_string(words)?),
         "delgroup" => peer.groups.push("!".to_string() + &parse_string(words)?),
         "delgroupany" => peer.groups.push("@".to_string() + &parse_string(words)?),
@@ -420,6 +417,19 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "settos" => warn!("{}: unsupported keyword, ignoring", words[0]),
 
         // actually don't know.
+        _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
+    }
+    Ok(())
+}
+
+// Set one item of a Groupdef.
+fn set_groupdef_item(gdef: &mut GroupDef, words: &[&str]) -> io::Result<()> {
+    match words[0] {
+        // "groups" => parse_list(&mut gdef.groups, words, ",")?,
+        "addgroup" => gdef.groups.push(parse_string(words)?),
+        "delgroup" => gdef.groups.push("!".to_string() + &parse_string(words)?),
+        "delgroupany" => gdef.groups.push("@".to_string() + &parse_string(words)?),
+        "groupref" => gdef.groups.push("=".to_string() + &parse_string(words)?),
         _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
     }
     Ok(())
@@ -540,6 +550,17 @@ fn parse_list(list: &mut Vec<String>, words: &[&str], sep: &str) -> io::Result<(
             .filter(|s| !s.is_empty())
             .map(|s| { s.trim(); list.push(s.to_string()); s } )
             .collect();
+    }
+    Ok(())
+}
+
+// parse a list of article types.
+fn parse_arttype(arttypes: &mut Vec<ArtType>, words: &[&str]) -> io::Result<()> {
+    let mut list = Vec::new();
+    parse_list(&mut list, words, " \t:,")?;
+    for w in &list {
+        let a = w.parse().map_err(|_| invalid_data!("{}: unknown article type", w))?;
+        arttypes.push(a);
     }
     Ok(())
 }

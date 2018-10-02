@@ -22,12 +22,14 @@ extern crate nntp_rs_history;
 extern crate nntp_rs_spool;
 extern crate nntp_rs_util;
 
+pub mod article;
 pub mod arttype;
 pub mod commands;
 pub mod config;
 pub mod dconfig;
-pub mod headers;
+pub mod errors;
 pub mod hostcache;
+pub mod logger;
 pub mod newsfeeds;
 pub mod nntp_codec;
 pub mod nntp_session;

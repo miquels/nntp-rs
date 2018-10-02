@@ -102,7 +102,8 @@ impl Server {
                                     NntpInput::WriteError(e) => session.on_write_error(e),
                                     NntpInput::Eof => session.on_eof(),
                                     buf @ NntpInput::Line(_)|
-                                    buf @ NntpInput::Block(_) => session.on_input(buf),
+                                    buf @ NntpInput::Block(_)|
+                                    buf @ NntpInput::Article(_) => session.on_input(buf),
                                 }
                             }
                         })

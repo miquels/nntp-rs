@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io;
 use std::ops::Range;
 use std::str;
+
+use arttype::ArtType;
+use errors::*;
 
 use bytes::BytesMut;
 use memchr::memchr;
@@ -115,7 +117,7 @@ impl HeadersParser {
     ///
     /// If there is no empty line after the header, that is an error,
     /// unless no_body_ok == true.
-    pub fn parse(&mut self, buf: &[u8], no_body_ok: bool, last: bool) -> Option<io::Result<u64>> {
+    pub fn parse(&mut self, buf: &[u8], no_body_ok: bool, last: bool) -> Option<ArtResult<u64>> {
 
         // Parse into NL delimited lines.
         let nlines = buf.len() / 30;
@@ -135,10 +137,10 @@ impl HeadersParser {
                         if no_body_ok {
                             break;
                         }
-                        return Some(Err(io::Error::new(io::ErrorKind::Other, "No header end")));
+                        return Some(Err(ArtError::NoHdrEnd));
                     }
                     // Well this was unexpected.
-                    return Some(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Unexpected EOF")));
+                    return Some(Err(ArtError::ArtIncomplete))
                 },
             };
 
@@ -172,12 +174,12 @@ impl HeadersParser {
             let b = &buf[header_idx.clone()];
             let mut p = match memchr(b':', b) {
                 None => {
-                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData, "mangled headers")));
+                    return Some(Err(ArtError::BadHdrName));
                 },
                 Some(p) => p,
             };
             if p == 0 || b.len() < 4 {
-                return Some(Err(io::Error::new(io::ErrorKind::InvalidData, "mangled headers")));
+                return Some(Err(ArtError::BadHdrName));
             }
             let hname_idx = Range{ start: header_idx.start, end: header_idx.start + p };
             p += 1;
@@ -196,8 +198,8 @@ impl HeadersParser {
             let lc = lowercase(&buf[hname_idx.clone()], &mut tmpbuf[..]);
             if let Some(wk) = header_enums.get(lc) {
                 if self.well_known[*wk as usize].is_some() {
-                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
-                                        format!("duplicate {} header", header_name(wk)))));
+                    // header_name(wk)
+                    return Some(Err(ArtError::DupHdr));
                 }
                 self.well_known[*wk as usize] = Some(self.hpos.len() as u32);
             }
@@ -217,19 +219,19 @@ impl HeadersParser {
         // must also be valid utf8 and non-empty.
         for (ref wk, utf8) in &MANDATORY_HEADERS {
             let idx = match self.well_known[*wk as usize] {
-                None => return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
-                                        format!("missing {} header", header_name(wk))))),
+                // format!("missing {} header", header_name(wk))
+                None => return Some(Err(ArtError::MissingHeader)),
                 Some(idx) => idx as usize,
             };
             if *utf8 {
                 let hvalue_idx = self.hpos[idx].value.clone();
                 if hvalue_idx.start == hvalue_idx.end {
-                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
-                                        format!("empty {} header", header_name(wk)))));
+                    // format!("empty {} header", header_name(wk))
+                    return Some(Err(ArtError::EmptyHdr));
                 }
                 if str::from_utf8(&buf[hvalue_idx]).is_err() {
-                    return Some(Err(io::Error::new(io::ErrorKind::InvalidData,
-                                        format!("non-utf8 data in {} header", header_name(wk)))));
+                    // format!("non-utf8 data in {} header", header_name(wk))
+                    return Some(Err(ArtError::BadUtf8Hdr));
                 }
             }
         }
@@ -453,6 +455,14 @@ impl Headers {
     }
 }
 
+/// Article is a thin wrapper around a bytesmut
+pub struct Article {
+    pub arttype:    ArtType,
+    pub data:       BytesMut,
+    pub lines:      u32,
+    pub len:        usize,
+}
+
 // helper.
 #[inline]
 fn is_cont(line: &[u8]) -> bool {
@@ -465,7 +475,7 @@ fn header_name(wk: &HeaderName) -> &str {
 }
 
 // cheap ASCII lowercasing.
-fn lowercase<'a>(b: &'a [u8], buf: &'a mut [u8]) -> &'a [u8] {
+pub fn lowercase<'a>(b: &'a [u8], buf: &'a mut [u8]) -> &'a [u8] {
     let mut idx = 0;
     for i in 0..b.len() {
         if i == buf.len() {

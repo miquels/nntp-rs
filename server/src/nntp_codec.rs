@@ -3,6 +3,9 @@ use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use article::Article;
+use arttype::ArtTypeScanner;
+
 use bytes::{Bytes, BytesMut};
 use futures::{Async, AsyncSink,  Poll, Stream, Sink, StartSend};
 use memchr::memchr;
@@ -31,18 +34,22 @@ pub enum CodecMode {
     ReadLine    = 2,
     /// in "read multiline block" mode
     ReadBlock   = 3,
+    /// in "read article" mode
+    ReadArticle = 4,
     /// at next read, return quit.
-    Quit        = 4,
+    Quit        = 5,
     /// report write error.
-    WriteError  = 5,
+    WriteError  = 6,
 }
 
+/// Stream object.
 pub enum NntpInput {
     Connect,
     Eof,
     WriteError(io::Error),
     Line(BytesMut),
     Block(BytesMut),
+    Article(Article),
 }
 
 /// NntpCodec implements both Stream to receive and Sink to send either
@@ -52,13 +59,15 @@ pub enum NntpInput {
 /// because we need to switch between reading lines and multi-line blocks,
 /// and we might want to do more advanced buffering later on.
 pub struct NntpCodec {
-    socket:	        TcpStream,
-    rd:		        BytesMut,
-    rd_pos:         usize,
-    rd_overflow:    bool,
-    rd_state:       State,
-    wr:		        Bytes,
-    control:        NntpCodecControl,
+    socket:	            TcpStream,
+    rd:		            BytesMut,
+    rd_pos:             usize,
+    rd_overflow:        bool,
+    rd_state:           State,
+    rd_line_start:      usize,
+    wr:		            Bytes,
+    control:            NntpCodecControl,
+    arttype_scanner:    ArtTypeScanner,
 }
 
 /// Changes the behaviour of the codec.
@@ -72,13 +81,15 @@ impl NntpCodec {
     /// Returns a new NntpCodec.
     pub fn new(socket: TcpStream) -> NntpCodec {
         NntpCodec {
-			socket:	        socket,
-			rd:		        BytesMut::new(),
-			wr:		        Bytes::new(),
-            rd_pos:         0,
-            rd_overflow:    false,
-            rd_state:       State::Lf1Seen,
-            control:        NntpCodecControl::new(),
+			socket:	            socket,
+			rd:		            BytesMut::new(),
+			wr:		            Bytes::new(),
+            rd_pos:             0,
+            rd_overflow:        false,
+            rd_state:           State::Lf1Seen,
+            rd_line_start:      0,
+            control:            NntpCodecControl::new(),
+            arttype_scanner:    ArtTypeScanner::new(),
         }
     }
 
@@ -128,7 +139,7 @@ impl NntpCodec {
         Ok(Async::Ready(Some(NntpInput::Line(buf))))
     }
 
-    fn read_block(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
+    fn read_block(&mut self, do_scan: bool) -> Result<Async<Option<NntpInput>>, io::Error> {
 
         // resume where we left off.
         let mut bufpos = self.rd_pos;
@@ -154,7 +165,14 @@ impl NntpCodec {
                     },
                     State::Cr1Seen => {
                         self.rd_state = match buf[bufpos] {
-                            b'\n' => State::Lf1Seen,
+                            b'\n' => {
+                                // have a full line. scan it.
+                                if do_scan {
+                                    self.arttype_scanner.scan_line(&buf[self.rd_line_start..bufpos]);
+                                    self.rd_line_start = bufpos;
+                                }
+                                State::Lf1Seen
+                            },
                             b'\r' => State::Cr1Seen,
                             _ => State::Data,
                         };
@@ -210,6 +228,24 @@ impl NntpCodec {
 
         // continue
         Ok(Async::NotReady)
+    }
+
+    // read_article is a small wrapper around read_block that returns
+    // an Article struct with the BytesMut and some article metadata.
+    fn read_article(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
+        match self.read_block(true) {
+            Ok(Async::Ready(Some(NntpInput::Block(buf)))) => {
+                let article = Article{
+                    len:        buf.len(),
+                    data:       buf,
+                    arttype:    self.arttype_scanner.art_type(),
+                    lines:      self.arttype_scanner.lines(),
+                };
+                self.arttype_scanner.reset();
+                Ok(Async::Ready(Some(NntpInput::Article(article))))
+            },
+            buf => buf,
+        }
     }
 
 	fn nntp_start_send(&mut self, item: Bytes) -> StartSend<Bytes, io::Error> {
@@ -353,7 +389,8 @@ impl Stream for NntpCodec {
         // Then process the data.
         match rd_mode {
             CodecMode::ReadLine => self.read_line(),
-            CodecMode::ReadBlock => self.read_block(),
+            CodecMode::ReadBlock => self.read_block(false),
+            CodecMode::ReadArticle => self.read_article(),
             _ => unreachable!(),
         }
     }

@@ -19,8 +19,11 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use article::Article;
+use arttype::ArtType;
 use hostcache::HostCache;
 use nntp_rs_util as util;
+use nntp_rs_util::{MatchList,MatchResult,WildMatList};
 
 use ipnet::IpNet;
 
@@ -33,9 +36,8 @@ pub struct NewsFeeds {
     pub peers:          Vec<NewsPeer>,
     pub peer_map:       HashMap<String, usize>,
     /// And the groupdefs that can be referenced by the peers.
-    pub groupdefs:      Vec<GroupDef>,
-    pub groupdef_map:   HashMap<String, usize>,
-
+    pub groupdefs:      Vec<WildMatList>,
+    /// timestamp of file when we loaded this data
     pub timestamp:      u64,
     hcache:             HostCache,
 }
@@ -49,7 +51,6 @@ impl NewsFeeds {
             peers:          Vec::new(),
             peer_map:       HashMap::new(),
             groupdefs:      Vec::new(),
-            groupdef_map:   HashMap::new(),
             hcache:         HostCache::get(),
             timestamp:      util::unixtime_ms(),
         }
@@ -111,7 +112,7 @@ pub struct NewsPeer {
     pub readonly:           bool,
 
     /// used when processing incoming articles
-    pub filter:             Vec<String>,
+    pub filter:             WildMatList,
     pub nomismatch:         bool,
     pub precomreject:       bool,
 
@@ -122,8 +123,8 @@ pub struct NewsPeer {
     pub minsize:            u64,
     pub mincross:           u32,
     pub minpath:            u32,
-    pub arttypes:           Vec<String>,
-    pub groups:             Vec<String>,
+    pub arttypes:           Vec<ArtType>,
+    pub groups:             WildMatList,
     pub requiregroups:      Vec<String>,
     pub distributions:      Vec<String>,
     pub hashfeed:           String,
@@ -140,9 +141,9 @@ pub struct NewsPeer {
     pub genlines:           bool,
     pub preservebytes:      bool,
 
+    /// non-config items.
     pub index:              usize,
 }
-pub type GroupDef = NewsPeer;
 
 impl NewsPeer {
     /// Get a fresh NewsPeer with defaults set.
@@ -152,6 +153,43 @@ impl NewsPeer {
             maxparallel:    2,
             ..Default::default()
         }
+    }
+
+    /// Check if this peer wants to have this article.
+    pub fn wants(&self, art: &Article, path: &[&str], newsgroups: &mut MatchList) -> bool {
+
+        // check article type.
+        if !art.arttype.matches(&self.arttypes) {
+            return false;
+        }
+
+        // check path.
+        for a in &self.pathalias {
+            for p in path {
+                if util::wildmat(p, a) {
+                    return false;
+                }
+            }
+        }
+
+        // XXX TODO check Distribution
+
+        // several min/max matchers.
+        if (self.mincross > 0 && newsgroups.len() < (self.mincross as usize)) ||
+           (self.maxcross > 0 && newsgroups.len() > (self.maxcross as usize)) ||
+           (self.minpath > 0 && path.len() < (self.minpath as usize)) ||
+           (self.maxpath > 0 && path.len() > (self.maxpath) as usize) ||
+           (self.minsize > 0 && (art.len as u64) < self.minsize) ||
+           (self.maxsize > 0 && (art.len as u64) > self.maxsize) {
+            return false;
+        }
+
+        // newsgroup matching.
+        if self.groups.matchlistx(newsgroups) != MatchResult::Match {
+            return false;
+        }
+
+        true
     }
 }
 

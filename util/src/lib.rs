@@ -1,6 +1,7 @@
 //! A bunch of helper and utility functions.
 
 #[macro_use] extern crate lazy_static;
+#[macro_use] extern crate log;
 extern crate chrono;
 extern crate libc;
 extern crate regex;

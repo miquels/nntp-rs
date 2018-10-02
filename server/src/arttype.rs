@@ -13,6 +13,7 @@
 //!
 
 use std::cmp;
+use std::fmt::{self,Display};
 use std::str::FromStr;
 
 /*-
@@ -118,6 +119,16 @@ impl FromStr for ArtType {
     }
 }
 
+impl Display for ArtType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.negate {
+            write!(f, "{:06x}", self.arttype)
+        } else {
+            write!(f, "{:06x}", self.arttype)
+        }
+    }
+}
+
 impl ArtType {
 
     /// Match a article type to a list of types that are acceptable
@@ -152,7 +163,7 @@ fn tolower(b: u8) -> u8 {
 
 fn lcmatch(b: &[u8], s: &str) -> bool {
     let mut tmpbuf = [0u8; 64];
-    let lc = super::headers::lowercase(b, &mut tmpbuf[..]);
+    let lc = super::article::lowercase(b, &mut tmpbuf[..]);
     let len = cmp::min(lc.len(), s.len());
     lc == &s.as_bytes()[..len]
 }
