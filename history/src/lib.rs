@@ -116,7 +116,7 @@ impl History {
     }
 
     // Find an entry in the history database.
-    fn cache_lookup(&self, msgid: &str, check: bool, phase2: bool) -> Option<HistEnt> {
+    fn cache_lookup(&self, msgid: &str, check: bool, precommit: bool) -> Option<HistEnt> {
         let mut partition = self.inner.cache.lock_partition(msgid);
         if let Some((mut h, age)) = partition.lookup() {
             match h.status {
@@ -135,7 +135,7 @@ impl History {
                         // Not valid as tentative entry anymore, but we can
                         // interpret it as a negative cache entry.
                         h.status = HistStatus::NotFound;
-                        if check {
+                        if precommit {
                             partition.store_tentative();
                         }
                     }
@@ -144,7 +144,7 @@ impl History {
                 _ => Some(h),
             }
         } else {
-            if phase2 {
+            if precommit {
                 partition.store_tentative();
             }
             None
@@ -176,31 +176,14 @@ impl History {
         })
     }
 
-    /// Find an entry in the history database. This lookup first check the
-    /// write-cache, and if an entry is not found there, queries the
-    /// backend database.
-    pub fn lookup_through_cache(&self, msgid: &str) -> Box<HistFuture> {
-
-        // First check the cache.
-        if let Some(he) = self.cache_lookup(msgid, false, false) {
-            let f = if he.status == HistStatus::NotFound {
-                None
-            } else {
-                Some(he)
-            };
-            return Box::new(future::ok(f));
-        }
-
-        // Not in the cache. We have to do a lookup.
-        Box::new(self.lookup(msgid))
-    }
-
     /// This is like `lookup_through_cache`, but it can return HistStatus::Tentative as well.
     /// It will also put a Tentative entry in the history cache if we did not
     /// have an entry for this message-id yet.
     pub fn check(&self, msgid: &str) -> Box<HistFuture> {
 
-        // First check the cache.
+        // First check the cache. HistStatus::NotFound means it WAS found in
+        // the cache as negative entry, so we do not need to go check
+        // the actual history db!
         if let Some(he) = self.cache_lookup(msgid, true, false) {
             let f = if he.status == HistStatus::NotFound {
                 None
@@ -210,7 +193,7 @@ impl History {
             return Box::new(future::ok(f));
         }
 
-        // Do a lookup, and after the lookup check the cache again.
+        // Check the actual history database.
         let this = self.clone();
         let msgid2 = msgid.to_string();
         let f = self.lookup(msgid)
@@ -218,6 +201,7 @@ impl History {
                 match he {
                     Some(he) => Some(he),
                     None => {
+                        // Not present. Try to put a tentative entry in the cache.
                         match this.cache_lookup(&msgid2, true, true) {
                             Some(he) => {
                                 if he.status == HistStatus::NotFound {
