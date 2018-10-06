@@ -9,7 +9,7 @@ use std::sync::{Arc,mpsc};
 use std::time::Duration;
 use std::thread;
 
-use dns_lookup::{self,AddrInfoHints,SockType};
+use dns_lookup::{self,AddrInfoHints,SockType,LookupErrorKind};
 use nntp_rs_util as util;
 use parking_lot::Mutex;
 
@@ -221,7 +221,6 @@ impl HostCache {
                 Err(e) => {
                     // XXX FIXME as soon as dns-lookup exposes LookupErrorKind.
                     // https://github.com/keeperofdakeys/dns-lookup/issues/10
-                    /*
                     match e.kind() {
                         // NXDOMAIN or NODATA - normal retry time.
                         LookupErrorKind::NoName|
@@ -231,14 +230,11 @@ impl HostCache {
                         },
                         // Transient error, retry soon.
                         _ => {
-                    */
                             let err : io::Error = e.into();
                             warn!("resolver: lookup {}: {}", host, err);
                             (o_addrs, 0)
-                    /*
                         },
                     }
-                    */
                 }
             };
 
