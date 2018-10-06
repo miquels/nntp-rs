@@ -299,8 +299,7 @@ impl NntpSession {
             Cmd::Ihave => {
                 let ok = "335 Send article; end with CRLF DOT CRLF";
                 let codec_control = self.codec_control.clone();
-                codec_control.set_mode(CodecMode::ReadArticle);
-                codec_control.set_msgid(args[0]);
+                let msgid = args[0].to_string();
                 self.state = NntpState::Ihave;
                 let fut = self.server.history.check(args[0])
                     .map(move |he| {
@@ -310,6 +309,7 @@ impl NntpSession {
                             _ => "435 Duplicate",
                         };
                         if r == ok {
+                            codec_control.set_msgid(&msgid);
                             codec_control.set_mode(CodecMode::ReadArticle);
                         }
                         NntpResult::text(r)
@@ -593,7 +593,7 @@ impl NntpSession {
                 let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
                 if !is_match {
                     info!("{} {} Path element fails to match aliases: {} in {}",
-                        thispeer.label, self.remote, pathelems[0], art.msgid);
+                        thispeer.label, self.remote.ip(), pathelems[0], art.msgid);
                     mm.get_or_insert(format!("{}.MISMATCH", self.remote));
                     pathelems.insert(0, mm.as_ref().unwrap());
                 }
