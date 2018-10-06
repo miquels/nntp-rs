@@ -94,25 +94,9 @@ impl<'a> HCachePartition<'a> {
     }
 
     /// add a tentative entry to the history cache.
-    pub fn store_tentative(&mut self) {
+    pub fn store_tentative(&mut self, what: HistStatus) {
         let he = HistEnt{
-            status:     HistStatus::Tentative,
-            time:       self.when as u64,
-            head_only:  false,
-            location:   None,
-        };
-        let inner = &mut *self.inner;
-        inner.insert(HCacheEnt{
-            histent: he,
-            hash: self.hash,
-            when: self.when,
-        });
-    }
-
-    /// like tentative, but when writing the article.
-    pub fn store_begin(&mut self) {
-        let he = HistEnt{
-            status:     HistStatus::Writing,
+            status:     what,
             time:       self.when as u64,
             head_only:  false,
             location:   None,

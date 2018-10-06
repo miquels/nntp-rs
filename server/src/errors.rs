@@ -4,6 +4,8 @@
 pub enum ArtError {
     /// after receiving article we already had it anyway.
     PostDuplicate,
+    /// racing another article.
+    Deferred,
     /// article is incomplete
     ArtIncomplete,
     /// if headers + body < 80 chars

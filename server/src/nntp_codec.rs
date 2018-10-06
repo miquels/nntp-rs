@@ -42,6 +42,21 @@ pub enum CodecMode {
     WriteError  = 6,
 }
 
+impl From<usize> for CodecMode {
+    fn from(value: usize) -> Self {
+        match value {
+            1 => CodecMode::Connect,
+            2 => CodecMode::ReadLine,
+            3 => CodecMode::ReadBlock,
+            4 => CodecMode::ReadArticle,
+            5 => CodecMode::Quit,
+            6 => CodecMode::WriteError,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+
 /// Stream object.
 pub enum NntpInput {
     Connect,
@@ -218,6 +233,7 @@ impl NntpCodec {
         if self.rd_state == State::Lf2Seen {
             let buf = self.rd.split_to(self.rd_pos);
             self.rd_pos = 0;
+            self.rd_line_start = 0;
             self.rd_state = State::Lf1Seen;
             if self.rd_overflow {
                 // recoverable error.
@@ -370,6 +386,7 @@ impl Stream for NntpCodec {
                         io::Error::new(io::ErrorKind::Other, "write error")
                     },
                 };
+                self.control.quit();
                 return Ok(Async::Ready(Some(NntpInput::WriteError(e))));
             },
             CodecMode::Quit => return Ok(Async::Ready(None)),
@@ -424,19 +441,6 @@ impl Sink for NntpCodec {
 
 	fn close(&mut self) -> Poll<(), io::Error> {
         self.nntp_sink_close()
-    }
-}
-
-impl From<usize> for CodecMode {
-    fn from(value: usize) -> Self {
-        match value {
-            1 => CodecMode::Connect,
-            2 => CodecMode::ReadLine,
-            3 => CodecMode::ReadBlock,
-            4 => CodecMode::Quit,
-            5 => CodecMode::WriteError,
-            _ => unimplemented!(),
-        }
     }
 }
 

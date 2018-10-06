@@ -114,6 +114,7 @@ impl Server {
                             .map_err(move |e| control.write_error(e))
                             .map(|_| ());
 
+                        /*
                         let session = AssertUnwindSafe(session);
                         handle.spawn(session.catch_unwind().then(|result| {
                             match result {
@@ -124,6 +125,8 @@ impl Server {
                                 },
                             }
                         })).map_err(|_| ())
+                        */
+                        handle.spawn(session).map_err(|e| error!("run: error {}", e))
                     })
                     .listen(65524);
 

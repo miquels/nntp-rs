@@ -12,7 +12,6 @@
 //! License: https://opensource.org/licenses/BSD-2-Clause
 //!
 
-use std::cmp;
 use std::fmt::{self,Display};
 use std::str::FromStr;
 
@@ -95,7 +94,7 @@ impl FromStr for ArtType {
             "none"      => ArtType::NONE,
             "default"   => ArtType::DEFAULT,
             "control"   => ArtType::CONTROL,
-            "cancel"    => ArtType::MIME,
+            "cancel"    => ArtType::CANCEL,
             "binary"    => ArtType::BINARY,
             "binaries"  => ArtType::BINARY,
             "uuencode"  => ArtType::UUENCODE,
@@ -154,7 +153,7 @@ impl ArtType {
 }
 
 fn tolower(b: u8) -> u8 {
-    if b >= 65 && b <= 97 {
+    if b >= b'A' && b <= b'Z' {
         b + 32
     } else {
         b
@@ -162,10 +161,12 @@ fn tolower(b: u8) -> u8 {
 }
 
 fn lcmatch(b: &[u8], s: &str) -> bool {
+    if s.len() > b.len() {
+        return false;
+    }
     let mut tmpbuf = [0u8; 64];
     let lc = super::article::lowercase(b, &mut tmpbuf[..]);
-    let len = cmp::min(lc.len(), s.len());
-    lc == &s.as_bytes()[..len]
+    &lc[..s.len()] == s.as_bytes()
 }
 
 /// Arttype scanner.
@@ -248,7 +249,7 @@ impl ArtTypeScanner {
          * Do some checks that could apply to headers and or body
          */
         let first = tolower(line[0]);
-        if first == b'c' && tolower(line[0]) == b'o' {
+        if first == b'c' && tolower(line[1]) == b'o' {
             if lcmatch(line, "content-type: text/html") {
                 self.arttype.arttype |= ArtType::HTML;
             }

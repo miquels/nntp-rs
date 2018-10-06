@@ -85,7 +85,7 @@ fn main() -> io::Result<()> {
     println!("Listening on port {}", addr.port());
 
     // install custom panic logger.
-    handle_panic();
+    //handle_panic();
 
     // and start server.
     let server = server::Server::new(hist, spool);

@@ -37,7 +37,7 @@ impl FromStr for WildPat {
     type Err = ();
     fn from_str(pat: &str) -> Result<WildPat, ()> {
         let r = if let Some(pos) = pat.find(|c| c == '?' || c == '*' || c == '[' || c == '\\') {
-            if pos == pat.len() - 1 && pat.as_bytes()[pos] == b'*' {
+            if pos > 0 && pos == pat.len() - 1 && pat.as_bytes()[pos] == b'*' {
                 WildPat::Prefix(pat[..pat.len() - 1].to_string())
             } else {
                 WildPat::Pattern(pat.to_string())

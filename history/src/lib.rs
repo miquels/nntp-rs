@@ -33,8 +33,9 @@ use nntp_rs_spool as spool;
 use cache::HCache;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
+const PRESTORE_MAX_AGE: u32 = 60;
 
-type HistFuture = Future<Item=Option<HistEnt>, Error=io::Error> + Send;
+type HistStatusFuture = Future<Item=Option<HistStatus>, Error=io::Error> + Send;
 
 /// Functionality a backend history database needs to make available.
 pub trait HistBackend: Send + Sync {
@@ -86,6 +87,13 @@ pub enum HistStatus {
     Rejected,
 }
 
+/// Returned as error by some of the methods.
+#[derive(Debug)]
+pub enum HistError {
+    IoError(io::Error),
+    Status(HistStatus),
+}
+
 impl History {
 
     /// Open history database.
@@ -115,38 +123,33 @@ impl History {
         })
     }
 
-    // Find an entry in the history database.
-    fn cache_lookup(&self, msgid: &str, check: bool, precommit: bool) -> Option<HistEnt> {
-        let mut partition = self.inner.cache.lock_partition(msgid);
+    // Do a lookup in the history cache. Just a wrapper around partition.lookup()
+    // that rewrites tentative cache entries that are too old to NotFound,
+    // and that returns a HistStatus instead of HistEnt.
+    fn cache_lookup(&self, partition: &mut cache::HCachePartition, msgid: &str) -> Option<HistStatus> {
         if let Some((mut h, age)) = partition.lookup() {
             match h.status {
                 HistStatus::Writing => {
-                    if check {
-                        // In the CHECK case, handle this as Tentative.
-                        h.status = HistStatus::Tentative;
-                    } else {
-                        // Otherwise as "not found"
+                    if age > PRESTORE_MAX_AGE {
+                        // This should never happen, but if it does, log it,
+                        // and invalidate the entry.
+                        error!("cache_lookup: entry for {} in state HistStatus::Writing too old: {}s",
+                               msgid, age);
                         h.status = HistStatus::NotFound;
                     }
-                    Some(h)
+                    Some(h.status)
                 },
                 HistStatus::Tentative => {
                     if age > PRECOMMIT_MAX_AGE {
                         // Not valid as tentative entry anymore, but we can
                         // interpret it as a negative cache entry.
                         h.status = HistStatus::NotFound;
-                        if precommit {
-                            partition.store_tentative();
-                        }
                     }
-                    Some(h)
+                    Some(h.status)
                 },
-                _ => Some(h),
+                _ => Some(h.status),
             }
         } else {
-            if precommit {
-                partition.store_tentative();
-            }
             None
         }
     }
@@ -176,69 +179,98 @@ impl History {
         })
     }
 
-    /// This is like `lookup_through_cache`, but it can return HistStatus::Tentative as well.
-    /// It will also put a Tentative entry in the history cache if we did not
-    /// have an entry for this message-id yet.
-    pub fn check(&self, msgid: &str) -> Box<HistFuture> {
+    /// The CHECK command.
+    ///
+    /// Lookup a message-id through the cache and the history db. If not found
+    /// or invalid, mark the message-id in the cache as Tentative.
+    ///
+    /// Returns:
+    /// - None: message-id not found
+    /// - HistStatus::Tentative - message-id already tentative in cache
+    /// - HistEnt with any other status - message-id already present
+    ///
+    pub fn check(&self, msgid: &str) -> Box<HistStatusFuture> {
+        self.do_check(msgid, HistStatus::Tentative)
+    }
+
+    /// Article received. Call this before writing to history / spool.
+    ///
+    /// Much like the check method, but succeeds when the cache entry
+    /// is Tentative, and sets the cache entry to status Writing.
+    ///
+    /// Returns future::ok if we succesfully set the cache entry to state Writing,
+    /// future::err(HistError) otherwise.
+    pub fn store_begin(&self, msgid: &str) -> Box<Future<Item=(), Error=HistError> + Send> {
+        let fut = self.do_check(msgid, HistStatus::Writing)
+            .then(|res| {
+                match res {
+                    Err(e) => future::err(HistError::IoError(e)),
+                    Ok(h) => match h {
+                        None|
+                        Some(HistStatus::NotFound) => future::ok(()),
+                        Some(s) => future::err(HistError::Status(s)),
+                    }
+                }
+            });
+        Box::new(fut)
+    }
+
+    // Function that does the actual work for check / store_begin.
+    fn do_check(&self, msgid: &str, what: HistStatus) -> Box<HistStatusFuture> {
 
         // First check the cache. HistStatus::NotFound means it WAS found in
         // the cache as negative entry, so we do not need to go check
         // the actual history db!
-        if let Some(he) = self.cache_lookup(msgid, true, false) {
-            let f = if he.status == HistStatus::NotFound {
-                None
-            } else {
-                Some(he)
+        loop {
+            let mut partition = self.inner.cache.lock_partition(msgid);
+            let f = match self.cache_lookup(&mut partition, msgid) {
+                Some(HistStatus::NotFound) => {
+                    partition.store_tentative(what);
+                    None
+                },
+                Some(HistStatus::Tentative) if what == HistStatus::Writing => {
+                    partition.store_tentative(what);
+                    None
+                },
+                Some(HistStatus::Writing) => Some(HistStatus::Tentative),
+                hs @ Some(_) => hs,
+                None => break,
             };
             return Box::new(future::ok(f));
         }
 
-        // Check the actual history database.
+        // No cache entry. Check the actual history database.
         let this = self.clone();
         let msgid2 = msgid.to_string();
         let f = self.lookup(msgid)
             .map(move |he| {
                 match he {
-                    Some(he) => Some(he),
+                    Some(he) => Some(he.status),
                     None => {
                         // Not present. Try to put a tentative entry in the cache.
-                        match this.cache_lookup(&msgid2, true, true) {
-                            Some(he) => {
-                                if he.status == HistStatus::NotFound {
-                                    None
-                                } else {
-                                    Some(he)
-                                }
+                        let mut partition = this.inner.cache.lock_partition(&msgid2);
+                        match this.cache_lookup(&mut partition, &msgid2) {
+                            None|
+                            Some(HistStatus::NotFound) => {
+                                partition.store_tentative(what);
+                                None
                             },
-                            None => None,
+                            Some(HistStatus::Tentative) if what == HistStatus::Writing => {
+                                partition.store_tentative(what);
+                                None
+                            },
+                            Some(HistStatus::Writing) => Some(HistStatus::Tentative),
+                            hs @ Some(_) => hs,
                         }
-                    }
+                    },
                 }
             });
         Box::new(f)
     }
 
-    /// We have received the article. Before we write it to the spool,
-    /// mark it in the cache with status "Writing".
-    pub fn store_begin(&self, msgid: &str) -> bool {
-        let mut partition = self.inner.cache.lock_partition(msgid);
-        if let Some((h, _age)) = partition.lookup() {
-            match h.status {
-                HistStatus::Present |
-                HistStatus::Writing |
-                HistStatus::Expired |
-                HistStatus::Rejected => return false,
-                HistStatus::Tentative |
-                HistStatus::NotFound => {},
-            }
-        }
-        partition.store_begin();
-        true
-    }
-
     /// Done writing to the spool. Update the cache-entry and write-through
-    /// to the backend storage.
-    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Item=bool, Error=io::Error> {
+    /// to the actual history database backend.
+    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Item=(), Error=io::Error> {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
@@ -249,7 +281,7 @@ impl History {
         let msgid = msgid.to_string().into_bytes();
         let f = self.inner.cpu_pool.spawn_fn(move || {
             match inner.backend.store(&msgid, &he) {
-                Ok(()) => future::ok(true),
+                Ok(()) => future::ok(()),
                 Err(e) => future::err(e),
             }
         });

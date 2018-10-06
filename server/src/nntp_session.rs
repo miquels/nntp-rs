@@ -15,7 +15,7 @@ use errors::*;
 use logger;
 use newsfeeds::{NewsFeeds,NewsPeer};
 use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
-use nntp_rs_history::{HistEnt,HistStatus};
+use nntp_rs_history::{HistEnt,HistError,HistStatus};
 use nntp_rs_spool::ArtPart;
 use nntp_rs_util::{MatchList,MatchResult};
 use nntp_rs_util as util;
@@ -79,6 +79,8 @@ enum ArtAccept {
     Accept,
     // reject and store rejection in history file.
     Reject,
+    // try again later
+    Defer,
 }
 
 impl NntpSession {
@@ -273,13 +275,10 @@ impl NntpSession {
                     .map(move |he| {
                         match he {
                             None => format!("238 {}", msgid),
-                            Some(he) => match he.status {
-                                HistStatus::Present|
-                                HistStatus::Expired|
-                                HistStatus::Rejected => format!("438 {}", msgid),
-                                HistStatus::Tentative|
-                                HistStatus::Writing => format!("431 {}", msgid),
+                            Some(status) => match status {
                                 HistStatus::NotFound => format!("238 {}", msgid),
+                                HistStatus::Tentative => format!("431 {}", msgid),
+                                _ => format!("438 {}", msgid),
                             }
                         }
                     })
@@ -306,15 +305,9 @@ impl NntpSession {
                 let fut = self.server.history.check(args[0])
                     .map(move |he| {
                         let r = match he {
-                            None => ok,
-                            Some(he) => match he.status {
-                                HistStatus::Present|
-                                HistStatus::Expired|
-                                HistStatus::Rejected => "435 Duplicate",
-                                HistStatus::Tentative|
-                                HistStatus::Writing => "436 Retry later",
-                                HistStatus::NotFound => ok,
-                            }
+                            Some(HistStatus::NotFound)|None => ok,
+                            Some(HistStatus::Tentative) => "436 Retry later",
+                            _ => "435 Duplicate",
                         };
                         if r == ok {
                             codec_control.set_mode(CodecMode::ReadArticle);
@@ -370,36 +363,43 @@ impl NntpSession {
     }
 
     /// IHAVE body has been received.
-    fn ihave_body(&self, _input: Article) -> NntpFuture {
-         Box::new(future::ok(NntpResult::text("435 Transfer rejected")))
+    fn ihave_body(&self, art: Article) -> NntpFuture {
+        let msgid = art.msgid.clone();
+        let fut = self.received_article(art, true)
+            .and_then(move |status| {
+                let code = match status {
+                    ArtAccept::Accept => 235,
+                    ArtAccept::Defer => 436,
+                    ArtAccept::Reject => 437,
+                };
+                NntpResult::text_fut(&format!("{} {}", code, msgid))
+            });
+        Box::new(fut)
     }
 
     /// TAKETHIS body has been received.
-    fn takethis_body(&self, mut art: Article) -> NntpFuture {
-        let fut = self.received_article(&mut art)
+    fn takethis_body(&self, art: Article) -> NntpFuture {
+        let msgid = art.msgid.clone();
+        let fut = self.received_article(art, false)
             .and_then(move |status| {
                 let code = match status {
                     ArtAccept::Accept => 239,
+                    ArtAccept::Defer|
                     ArtAccept::Reject => 439,
                 };
-                NntpResult::text_fut(&format!("{} {}", code, art.msgid))
+                NntpResult::text_fut(&format!("{} {}", code, msgid))
             });
         Box::new(fut)
     }
 
     // Received article: see if we want it, find out if it needs to be sent to other peers.
-    fn received_article(&self, art: &mut Article) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
-
+    fn received_article(&self, mut art: Article, can_defer: bool) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
         let recv_time = util::unixtime();
 
         // parse article.
-        let (headers, body) = match self.process_headers(art) {
+        let (headers, body) = match self.process_headers(&mut art) {
             Err(e) => {
-
-                logger::incoming_reject(&self.thispeer().label, &art, e);
-
                 return match e {
-
                     // article was mangled on the way. do not store the
                     // message-id in the history file, another peer may send
                     // a correct version.
@@ -407,22 +407,50 @@ impl NntpSession {
                     ArtError::HdrOnlyNoBytes|
                     ArtError::NoHdrEnd|
                     ArtError::MsgIdMismatch|
-                    ArtError::NoPath => Box::new(future::ok(ArtAccept::Reject)),
+                    ArtError::NoPath => {
+                        self.server.history.store_rollback(&art.msgid);
+                        Box::new(future::ok(
+                            if can_defer {
+                                logger::incoming_defer(&self.thispeer().label, &art, e);
+                                ArtAccept::Defer
+                            } else {
+                                logger::incoming_reject(&self.thispeer().label, &art, e);
+                                ArtAccept::Reject
+                            }
+                        ))
+                    },
 
                     // all other errors. add a reject entry to the history file.
-                    _ => {
-                        if self.server.history.store_begin(&art.msgid) == false {
-                            return Box::new(future::ok(ArtAccept::Reject));
-                        }
+                    e => {
                         let he = HistEnt{
                             status:     HistStatus::Rejected,
                             time:       recv_time,
                             head_only:  false,
                             location:   None,
                         };
+                        let label = self.thispeer().label.clone();
+                        let history = self.server.history.clone();
                         let fut = self.server.history
-                            .store_commit(&art.msgid, he)
-                            .and_then(|_| future::ok(ArtAccept::Reject));
+                            .store_begin(&art.msgid)
+                            .then(move |res| -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
+                                match res {
+                                    Ok(_) => {
+                                        // succeeded adding reject entry.
+                                        Box::new(history.store_commit(&art.msgid, he)
+                                            .and_then(move |_| {
+                                                logger::incoming_reject(&label, &art, e);
+                                                future::ok(ArtAccept::Reject)
+                                            }))
+                                    },
+                                    Err(HistError::Status(_)) => {
+                                        // message-id seen before, log "duplicate"
+                                        logger::incoming_reject(&label, &art, ArtError::PostDuplicate);
+                                        Box::new(future::ok(ArtAccept::Reject))
+                                    },
+                                    Err(HistError::IoError(e)) => Box::new(future::err(e)),
+                                }
+                            });
+                        // XXX FIXME double box
                         return Box::new(fut);
                     },
                 };
@@ -430,38 +458,59 @@ impl NntpSession {
             Ok(art) => art,
         };
 
-        // start phase 1, unless another peer got in before us.
-        if self.server.history.store_begin(&art.msgid) == false {
-            return Box::new(future::ok(ArtAccept::Reject));
-        }
-
-        let msgid = art.msgid.clone();
-        let msgid2 = msgid.clone();
+        // OK now we can go ahead and store the parsed article.
+        let label = self.thispeer().label.clone();
         let history = self.server.history.clone();
-        let history2 = self.server.history.clone();
+        let spool = self.server.spool.clone();
+        let msgid = art.msgid.clone();
 
-        // store the article.
-        let mut buffer = BytesMut::new();
-        headers.header_bytes(&mut buffer);
-        let fut = self.server.spool.write(buffer, body)
-            .and_then(move |artloc| {
-                let he = HistEnt{
-                    status:     HistStatus::Present,
-                    time:       recv_time,
-                    head_only:  false,
-                    location:   Some(artloc),
-                };
-                history.store_commit(&msgid, he)
-            }).then(move |result| {
-                match result {
-                    Err(e) => {
-                        error!("takethis {}: write: {}", &msgid2, e);
-                        history2.store_rollback(&msgid2);
-                        future::ok(ArtAccept::Reject)
+        let fut = self.server.history.store_begin(&art.msgid)
+            .then(move |res| -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
+                match res {
+                    Err(HistError::Status(_)) => {
+                        // message-id seen before, log "duplicate"
+                        logger::incoming_reject(&label, &art, ArtError::PostDuplicate);
+                        Box::new(future::ok(ArtAccept::Reject))
                     },
-                    Ok(_) => future::ok(ArtAccept::Accept),
+                    Err(HistError::IoError(e)) => {
+                        // I/O error, return error straight away.`
+                        Box::new(future::err(e))
+                    },
+                    Ok(_) => {
+                        // success, continue.
+                        let msgid2 = msgid.clone();
+                        let history2 = history.clone();
+
+                        // store the article.
+                        let mut buffer = BytesMut::new();
+                        headers.header_bytes(&mut buffer);
+                        let fut = spool.write(buffer, body)
+                            .and_then(move |artloc| {
+                                let he = HistEnt{
+                                    status:     HistStatus::Present,
+                                    time:       recv_time,
+                                    head_only:  false,
+                                    location:   Some(artloc),
+                                };
+                                history.store_commit(&msgid, he)
+                            }).then(move |result| {
+                                match result {
+                                    Err(e) => {
+                                        // XXX FIXME do not map I/O errors to reject; the
+                                        // caller of this future must do that. It should
+                                        // probably return a 400 error and close the connection.
+                                        error!("takethis {}: write: {}", &msgid2, e);
+                                        history2.store_rollback(&msgid2);
+                                        future::ok(ArtAccept::Reject)
+                                    },
+                                    Ok(_) => future::ok(ArtAccept::Accept),
+                                }
+                            });
+                        Box::new(fut)
+                    }
                 }
             });
+        // XXX FIXME double boxing.
         Box::new(fut)
     }
 
@@ -533,6 +582,7 @@ impl NntpSession {
             for idx in 0 .. peers.len() {
                 let peer = &peers[idx];
                 if peer.wants(art, &pathelems, &mut grouplist) {
+                    debug!("{}.wants YES idx {}", peer.label, idx);
                     v.push(idx as u32);
                 }
             }
