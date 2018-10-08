@@ -1,12 +1,12 @@
 
 use std::fs;
 use std::io;
+use std::io::Error as IoError;
 use std::io::{BufRead,BufReader,Read,Write,Seek,SeekFrom};
 use std::mem;
-use std::path::PathBuf;
+use std::path::{Path,PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize,Ordering};
-use std::time::{Duration,SystemTime};
+use std::time::Duration;
 
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
@@ -14,39 +14,35 @@ use std::os::unix::fs::FileExt;
 use byteorder::{ByteOrder,LE};
 use bytes::{BufMut,BytesMut};
 use libc;
-use parking_lot::{Mutex,RwLock};
+use parking_lot::Mutex;
 
-use time;
-
+use util::unixtime;
 use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolDef};
 
-const MAX_WRITERS : usize = 16;
+const MAX_SPOOLFILE_SIZE : u64 = 1_000_000_000;
+const DFL_FILE_REALLOCINT : u32 = 600;
+//const DFL_DIR_REALLOCINT : u32 = 3600;
 
 /// A diablo spool instance.
 ///
 /// Can be used for reading and writing articles from/to this spool.
 pub struct DSpool {
-    path:       PathBuf,
-    spool_no:   u8,
-    reallocint: u64,
-    cfg:        Arc<SpoolDef>,
-    writers:    RwLock<Arc<Writers>>,
+    path:               PathBuf,
+    spool_no:           u8,
+    file_reallocint:    u32,
+    dir_reallocint:     u32,
+    cfg:                Arc<SpoolDef>,
+    writer:             Mutex<Writer>,
 }
 
-// Files we have open for writing.
+// The file we have open for writing.
 #[derive(Default)]
-struct Writers {
-    files:      [Mutex<DSpoolFile>; MAX_WRITERS],
-    sizes:      [AtomicUsize; MAX_WRITERS],
-    slot:       u64,
-}
-
-// A spoolfile being written to (if fh.is_some())
-#[derive(Default)]
-struct DSpoolFile {
+struct Writer {
+    fh:         Option<fs::File>,
+    name:       String,
     file:       u16,
     dir:        u32,
-    fh:         Option<fs::File>,
+    tm:         u64,
 }
 
 // Article header. This struct is stored on disk followed by the article.
@@ -91,12 +87,11 @@ struct DArtLocation {
 
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
-    let mins = LE::read_u32(&t[10..14]);
     DArtLocation{
         file:   LE::read_u16(&t[0..2]),
         pos:    LE::read_u32(&t[2..6]),
         size:   LE::read_u32(&t[6..10]),
-        dir:    mins - (mins % 10),
+        dir:    LE::read_u32(&t[10..14]),
     }
 }
 
@@ -124,13 +119,16 @@ impl DSpool {
 
     /// Create a new diablo-type spool backend.
     pub fn new(cfg: SpoolDef, reallocint: Option<Duration>) -> io::Result<Box<SpoolBackend>> {
-        let reallocint = reallocint.unwrap_or(Duration::from_secs(600));
+        let file_reallocint = reallocint.map(|d| d.as_secs() as u32).unwrap_or(DFL_FILE_REALLOCINT);
+        let file_reallocint = (file_reallocint / 60) * 60;
+        let dir_reallocint = file_reallocint * 6;
         let ds = DSpool{
-            path:       PathBuf::from(cfg.path.clone()),
-            spool_no:   cfg.spool_no,
-            reallocint: reallocint.as_secs(),
-            cfg:        Arc::new(cfg),
-            writers:    RwLock::new(Arc::new(Writers::default())),
+            path:               PathBuf::from(cfg.path.clone()),
+            spool_no:           cfg.spool_no,
+            file_reallocint:    file_reallocint,
+            dir_reallocint:     dir_reallocint,
+            cfg:                Arc::new(cfg),
+            writer:             Mutex::new(Writer::default()),
         };
         Ok(Box::new(ds))
     }
@@ -227,137 +225,136 @@ impl DSpool {
         Ok(())
     }
 
+    // Finds the most recently modified spoolfile in the directory.
+    fn find_most_recent(&self, path: impl AsRef<Path>) -> io::Result<Option<u16>> {
+        let d = fs::read_dir(path)?;
+        let d = d
+            .filter_map(|r| r.ok())
+            .filter_map(|e| e.metadata().ok().map(|m| (m.len(), e.file_name(), m.modified())))
+            .filter_map(|(l, n, t)| n.into_string().ok().map(|n| (l, n, t.unwrap())))
+            .filter(|(_, n, _)| n.starts_with("B.") && n.len() == 6)
+            .filter_map(|(l, n, t)| u16::from_str_radix(&n[2..], 16).ok().map(|g| (l, n, g, t)));
+        let mut files : Vec<_> = d.collect();
+        files.sort_unstable_by(|(_, _, _, a), (_, _, _, b)| a.cmp(b));
+        let res = match files.into_iter().last() {
+            None => None,
+            Some((len, _name, iter, _tm)) => {
+                if len < MAX_SPOOLFILE_SIZE {
+                    Some(iter)
+                } else {
+                    None
+                }
+            },
+        };
+        Ok(res)
+    }
+
     // Write an article. 
     // SpoolBackend::write() forwards to this method.
     fn do_write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
 
-        // get a refcounted handle to the writers.
-        let writers = {
-            let w = self.writers.read();
-            w.clone()
-        };
+        // lock the writer so we have unique access.
+        let mut writer = self.writer.lock();
 
-        // check if we need to move to the next timeslot.
+        // check if we had this file open for more than file_reallocint secs,
+        // or if we need to move to a new directory.
         let now = unixtime();
-        let slot = now - (now % self.reallocint);
-        let writers = {
-            if writers.slot != 0 && writers.slot != slot {
-                let mut w = self.writers.write();
-                *w = Arc::new(Writers{
-                    slot:   slot,
-                    ..Default::default()
-                });
-                w.clone()
-            } else {
-                writers
-            }
-        };
-
-        // sort the open files in order of size.
-        let mut v : Vec<(usize, usize)> =
-            writers.sizes.iter()
-            .map(|s| s.load(Ordering::Relaxed))
-            .enumerate()
-            .collect();
-        v.sort_unstable_by(|&(_, a), &(_, b)| a.cmp(&b));
-
-        // find an open, unlocked file.
-        let mut available = None;
-        let mut file = None;
-        let mut file_idx = 0;
-
-        for idx in 0..v.len() {
-            let (i, s) = v[idx];
-            if s == 0 {
-                // still available
-                available = Some(idx);
-            } else {
-                // opened, try to lock it.
-                if let Some(l) = writers.files[i].try_lock() {
-                    file_idx = i;
-                    file = Some(l);
-                    break;
-                }
+        if writer.fh.is_some() {
+            let cur_dirslot = ((now / 60) as u32) / (self.dir_reallocint / 60);
+            let wri_dirslot = writer.dir / (self.dir_reallocint / 60);
+            if writer.tm + (self.file_reallocint as u64) < now || cur_dirslot != wri_dirslot {
+                writer.fh.take();
             }
         }
 
-        let mut file = match file {
-            Some(f) => f,
-            None => {
-                // we could not lock an already open file
-                let idx = match available {
-                    // do we still have free slots
-                    Some(i) => i,
-                    // if not, then we pick one of the
-                    // first 4 slots at random.
-                    None => (time::now().tm_nsec % 4) as usize,
-                };
-                let (i, _) = v[idx];
-                file_idx = i;
+        // need to start writing to a new file?
+        let mut re_open = false;
+        if writer.fh.is_none() {
 
-                // and lock it
-                writers.files[i].lock()
-            },
-        };
-
-        // if the file is >1GB, close and allocate a new file.
-        if file.fh.is_some() {
-            let sz = writers.sizes[file_idx].load(Ordering::SeqCst);
-            if sz > 1_000_000_000 {
-                file.fh.take();
-                writers.sizes[file_idx].store(0, Ordering::SeqCst);
-            }
-        }
-
-        // see if we need to create a new file.
-        if file.fh.is_none() {
-
-            // create directory
-            let now = unixtime() as u32;
-            file.dir = (now / 60) as u32;
-            file.dir -= file.dir % 10; // XXX FIXME reallocint?
+            // Create directory if needed.
             let mut path = self.path.clone();
-            path.push(format!("D.{:08x}", file.dir));
-            if let Err(e) = fs::create_dir(&path) {
-                if e.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(e);
+            let mut dir = (now / 60) as u32;
+            dir -= writer.dir % (self.dir_reallocint / 60);
+            if dir != writer.dir {
+                path.push(format!("D.{:08x}", dir));
+                if let Err(e) = fs::create_dir(&path) {
+                    if e.kind() != io::ErrorKind::AlreadyExists {
+                        return Err(io::Error::new(e.kind(), format!("create {:?}: {}", path, e)));
+                    }
+                    if writer.file == 0 {
+                        // Existing dir. If we just started, try to re-use the
+                        // last spool file used.
+                        let file = self.find_most_recent(&path)
+                            .map_err(|e| IoError::new(e.kind(), format!("readdir {:?}: {}", path, e)))?;
+                        writer.file = match file {
+                            Some(f) => { re_open = true; f },
+                            None => 1,
+                        };
+                    }
+                } else {
+                    // created new directory. start at B.0001.
+                    writer.file = 1;
                 }
+                writer.dir = dir;
             }
 
-            // create file
-            file.file = (now & 0x7fff) as u16;
-            for _ in 0..1000 {
+            let start = writer.file;
+            for _ in start..4095 {
+
+                // get spoolfile name.
                 let mut name = path.clone();
-                name.push(format!("B.{:04x}", file.file));
-                match fs::OpenOptions::new().append(true).create_new(true).open(name) {
-                    Ok(fh) => {
-                        file.fh = Some(fh);
-                        break;
-                    },
-                    Err(e) => {
-                        if e.kind() != io::ErrorKind::AlreadyExists {
-                            return Err(e);
+                name.push(format!("B.{:04x}", writer.file));
+
+                // see if the file already exists.
+                match fs::metadata(&name) {
+                    // maybe re-open an existing file, continue where
+                    // we left off (can happen after a reload/restart).
+                    Ok(_) => {
+                        if !re_open {
+                            writer.file = (writer.file + 1) & 0x7fff;
+                            if writer.file == 0 {
+                                writer.file = 1;
+                            }
+                            continue
                         }
-                    }
-                }
-                file.file = ((file.file as u32 + 1) & 0x7fff) as u16;
+                    },
+                    Err(e) => match e.kind() {
+                        // notfound is OK, all other errors are fatal.
+                        io::ErrorKind::NotFound => {},
+                        _ => return Err(IoError::new(e.kind(), format!("{:?}: {}", name, e))),
+                    },
+                };
+
+                // actually open/create the spoolfile.
+                let fh =
+                    fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&name)
+                    .map_err(|e| IoError::new(e.kind(), format!("{:?}: {}", name, e)))?;
+                writer.tm = now;
+                writer.fh = Some(fh);
+                writer.name = name.to_str().unwrap_or("impossible-non-utf8-filename").to_string();
+                break;
             }
 
             // success?
-            if file.fh.is_none() {
-                return Err(io::Error::new(io::ErrorKind::Other, "cannot create spool file"));
+            if writer.fh.is_none() {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                                          format!("{:?}: cannot create spool file", path)));
             }
         }
 
         let hdr_len = headers.len();
         let art_len = headers.len() + body.len();
 
-        let mut fh = file.fh.take().unwrap();
+        let mut fh = writer.fh.take().unwrap();
+        // XXX should we store the filelength instead of fstat()'ing every time?
         let meta = fh.metadata()?;
         let pos = meta.len();
         let store_len = (DARTHEAD_SIZE + art_len + 1) as u32;
 
-        // write header.
+        // build header.
         let mut ah = DArtHead::default();
         ah.magic1 = 0xff;
         ah.magic2 = 0x99;
@@ -368,26 +365,23 @@ impl DSpool {
         ah.art_len = art_len as u32;
         ah.store_len = store_len;
         let buf : [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
-        fh.write_all(&buf)?;
 
-        // and article itself.
-        fh.write_all(headers)?;
-        fh.write_all(body)?;
+        // write header, article, trailing \0.
+        fh.write_all(&buf)
+            .and_then(|_| fh.write_all(headers))
+            .and_then(|_| fh.write_all(body))
+            .and_then(|_| fh.write(b"\0"))
+            .map_err(|e| IoError::new(e.kind(),format!("writing to {}: {}", writer.name, e)))?;
 
-        // add \0 at the end
-        fh.write(b"\0")?;
-
-        // update file sizes array
-        let sz = pos + store_len as u64;
-        writers.sizes[file_idx].store(sz as usize, Ordering::SeqCst);
-
-        // store filehandle.
-        file.fh.get_or_insert(fh);
+        // store filehandle, unless we went over 1GB size.
+        if pos + (store_len as u64) < MAX_SPOOLFILE_SIZE {
+            writer.fh.get_or_insert(fh);
+        }
 
         // build storage token
         let t = from_location(DArtLocation{
-            dir:    file.dir,
-            file:   file.file,
+            dir:    writer.dir,
+            file:   writer.file,
             pos:    pos as u32,
             size:   store_len - 1,
         });
@@ -398,15 +392,6 @@ impl DSpool {
             spool:          self.spool_no,
             token:          t,
         })
-    }
-
-    fn do_flush(&self) -> io::Result<()> {
-        let mut w = self.writers.write();
-        if w.slot != 0 {
-            // drop previous writers.
-            *w = Arc::new(Writers::default());
-        }
-        Ok(())
     }
 }
 
@@ -425,7 +410,7 @@ impl SpoolBackend for DSpool {
     }
 
     fn flush(&self) -> io::Result<()> {
-        self.do_flush()
+        Ok(())
     }
 }
 
@@ -515,10 +500,5 @@ fn read_to_bufmut(mut reader: impl Read, buf: &mut BytesMut) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-// helper function
-fn unixtime() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
 }
 
