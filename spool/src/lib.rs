@@ -17,7 +17,7 @@ extern crate time;
 
 use std::io;
 use std::collections::HashMap;
-use std::sync::{Arc,Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -46,11 +46,8 @@ pub trait SpoolBackend: Send + Sync {
     /// Write an article to the spool.
     fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc>;
 
-    /// In case the spool has state (like diablo), flush and close any open
-    /// handles and reset the state. Diablo needs this after 'reallocint' seconds.
-    fn flush(&self) -> io::Result<()> {
-        Ok(())
-    }
+    /// Get the maximum size of this spool.
+    fn get_maxsize(&self) -> u64;
 }
 
 /// Article location.
@@ -123,13 +120,17 @@ pub struct GroupMap {
     pub spoolgroup: String,
 }
 
+#[derive(Clone,Default,Debug)]
+struct InnerGroupMap {
+    groups:         util::WildMatList,
+    spoolgroup:     usize,
+}
+
 /// Metaspool is a group of spools.
 #[derive(Clone,Deserialize,Default,Debug)]
 pub struct MetaSpool {
     /// name of this metaspool.
     pub name:           String,
-    /// Allocation strategy: sequential, space, single, weighted.
-    pub allocstrat:     String,
     /// Article types: control, cancel, binary, base64, yenc etc.
     #[serde(default)]
     pub arttypes:       String,
@@ -156,11 +157,9 @@ pub struct MetaSpool {
     pub reallocint:     Duration,
     /// Spools in this metaspool
     pub spool:          Vec<u8>,
+    /// Reject articles that match this metaspool.
     #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub rejectarts:     bool,
-
-    #[serde(skip)]
-    last_spool:         u8,
 }
 
 /// Configuration for one spool instance.
@@ -176,12 +175,6 @@ pub struct SpoolDef {
     /// diablo: minimum free diskspace (K/KB/KiB/M/MB/MiB/G/GB/GiB)
     #[serde(default, deserialize_with = "util::deserialize_size")]
     pub minfree:    u64,
-    /// diablo: use an extra level of directories for this spool.
-    #[serde(default)]
-    pub spooldirs:  u32,
-    /// diablo: minimum number of free inodes on this FS.
-    #[serde(default)]
-    pub minfreefiles:   u32,
     /// diablo: maximum diskspace in use for this spool object (K/KB/KiB/M/MB/MiB/G/GB/GiB)
     #[serde(default, deserialize_with = "util::deserialize_size")]
     pub maxsize:    u64,
@@ -203,7 +196,8 @@ pub struct Spool {
 // Inner stuff.
 struct SpoolInner {
     spool:      HashMap<u8, Box<SpoolBackend>>,
-    metaspool:  Mutex<Vec<MetaSpool>>,
+    metaspool:  Vec<MetaSpool>,
+    groupmap:   Vec<InnerGroupMap>,
 }
 
 impl Spool {
@@ -211,7 +205,7 @@ impl Spool {
     pub fn new(spoolcfg: &SpoolCfg) -> io::Result<Spool> {
 
         // parse spool definitions.
-        let mut m = HashMap::new();
+        let mut spools = HashMap::new();
         for (num, cfg) in &spoolcfg.spool {
             let n = match num.parse::<u8>() {
                 Ok(n) if n < 100 => n,
@@ -226,24 +220,54 @@ impl Spool {
             cfg_c.spool_no = n;
 
             // find the metaspool.
-            let ms = spoolcfg.spoolgroup.iter().find(|m| m.spool.contains(&n));
+            let ms = match spoolcfg.spoolgroup.iter().find(|m| m.spool.contains(&n)) {
+                Some(ms) => ms,
+                None => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                  format!("[spool.{}]: not part of any metaspools", n))),
+            };
 
             let be = match cfg.backend.as_ref() {
                 "diablo" => {
-                    let r_int = ms.and_then(|ms|
-                                            if ms.reallocint.as_secs() == 0 {
-                                                None
-                                            } else {
-                                                Some(ms.reallocint)
-                                            });
-                    diablo::DSpool::new(cfg_c, r_int)
+                    diablo::DSpool::new(&cfg_c, &ms)
                 },
                 e => {
                     Err(io::Error::new(io::ErrorKind::InvalidData,
                                    format!("[spool.{}]: unknown backend {}", num, e)))
                 },
             }?;
-            m.insert(n as u8, be);
+            spools.insert(n as u8, be);
+        }
+
+        // check metaspools, all spools must exist.
+        let mut ms = HashMap::new();
+        let mut gm = spoolcfg.groupmap.clone();
+        for i in 0..spoolcfg.spoolgroup.len() {
+            let m = &spoolcfg.spoolgroup[i];
+            for n in &m.spool {
+                if !spools.contains_key(n) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                   format!("metaspool {}: spool.{} not defined", m.name, *n)));
+                }
+            }
+            for g in &m.groups {
+                gm.push(GroupMap{ groups: g.clone(), spoolgroup: m.name.clone() });
+            }
+            ms.insert(m.name.clone(), i);
+        }
+
+        // now build the inner spoolgroup list.
+        let mut groupmap = Vec::new();
+        for m in &gm {
+            // find the index of this spoolgroup
+            let i = match ms.get(&m.spoolgroup) {
+                None => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                    format!("dspool.ctl: metaspool {} not defined", m.spoolgroup))),
+                Some(i) => *i,
+            };
+            groupmap.push(InnerGroupMap{
+                groups:     util::WildMatList::new(&m.spoolgroup, &m.groups),
+                spoolgroup: i,
+            });
         }
 
         let mut builder = futures_cpupool::Builder::new();
@@ -252,8 +276,9 @@ impl Spool {
 
         Ok(Spool{
             inner: Arc::new(SpoolInner{
-                spool:      m,
-                metaspool:  Mutex::new(spoolcfg.spoolgroup.clone()),
+                spool:      spools,
+                metaspool:  spoolcfg.spoolgroup.clone(),
+                groupmap:   groupmap,
             }),
             cpu_pool:   builder.create(),
         })

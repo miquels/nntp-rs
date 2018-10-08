@@ -453,7 +453,11 @@ fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
         "expiremethod" => {},
 
         // we do not support this, warn and ignore.
+        "minfreefiles"|
         "compresslvl" => warn!("{}: unsupported keyword, ignoring", words[0]),
+
+        // we do not support this, error and return.
+        "spooldirs" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,
 
         // actually don't know.
         _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
@@ -464,7 +468,6 @@ fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
 // Set one item of a MetaSpool
 fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
     match words[0] {
-        "allocstrat" => ms.allocstrat = parse_string(words)?,
         "arttypes" => ms.arttypes = parse_string(words)?,
         "dontstore" => ms.dontstore = parse_bool(words)?,
         "rejectarts" => ms.rejectarts = parse_bool(words)?,
@@ -475,6 +478,16 @@ fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
         "reallocint" => ms.reallocint = parse_duration(words)?,
 
         "spool" => parse_num_list(&mut ms.spool, words, ",")?,
+
+        "allocstrat" => {
+            let s = parse_string(words)?;
+            match s.as_str() {
+                "space" => Err(invalid_data!("{} space: not supported (only weighted)", words[0]))?,
+                "sequential"|
+                "single" => warn!("{} {}: ignoring, always using \"weighted\"", words[0], s),
+                "weighted" => {},
+            }
+        },
 
         // we do not support this, fatal.
         "label" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,

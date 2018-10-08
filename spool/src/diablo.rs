@@ -5,8 +5,6 @@ use std::io::Error as IoError;
 use std::io::{BufRead,BufReader,Read,Write,Seek,SeekFrom};
 use std::mem;
 use std::path::{Path,PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
@@ -17,7 +15,7 @@ use libc;
 use parking_lot::Mutex;
 
 use util::unixtime;
-use {ArtLoc,ArtPart,Backend,SpoolBackend,SpoolDef};
+use {ArtLoc,ArtPart,Backend,MetaSpool,SpoolBackend,SpoolDef};
 
 const MAX_SPOOLFILE_SIZE : u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT : u32 = 600;
@@ -31,7 +29,10 @@ pub struct DSpool {
     spool_no:           u8,
     file_reallocint:    u32,
     dir_reallocint:     u32,
-    cfg:                Arc<SpoolDef>,
+    minfree:            u64,
+    maxsize:            u64,
+    weight:             u32,
+    keeptime:           u64,
     writer:             Mutex<Writer>,
 }
 
@@ -118,16 +119,60 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
 impl DSpool {
 
     /// Create a new diablo-type spool backend.
-    pub fn new(cfg: SpoolDef, reallocint: Option<Duration>) -> io::Result<Box<SpoolBackend>> {
-        let file_reallocint = reallocint.map(|d| d.as_secs() as u32).unwrap_or(DFL_FILE_REALLOCINT);
+    pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<SpoolBackend>> {
+        let file_reallocint = if ms.reallocint.as_secs() > 0 {
+            ms.reallocint.as_secs() as u32
+        } else {
+            DFL_FILE_REALLOCINT
+        };
         let file_reallocint = (file_reallocint / 60) * 60;
         let dir_reallocint = file_reallocint * 6;
+
+        let sv = StatVfs::stat(&cfg.path)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", cfg.path, e)))?;
+
+        // minfree must be at least 10MB, if not force it.
+        let minfree = {
+            if cfg.minfree < 10_000_000 {
+                warn!("spool {}: setting minfree to 10MiB", cfg.spool_no);
+                10_000_000
+            } else {
+                cfg.minfree
+            }
+        };
+
+        // if maxsize is not set, take the size of the filesystem.
+        // check that it is bigger than minfree.
+        let maxsize = {
+            let m = if cfg.maxsize > 0 && cfg.maxsize < sv.b_total {
+                cfg.maxsize
+            } else {
+                sv.b_total
+            };
+            if minfree > m {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                              format!("spool {}: minfree > maxsize ({} > {})",
+                              cfg.spool_no, minfree, m)));
+            }
+            m
+        };
+
+        // if weight is not set, it is maxsize in GiB.
+        let weight = if cfg.weight > 0 {
+            cfg.weight
+        } else {
+            (maxsize / 1_000_000_000) as u32
+        };
+
         let ds = DSpool{
             path:               PathBuf::from(cfg.path.clone()),
             spool_no:           cfg.spool_no,
             file_reallocint:    file_reallocint,
             dir_reallocint:     dir_reallocint,
-            cfg:                Arc::new(cfg),
+            keeptime:           cfg.keeptime.as_secs(),
+            minfree:            minfree,
+            maxsize:            maxsize,
+            weight:             weight,
             writer:             Mutex::new(Writer::default()),
         };
         Ok(Box::new(ds))
@@ -135,6 +180,7 @@ impl DSpool {
 
     // locate file that holds the article, open it, read the DArtHead struct,
     // and return the info.
+    // XXX TODO: cache a few open filehandles.
     fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
 
         let loc = to_location(art_loc);
@@ -409,8 +455,8 @@ impl SpoolBackend for DSpool {
         self.do_write(headers, body)
     }
 
-    fn flush(&self) -> io::Result<()> {
-        Ok(())
+    fn get_maxsize(&self) -> u64 {
+        self.maxsize
     }
 }
 
@@ -500,5 +546,41 @@ fn read_to_bufmut(mut reader: impl Read, buf: &mut BytesMut) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+// Mini statvfs implementation.
+use std::ffi;
+
+#[allow(dead_code)]
+struct StatVfs {
+    // bytes total
+    b_total:    u64,
+    // bytes available
+    b_avail:    u64,
+    // bytes in use.
+    b_used:     u64,
+}
+
+impl StatVfs {
+    fn stat(path: impl AsRef<Path>) -> io::Result<StatVfs> {
+        let pathstr = match path.as_ref().to_str() {
+            None => return Err(io::Error::new(io::ErrorKind::Other,
+                                              format!("{:?}: invalid path", path.as_ref()))),
+            Some(s) => s,
+        };
+        let cpath = ffi::CString::new(pathstr.as_bytes()).unwrap();
+        let mut sv: libc::statvfs = unsafe { mem::zeroed() };
+        let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut sv) };
+        if rc != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            let bs = sv.f_frsize;
+            Ok(StatVfs{
+                b_total:    bs * (sv.f_blocks - (sv.f_bfree - sv.f_bavail)),
+                b_avail:    bs * sv.f_bavail,
+                b_used:     bs * (sv.f_blocks - sv.f_bfree),
+            })
+        }
+    }
 }
 
