@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use parking_lot::{Mutex,MutexGuard};
 
-use {HistEnt,HistStatus};
+use history::{HistEnt,HistStatus};
 
 // Constants that define how the cache behaves.
 const NUM_PARTITIONS: u32 = 32;

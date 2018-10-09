@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use arttype::ArtType;
 use newsfeeds::*;
-use nntp_rs_util::WildMatList;
-use nntp_rs_util as util;
-use nntp_rs_spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
+use util::WildMatList;
+use util;
+use spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
 
 macro_rules! invalid_data {
     ($($expr:expr),*) => (
@@ -442,9 +442,7 @@ fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
     match words[0] {
         "backend" => spool.backend = parse_string(words)?,
         "path" => spool.path = parse_string(words)?,
-        "spooldirs" => spool.spooldirs = parse_num::<u32>(words)?,
         "minfree" => spool.minfree = parse_size(words)?,
-        "minfreefiles" => spool.minfreefiles = parse_num::<u32>(words)?,
         "maxsize" => spool.maxsize = parse_size(words)?,
         "keeptime" => spool.keeptime = parse_duration(words)?,
         "weight" => spool.weight = parse_num::<u32>(words)?,
@@ -486,6 +484,7 @@ fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
                 "sequential"|
                 "single" => warn!("{} {}: ignoring, always using \"weighted\"", words[0], s),
                 "weighted" => {},
+                _ => Err(invalid_data!("{} {}: unknown allocstrat", words[0], s))?,
             }
         },
 

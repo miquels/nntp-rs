@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::thread;
 
 use dns_lookup::{self,AddrInfoHints,SockType,LookupErrorKind};
-use nntp_rs_util as util;
+use util;
 use parking_lot::Mutex;
 
 use newsfeeds::NewsFeeds;

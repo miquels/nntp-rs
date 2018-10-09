@@ -23,8 +23,7 @@ use std::str::FromStr;
 use article::Article;
 use arttype::ArtType;
 use hostcache::HostCache;
-use nntp_rs_util as util;
-use nntp_rs_util::{MatchList,MatchResult,WildMatList};
+use util::{self,MatchList,MatchResult,WildMatList};
 
 use ipnet::IpNet;
 

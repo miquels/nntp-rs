@@ -11,8 +11,8 @@ use byteorder::ByteOrder;
 use byteorder::LittleEndian as LE;
 use parking_lot::RwLock;
 
-use nntp_rs_spool as spool;
-use {HistBackend,HistEnt,HistStatus};
+use spool;
+use history::{HistBackend,HistEnt,HistStatus};
 
 /// Diablo compatible history file.
 #[derive(Debug)]

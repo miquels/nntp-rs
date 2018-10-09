@@ -4,7 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use wildmat;
+use super::wildmat;
 
 lazy_static! {
     static ref IDCOUNTER : Arc<AtomicUsize> = Arc::<AtomicUsize>::default();

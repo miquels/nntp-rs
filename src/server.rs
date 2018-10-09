@@ -18,8 +18,8 @@ use tokio::runtime::current_thread;
 use bind_socket;
 use config;
 use nntp_codec::{NntpCodec,NntpInput};
-use nntp_rs_history::History;
-use nntp_rs_spool::Spool;
+use history::History;
+use spool::Spool;
 use nntp_session::NntpSession;
 
 #[derive(Clone)]

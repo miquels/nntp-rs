@@ -4,7 +4,7 @@ use std::io;
 
 use parking_lot::RwLock;
 
-use {HistBackend,HistEnt,HistStatus};
+use history::{HistBackend,HistEnt,HistStatus};
 
 /// In in-memory history database. Not to be used for production,
 /// mainly used for testing.

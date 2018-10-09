@@ -15,10 +15,9 @@ use errors::*;
 use logger;
 use newsfeeds::{NewsFeeds,NewsPeer};
 use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
-use nntp_rs_history::{HistEnt,HistError,HistStatus};
-use nntp_rs_spool::ArtPart;
-use nntp_rs_util::{MatchList,MatchResult};
-use nntp_rs_util as util;
+use history::{HistEnt,HistError,HistStatus};
+use spool::ArtPart;
+use util::{self,MatchList,MatchResult};
 use server::Server;
 
 #[derive(Debug,PartialEq,Eq)]

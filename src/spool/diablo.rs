@@ -15,7 +15,7 @@ use libc;
 use parking_lot::Mutex;
 
 use util::unixtime;
-use {ArtLoc,ArtPart,Backend,MetaSpool,SpoolBackend,SpoolDef};
+use super::{ArtLoc,ArtPart,Backend,MetaSpool,SpoolBackend,SpoolDef};
 
 const MAX_SPOOLFILE_SIZE : u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT : u32 = 600;

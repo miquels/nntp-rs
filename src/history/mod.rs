@@ -5,21 +5,9 @@
 //!   - memdb
 //!
 
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate log;
-extern crate byteorder;
-extern crate futures;
-extern crate futures_cpupool;
-extern crate nntp_rs_spool;
-extern crate parking_lot;
-extern crate time;
-
-#[cfg(test)]
-extern crate env_logger;
-
 use std::sync::Arc;
 
-use futures_cpupool::CpuPool;
+use futures_cpupool::{self,CpuPool};
 use futures::{Future,future};
 
 mod cache;
@@ -29,8 +17,8 @@ pub mod memdb;
 use std::io;
 use std::path::Path;
 
-use nntp_rs_spool as spool;
-use cache::HCache;
+use spool;
+use self::cache::HCache;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
 const PRESTORE_MAX_AGE: u32 = 60;

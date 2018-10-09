@@ -3,28 +3,19 @@
 //! Types currently supported:
 //!   - diabo
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate serde_derive;
-extern crate byteorder;
-extern crate bytes;
-extern crate futures_cpupool;
-extern crate futures;
-extern crate libc;
-extern crate nntp_rs_util as util;
-extern crate parking_lot;
-extern crate serde;
-extern crate time;
-
+use std::fmt::{self,Debug};
 use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use futures_cpupool::CpuPool;
+use futures_cpupool::{self,CpuPool};
 use futures::{Future,future};
 
 mod diablo;
+
+use util;
 
 /// Which part of the article to process: body/head/all
 #[derive(Debug,Clone,Copy,PartialEq)]
@@ -63,8 +54,8 @@ pub struct ArtLoc {
     pub token:          Vec<u8>,
 }
 
-impl std::fmt::Debug for ArtLoc {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl Debug for ArtLoc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ArtLoc {{ storage_type: {:?}, spool: {}, token: [", self.storage_type, self.spool)?;
         for b in &self.token {
             write!(f, "{:02x}", b)?;

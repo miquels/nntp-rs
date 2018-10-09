@@ -7,8 +7,8 @@ use parking_lot::RwLock;
 
 use dconfig::*;
 use newsfeeds::NewsFeeds;
-use nntp_rs_spool::SpoolCfg;
-use nntp_rs_util as util;
+use spool::SpoolCfg;
+use util;
 
 use toml;
 
