@@ -593,7 +593,7 @@ impl NntpSession {
                 if !is_match {
                     info!("{} {} Path element fails to match aliases: {} in {}",
                         thispeer.label, self.remote.ip(), pathelems[0], art.msgid);
-                    mm.get_or_insert(format!("{}.MISMATCH", self.remote));
+                    mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
                     pathelems.insert(0, mm.as_ref().unwrap());
                 }
             }
