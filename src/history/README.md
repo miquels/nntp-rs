@@ -1,8 +1,4 @@
 
-# nnrp-rs-history
-
-This crate is part of nntp-rs, and is mainly being used by nntp-rs-server.
-
 ## History design
 
 Write-through cache.
