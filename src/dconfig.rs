@@ -256,6 +256,7 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
                             Err(e) => return Err(invalid_data!("{}: {}", info, e)),
                         };
                         spool.spool_no = n;
+                        spool.backend = "diablo".to_string();
                         let num = n.to_string();
                         if spool_cfg.spool.contains_key(&num) {
                             Err(invalid_data!("{}: {}: duplicate spool", info, words[1]))?;
@@ -284,6 +285,9 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
             },
             DCState::Spool => {
                 if words[0] == "end" {
+                    if spool.path.is_empty() {
+                        spool.path = format!("P.{:02}", spool.spool_no);
+                    }
                     spool_cfg.spool.insert(spool.spool_no.to_string(), spool);
                     spool = SpoolDef::default();
                     state = DCState::Init;
