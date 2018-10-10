@@ -171,7 +171,7 @@ impl NewsPeer {
     }
 
     /// Check if this peer wants to have this article.
-    pub fn wants(&self, art: &Article, path: &[&str], newsgroups: &mut MatchList) -> bool {
+    pub fn wants(&self, art: &Article, path: &[&str], newsgroups: &mut MatchList, dist: Option<&Vec<&str>>) -> bool {
 
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
@@ -192,7 +192,25 @@ impl NewsPeer {
             }
         }
 
-        // XXX TODO check Distribution
+        // check distribution header
+        if let Some(dist) = dist {
+            if self.distributions.len() > 0 {
+                let mut matches = false;
+                for artdist in dist {
+                    for d in &self.distributions {
+                        if d.starts_with("!") && &d[1..] == *artdist {
+                            return false;
+                        }
+                        if d == artdist {
+                            matches = true;
+                        }
+                    }
+                }
+                if !matches {
+                    return false;
+                }
+            }
+        }
 
         // several min/max matchers.
         if (self.mincross > 0 && newsgroups.len() < (self.mincross as usize)) ||

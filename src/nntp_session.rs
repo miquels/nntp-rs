@@ -570,6 +570,7 @@ impl NntpSession {
 
         {
             let newsgroups = headers.newsgroups().ok_or(ArtError::NoNewsgroups)?;
+            let distribution = headers.distribution();
 
             // see if any of the groups in the NewsGroups: header
             // matched a "filter" statement in this peer's config.
@@ -580,7 +581,7 @@ impl NntpSession {
             // see if the article matches the IFILTER label.
             let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
             if let Some(ref ifilter) = self.newsfeeds.infilter {
-                if ifilter.wants(art, &[], &mut grouplist) {
+                if ifilter.wants(art, &[], &mut grouplist, distribution.as_ref()) {
                     return Err(ArtError::IncomingFilter);
                 }
             }
@@ -592,7 +593,7 @@ impl NntpSession {
             let mut v = Vec::with_capacity(peers.len());
             for idx in 0 .. peers.len() {
                 let peer = &peers[idx];
-                if peer.wants(art, &pathelems, &mut grouplist) {
+                if peer.wants(art, &pathelems, &mut grouplist, distribution.as_ref()) {
                     v.push(idx as u32);
                 }
             }

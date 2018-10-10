@@ -453,6 +453,11 @@ impl Headers {
     pub fn path(&self) -> Option<Vec<&str>> {
         self.split_header(HeaderName::Path, "!")
     }
+
+    /// Distribution.
+    pub fn distribution(&self) -> Option<Vec<&str>> {
+        self.split_header(HeaderName::Distribution, ",")
+    }
 }
 
 /// Article is a thin wrapper around a bytesmut
