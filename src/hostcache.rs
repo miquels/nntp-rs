@@ -219,8 +219,6 @@ impl HostCache {
                     }
                 },
                 Err(e) => {
-                    // XXX FIXME as soon as dns-lookup exposes LookupErrorKind.
-                    // https://github.com/keeperofdakeys/dns-lookup/issues/10
                     match e.kind() {
                         // NXDOMAIN or NODATA - normal retry time.
                         LookupErrorKind::NoName|
