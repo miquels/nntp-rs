@@ -16,7 +16,7 @@ use logger;
 use newsfeeds::{NewsFeeds,NewsPeer};
 use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
 use history::{HistEnt,HistError,HistStatus};
-use spool::ArtPart;
+use spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
 use util::{self,MatchList,MatchResult};
 use server::Server;
 
@@ -391,6 +391,40 @@ impl NntpSession {
         Box::new(fut)
     }
 
+    fn reject_art(&self, art: &Article, recv_time: u64, e: ArtError) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
+        let art = art.clone();
+        let he = HistEnt{
+            status:     HistStatus::Rejected,
+            time:       recv_time,
+            head_only:  false,
+            location:   None,
+        };
+        let label = self.thispeer().label.clone();
+        let history = self.server.history.clone();
+        let fut = self.server.history
+            .store_begin(&art.msgid)
+            .then(move |res| -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
+                match res {
+                    Ok(_) => {
+                        // succeeded adding reject entry.
+                        Box::new(history.store_commit(&art.msgid, he)
+                            .and_then(move |_| {
+                                logger::incoming_reject(&label, &art, e);
+                                future::ok(ArtAccept::Reject)
+                            }))
+                    },
+                    Err(HistError::Status(_)) => {
+                        // message-id seen before, log "duplicate"
+                        logger::incoming_reject(&label, &art, ArtError::PostDuplicate);
+                        Box::new(future::ok(ArtAccept::Reject))
+                    },
+                    Err(HistError::IoError(e)) => Box::new(future::err(e)),
+                }
+            });
+        // XXX FIXME double box
+        return Box::new(fut);
+    }
+
     // Received article: see if we want it, find out if it needs to be sent to other peers.
     fn received_article(&self, mut art: Article, can_defer: bool) -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
         let recv_time = util::unixtime();
@@ -399,15 +433,13 @@ impl NntpSession {
         let (headers, body) = match self.process_headers(&mut art) {
             Err(e) => {
                 return match e {
-                    // article was mangled on the way. do not store the
-                    // message-id in the history file, another peer may send
-                    // a correct version.
+                    // article was mangled on the way. do not store the message-id
+                    // in the history file, another peer may send a correct version.
                     ArtError::TooSmall|
                     ArtError::HdrOnlyNoBytes|
                     ArtError::NoHdrEnd|
                     ArtError::MsgIdMismatch|
                     ArtError::NoPath => {
-                        self.server.history.store_rollback(&art.msgid);
                         Box::new(future::ok(
                             if can_defer {
                                 logger::incoming_defer(&self.thispeer().label, &art, e);
@@ -420,41 +452,21 @@ impl NntpSession {
                     },
 
                     // all other errors. add a reject entry to the history file.
-                    e => {
-                        let he = HistEnt{
-                            status:     HistStatus::Rejected,
-                            time:       recv_time,
-                            head_only:  false,
-                            location:   None,
-                        };
-                        let label = self.thispeer().label.clone();
-                        let history = self.server.history.clone();
-                        let fut = self.server.history
-                            .store_begin(&art.msgid)
-                            .then(move |res| -> Box<Future<Item=ArtAccept, Error=io::Error> + Send> {
-                                match res {
-                                    Ok(_) => {
-                                        // succeeded adding reject entry.
-                                        Box::new(history.store_commit(&art.msgid, he)
-                                            .and_then(move |_| {
-                                                logger::incoming_reject(&label, &art, e);
-                                                future::ok(ArtAccept::Reject)
-                                            }))
-                                    },
-                                    Err(HistError::Status(_)) => {
-                                        // message-id seen before, log "duplicate"
-                                        logger::incoming_reject(&label, &art, ArtError::PostDuplicate);
-                                        Box::new(future::ok(ArtAccept::Reject))
-                                    },
-                                    Err(HistError::IoError(e)) => Box::new(future::err(e)),
-                                }
-                            });
-                        // XXX FIXME double box
-                        return Box::new(fut);
-                    },
+                    e => return self.reject_art(&art, recv_time, e),
                 };
             },
             Ok(art) => art,
+        };
+
+        // See which spool we want the article to be stored in.
+        let spool_no = {
+            let newsgroups = headers.newsgroups().unwrap();
+            match self.server.spool.get_spool(&art, &newsgroups) {
+                None => return self.reject_art(&art, recv_time, ArtError::NoSpool),
+                Some(SPOOL_DONTSTORE) => return self.reject_art(&art, recv_time, ArtError::DontStore),
+                Some(SPOOL_REJECTARTS) => return self.reject_art(&art, recv_time, ArtError::RejSpool),
+                Some(sp) => sp,
+            }
         };
 
         // OK now we can go ahead and store the parsed article.
@@ -483,7 +495,7 @@ impl NntpSession {
                         // store the article.
                         let mut buffer = BytesMut::new();
                         headers.header_bytes(&mut buffer);
-                        let fut = spool.write(buffer, body)
+                        let fut = spool.write(spool_no, buffer, body)
                             .and_then(move |artloc| {
                                 let he = HistEnt{
                                     status:     HistStatus::Present,
@@ -581,7 +593,6 @@ impl NntpSession {
             for idx in 0 .. peers.len() {
                 let peer = &peers[idx];
                 if peer.wants(art, &pathelems, &mut grouplist) {
-                    debug!("{}.wants YES idx {}", peer.label, idx);
                     v.push(idx as u32);
                 }
             }

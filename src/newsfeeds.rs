@@ -175,10 +175,8 @@ impl NewsPeer {
 
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
-            debug!("XXX {}.wants: outhost is empty", self.label);
             return false;
         }
-        debug!("XXX {}.wants: outhost is [{}]", self.label, self.outhost);
 
         // check article type.
         if !art.arttype.matches(&self.arttypes) {

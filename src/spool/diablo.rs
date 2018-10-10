@@ -31,7 +31,6 @@ pub struct DSpool {
     dir_reallocint:     u32,
     minfree:            u64,
     maxsize:            u64,
-    weight:             u32,
     keeptime:           u64,
     writer:             Mutex<Writer>,
 }
@@ -157,13 +156,6 @@ impl DSpool {
             m
         };
 
-        // if weight is not set, it is maxsize in GiB.
-        let weight = if cfg.weight > 0 {
-            cfg.weight
-        } else {
-            (maxsize / 1_000_000_000) as u32
-        };
-
         let ds = DSpool{
             path:               PathBuf::from(cfg.path.clone()),
             spool_no:           cfg.spool_no,
@@ -172,7 +164,6 @@ impl DSpool {
             keeptime:           cfg.keeptime.as_secs(),
             minfree:            minfree,
             maxsize:            maxsize,
-            weight:             weight,
             writer:             Mutex::new(Writer::default()),
         };
         Ok(Box::new(ds))
@@ -297,6 +288,13 @@ impl DSpool {
 
     // Write an article. 
     // SpoolBackend::write() forwards to this method.
+    //
+    // Yes, by locking here we basically make all writes single-threaded.
+    // This should not be a problem since writes are buffered heavily in
+    // the kernel and a kernel-thread is doing the writing.
+    //
+    // If it does turn out to be a bottleneck we'll have to figure out a
+    // way to introduce parallelism again.
     fn do_write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
 
         // lock the writer so we have unique access.
@@ -320,7 +318,7 @@ impl DSpool {
             // Create directory if needed.
             let mut path = self.path.clone();
             let mut dir = (now / 60) as u32;
-            dir -= writer.dir % (self.dir_reallocint / 60);
+            dir -= dir % (self.dir_reallocint / 60);
             if dir != writer.dir {
                 path.push(format!("D.{:08x}", dir));
                 if let Err(e) = fs::create_dir(&path) {

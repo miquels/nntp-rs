@@ -15,7 +15,13 @@ use futures::{Future,future};
 
 mod diablo;
 
-use util;
+use article::Article;
+use arttype::ArtType;
+use util::{self, MatchResult};
+
+// Faux spoolno's returned by get_spool.
+pub const SPOOL_REJECTARTS : u8 = 253;
+pub const SPOOL_DONTSTORE : u8 = 254;
 
 /// Which part of the article to process: body/head/all
 #[derive(Debug,Clone,Copy,PartialEq)]
@@ -41,6 +47,32 @@ pub trait SpoolBackend: Send + Sync {
     fn get_maxsize(&self) -> u64;
 }
 
+/// Backend storage, e.g. Backend::Diablo, or Backend::Cyclic.
+#[derive(Debug,PartialEq,Clone,Copy)]
+#[repr(u8)]
+pub enum Backend {
+    /// Diablo spool
+    Diablo = 0,
+    /// Cyclic storage
+    Cyclic = 1,
+    /// Unknown storage (when converting from values >=2)
+    Unknown = 15,
+    NoSpool = 16,
+    DontStore = 17,
+    RejectArts = 18,
+}
+
+impl Backend {
+    /// convert u8 to enum.
+    pub fn from_u8(t: u8) -> Backend {
+        match t {
+            0 => Backend::Diablo,
+            1 => Backend::Cyclic,
+            _ => Backend::Unknown,
+        }
+    }
+}
+
 /// Article location.
 /// A lookup in the history database for a message-id returns this struct,
 /// if succesfull
@@ -61,30 +93,6 @@ impl Debug for ArtLoc {
             write!(f, "{:02x}", b)?;
         }
         write!(f, "] }}")
-    }
-}
-
-
-/// Backend storage, e.g. Backend::Diablo, or Backend::Cyclic.
-#[derive(Debug,PartialEq,Clone,Copy)]
-#[repr(u8)]
-pub enum Backend {
-    /// Diablo spool
-    Diablo = 0,
-    /// Cyclic storage
-    Cyclic = 1,
-    /// Unknown storage (when converting from values >=2)
-    Unknown = 15,
-}
-
-impl Backend {
-    /// convert u8 to enum.
-    pub fn from_u8(t: u8) -> Backend {
-        match t {
-            0 => Backend::Diablo,
-            1 => Backend::Cyclic,
-            _ => Backend::Unknown,
-        }
     }
 }
 
@@ -124,7 +132,7 @@ pub struct MetaSpool {
     pub name:           String,
     /// Article types: control, cancel, binary, base64, yenc etc.
     #[serde(default)]
-    pub arttypes:       String,
+    pub arttypes:       Vec<String>,
     /// Accept articles that match this metaspool but discard them.
     #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub dontstore:      bool,
@@ -151,6 +159,14 @@ pub struct MetaSpool {
     /// Reject articles that match this metaspool.
     #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub rejectarts:     bool,
+
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub totweight:      u32,
+
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub v_arttypes:     Vec<ArtType>,
 }
 
 /// Configuration for one spool instance.
@@ -185,8 +201,13 @@ pub struct Spool {
 }
 
 // Inner stuff.
+struct BackendDef {
+    backend:    Box<SpoolBackend>,
+    weight:     u32,
+}
+
 struct SpoolInner {
-    spool:      HashMap<u8, Box<SpoolBackend>>,
+    spool:      HashMap<u8, BackendDef>,
     metaspool:  Vec<MetaSpool>,
     groupmap:   Vec<InnerGroupMap>,
 }
@@ -194,6 +215,11 @@ struct SpoolInner {
 impl Spool {
     /// initialize all storage backends.
     pub fn new(spoolcfg: &SpoolCfg) -> io::Result<Spool> {
+
+        // very basic check
+        if spoolcfg.spoolgroup.len() == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "no metaspools defined"));
+        }
 
         // parse spool definitions.
         let mut spools = HashMap::new();
@@ -226,24 +252,52 @@ impl Spool {
                                    format!("[spool.{}]: unknown backend {}", num, e)))
                 },
             }?;
-            spools.insert(n as u8, be);
+            let weight = if cfg.weight != 0 {
+                cfg.weight
+            } else {
+                let w = (be.get_maxsize() / 1_000_000_000) as u32;
+                if w == 0 { 1 } else { w }
+            };
+            debug!("XXX insert {} into spools, weight {}", n, weight);
+            spools.insert(n as u8, BackendDef{
+                backend:    be,
+                weight:     weight,
+            });
         }
 
         // check metaspools, all spools must exist.
         let mut ms = HashMap::new();
         let mut gm = spoolcfg.groupmap.clone();
-        for i in 0..spoolcfg.spoolgroup.len() {
-            let m = &spoolcfg.spoolgroup[i];
-            for n in &m.spool {
-                if !spools.contains_key(n) {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                   format!("metaspool {}: spool.{} not defined", m.name, *n)));
+        let mut spoolgroup = spoolcfg.spoolgroup.clone();
+        for i in 0..spoolgroup.len() {
+            let mut totweight = 0;
+            {
+                let m = &spoolgroup[i];
+                for n in &m.spool {
+                    match spools.get(n) {
+                        None => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                       format!("metaspool {}: spool.{} not defined", m.name, *n))),
+                        Some(sp) => totweight += sp.weight,
+                    }
                 }
+                for g in &m.groups {
+                    gm.push(GroupMap{ groups: g.clone(), spoolgroup: m.name.clone() });
+                }
+                ms.insert(m.name.clone(), i);
             }
-            for g in &m.groups {
-                gm.push(GroupMap{ groups: g.clone(), spoolgroup: m.name.clone() });
+            spoolgroup[i].totweight = totweight;
+
+            // parse arttypes.
+            if spoolgroup[i].arttypes.len() > 0 {
+                let m = &mut spoolgroup[i];
+                let mut v = Vec::new();
+                for w in &m.arttypes {
+                    let a = w.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidData,
+                                        format!("metaspool {}: arttype {} unknown", m.name, w)))?;
+                    v.push(a);
+                }
+                m.v_arttypes.append(&mut v);
             }
-            ms.insert(m.name.clone(), i);
         }
 
         // now build the inner spoolgroup list.
@@ -268,7 +322,7 @@ impl Spool {
         Ok(Spool{
             inner: Arc::new(SpoolInner{
                 spool:      spools,
-                metaspool:  spoolcfg.spoolgroup.clone(),
+                metaspool:  spoolgroup,
                 groupmap:   groupmap,
             }),
             cpu_pool:   builder.create(),
@@ -285,7 +339,7 @@ impl Spool {
                     return future::err(io::Error::new(io::ErrorKind::NotFound,
                                    format!("spool {} not found", art_loc.spool)));
                 },
-                Some(be) => be,
+                Some(be) => &be.backend,
             };
             match be.read(&art_loc, part, &mut buf) {
                 Ok(()) => future::ok(buf),
@@ -294,24 +348,84 @@ impl Spool {
         })
     }
 
+    /// Find out which spool we want to put this article in.
+    pub fn get_spool(&self, art: &Article, newsgroups: &[&str]) -> Option<u8> {
+
+        // calculate a hash to use with the weights thing below.
+        let hash = util::DHash::hash_str(&art.msgid).as_u64();
+        debug!("get_spool: {} hash {}", art.msgid, hash);
+
+        for g in &self.inner.groupmap {
+
+            // if newsgroups matches, try this metaspool.
+            if g.groups.matchlist(newsgroups) != MatchResult::Match {
+                continue;
+            }
+            let ms = &self.inner.metaspool[g.spoolgroup];
+
+            // XXX FIXME: match hashfeed.
+
+            if !art.arttype.matches(&ms.v_arttypes) {
+                continue;
+            }
+            if ms.maxsize > 0 && (art.len as u64)  > ms.maxsize {
+                continue;
+            }
+            if ms.maxcross > 0 && newsgroups.len() > ms.maxcross as usize {
+                continue;
+            }
+
+            // special type of spool, blackhole.
+            if ms.dontstore {
+                return Some(SPOOL_DONTSTORE);
+            }
+            // special type of spool, reject article.
+            if ms.rejectarts {
+                return Some(SPOOL_REJECTARTS);
+            }
+            // if no spools otherwise, no match.
+            if ms.spool.len() == 0 {
+                debug!("XXX no spools");
+                continue;
+            }
+
+            // shortcut for simple case.
+            if ms.spool.len() == 1 {
+                debug!("XXX 1 spools");
+                return Some(ms.spool[0]);
+            }
+
+            // use weights as a hashfeed of sorts.
+            // IMPROVEMENT: use real hashfeed somehow.
+            let totweight = ms.totweight;
+            let x = ((hash % totweight as u64) & 0xffffffff) as u32;
+            let mut a = 0;
+            for spoolno in &ms.spool {
+                debug!("XXX check spoolno {}", spoolno);
+                let sp = self.inner.spool.get(spoolno).unwrap();
+                debug!("get_spool: check weight {} <= {} < {}", a, x, a + sp.weight);
+                if x >= a && x < a + sp.weight {
+                    return Some(*spoolno);
+                }
+                a += sp.weight;
+            }
+            // NOTREACHED
+        }
+        return None;
+    }
+
     /// Write one article to the spool.
     ///
     /// NOTE: we stay as close to wireformat as possible. So
     /// - head_only: body is empty.
     /// - !headonly: body includes hdr/body seperator, ends in .\r\n
-    pub fn write(&self, headers: BytesMut, body: BytesMut) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
-
-        //if self.inner.metaspool.len() == 0 {
-        //    return Err(io::Error::new(io::ErrorKind::InvalidData, "no metaspools defined"));
-        //}
-
-        // Here we should select the correct metaspool for the article.
+    pub fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
 
         let inner = self.inner.clone();
         self.cpu_pool.spawn_fn(move || {
             use std::thread;
             trace!("spool writer on thread {:?}", thread::current().id());
-            let spool = inner.spool.get(&0).unwrap();
+            let spool = &inner.spool.get(&spoolno).unwrap().backend;
             spool.write(&headers[..], &body[..])
         })
     }

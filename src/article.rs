@@ -464,6 +464,19 @@ pub struct Article {
     pub len:        usize,
 }
 
+/// Clones everything but self.data.
+impl Clone for Article {
+    fn clone(&self) -> Article {
+        Article{
+            arttype:    self.arttype,
+            data:       BytesMut::new(),
+            msgid:      self.msgid.clone(),
+            lines:      self.lines,
+            len:        self.len,
+        }
+    }
+}
+
 // helper.
 #[inline]
 fn is_cont(line: &[u8]) -> bool {

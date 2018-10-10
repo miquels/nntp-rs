@@ -470,7 +470,7 @@ fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
 // Set one item of a MetaSpool
 fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
     match words[0] {
-        "arttypes" => ms.arttypes = parse_string(words)?,
+        "arttypes" => parse_arttype(&mut ms.v_arttypes, words)?,
         "dontstore" => ms.dontstore = parse_bool(words)?,
         "rejectarts" => ms.rejectarts = parse_bool(words)?,
 

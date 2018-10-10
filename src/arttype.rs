@@ -177,6 +177,7 @@ pub struct ArtTypeScanner {
     base64:     u32,
     inheader:   bool,
     lines:      u32,
+    bodysize:   usize,
 }
 
 impl ArtTypeScanner {
@@ -189,6 +190,7 @@ impl ArtTypeScanner {
             base64:     0,
             inheader:   true,
             lines:      0,
+            bodysize:   0,
         }
     }
 
@@ -199,7 +201,11 @@ impl ArtTypeScanner {
 
     /// Return the article type(s) we found.
     pub fn art_type(&self) -> ArtType {
-        let at = self.arttype.arttype;
+        let at = if self.bodysize < 8192 {
+            self.arttype.arttype & !ArtType::BINARY
+        } else {
+            self.arttype.arttype
+        };
         let u = if at != ArtType::DEFAULT {
             at & !ArtType::DEFAULT
         } else {
@@ -230,6 +236,7 @@ impl ArtTypeScanner {
 
         if !self.inheader {
             self.lines += 1;
+            self.bodysize += line.len();
         }
 
         /*
@@ -649,11 +656,13 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
     let mut istype = 0u8;
     let mut isnttype = 255u8;
     let mut len = buf.len();
-    if buf[len] == b'\n' {
-        len -= 1;
-    }
-    if buf[len] == b'\r' {
-        len -= 1;
+    if len > 0 {
+        if buf[len-1] == b'\n' {
+            len -= 1;
+        }
+        if buf[len-1] == b'\r' {
+            len -= 1;
+        }
     }
     if len == 0 {
         return 0;

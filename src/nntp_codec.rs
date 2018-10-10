@@ -184,8 +184,8 @@ impl NntpCodec {
                             b'\n' => {
                                 // have a full line. scan it.
                                 if do_scan {
-                                    self.arttype_scanner.scan_line(&buf[self.rd_line_start..bufpos]);
-                                    self.rd_line_start = bufpos;
+                                    self.arttype_scanner.scan_line(&buf[self.rd_line_start..bufpos+1]);
+                                    self.rd_line_start = bufpos+1;
                                 }
                                 State::Lf1Seen
                             },
