@@ -101,6 +101,7 @@ fn new_id() -> u16 {
 pub struct WildMatList {
     pub id:         u16,
     pub name:       String,
+    pub initial:    MatchResult,
     pub patterns:   Vec<WildPat>,
 }
 
@@ -108,6 +109,7 @@ impl Default for WildMatList {
     fn default() -> WildMatList {
         WildMatList{
             name: "".to_string(),
+            initial: MatchResult::NoMatch,
             patterns: Vec::new(),
             id: new_id(),
         }
@@ -118,15 +120,23 @@ impl WildMatList {
     /// Convert comma seperated list of patterns into a WildMatList.
     pub fn new(name: &str, pattern: &str) -> WildMatList {
         let mut patterns = Vec::new();
+        let mut initial = MatchResult::NoMatch;
         for pat in pattern.split(",").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if patterns.len() == 0 && pat.starts_with("!") {
+                initial = MatchResult::Match;
+            }
             patterns.push(pat.parse().unwrap());
         }
-        WildMatList{ name: name.to_string(), patterns, id: new_id() }
+        WildMatList{ name: name.to_string(), patterns, initial, id: new_id() }
     }
 
     /// Add a pattern.
     pub fn push(&mut self, pattern: impl AsRef<str>) {
-        self.patterns.push(pattern.as_ref().parse().unwrap());
+        let pat = pattern.as_ref();
+        if self.patterns.len() == 0 && pat.starts_with("!") {
+            self.initial = MatchResult::Match;
+        }
+        self.patterns.push(pat.parse().unwrap());
     }
 
     /// Set the name.
@@ -187,7 +197,7 @@ impl WildMatList {
     /// last matching pattern is returned, except for MatchResult::Poison
     /// which is returned on the first match.
     pub fn matches(&self, text: &str) -> MatchResult {
-        let mut res = MatchResult::NoMatch;
+        let mut res = self.initial;
         for p in &self.patterns {
             match p.matches(text) {
                 Some(m @ MatchResult::Match) => res = m,
