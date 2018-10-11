@@ -3,33 +3,49 @@ listen = "[::]:1119"
 threads = 1
 
 [paths]
-dnewsfeeds = "dnewsfeeds"
+config = "."
+spool = "/news/spool/news"
+log = "/var/log/news"
+db = "/home/mikevs/tmp"
+run = "/var/run/news"
+
+[config]
+dnewsfeeds = "${config}/dnewsfeeds"
+dspool_ctl = "${config}/dspool.ctl"
+
+[log]
+general = "STDOUT"
+incoming = "${log}/incoming.log.${date}"
+
+[active]
+file = "${db}/dactive.kp"
+backend = "diablo"
 
 [history]
-path = "/home/mikevs/tmp/dhistory"
+file = "${db}/dhistory"
 backend = "diablo"
 threads = 1
 
-[spool.0]
-backend = "diablo"
-path = "/news/spool/news/P.00"
-minfree = "10G"
-
-[spool.1]
-backend = "diablo"
-path = "/news/spool/news/P.01"
-minfree = "10G"
-
-[spool.2]
-backend = "diablo"
-path = "/news/spool/news/P.02"
-minfree = "10G"
-
-[[metaspool]]
-name = "bin"
-allocstrat = "sequential"
-spool = [ 1, 2, 3 ]
-groups = [ "*" ]
-maxsize = "64K"
-reallocint = "10m"
+# [spool.0]
+# backend = "diablo"
+# path = "${spool}/P.00"
+# minfree = "10G"
+# 
+# [spool.1]
+# backend = "diablo"
+# path = "${spool}/P.01"
+# minfree = "10G"
+# 
+# [spool.2]
+# backend = "diablo"
+# path = "${spool}/P.02"
+# minfree = "10G"
+# 
+# [[metaspool]]
+# name = "bin"
+# allocstrat = "sequential"
+# spool = [ 1, 2, 3 ]
+# groups = [ "*" ]
+# maxsize = "64K"
+# reallocint = "10m"
 

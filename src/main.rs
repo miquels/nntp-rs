@@ -66,8 +66,9 @@ fn main() -> io::Result<()> {
 
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
-    let hist = History::open(&config.history.backend, config.history.path.clone(), config.history.threads).map_err(|e| {
-         eprintln!("nntp-rs: history {}: {}", config.history.path, e);
+    let hpath = config::expand_path(&config.paths, &config.history.file);
+    let hist = History::open(&config.history.backend, hpath.clone(), config.history.threads).map_err(|e| {
+         eprintln!("nntp-rs: history {}: {}", hpath, e);
          exit(1);
     }).unwrap();
     let spool = Spool::new(&config.spool).map_err(|e| {

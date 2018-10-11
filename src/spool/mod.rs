@@ -17,6 +17,7 @@ mod diablo;
 
 use article::Article;
 use arttype::ArtType;
+use config;
 use util::{self, MatchResult};
 
 // Faux spoolno's returned by get_spool.
@@ -216,6 +217,8 @@ impl Spool {
     /// initialize all storage backends.
     pub fn new(spoolcfg: &SpoolCfg) -> io::Result<Spool> {
 
+        let mainconfig = config::get_config();
+
         // very basic check
         if spoolcfg.spoolgroup.len() == 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "no metaspools defined"));
@@ -235,6 +238,9 @@ impl Spool {
             // make a copy of the config with spool_no filled in.
             let mut cfg_c = cfg.clone();
             cfg_c.spool_no = n;
+
+            // expand Path.
+            cfg_c.path = config::expand_path(&mainconfig.paths, &cfg.path);
 
             // find the metaspool.
             let ms = match spoolcfg.spoolgroup.iter().find(|m| m.spool.contains(&n)) {
