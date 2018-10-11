@@ -97,7 +97,7 @@ pub fn read_config(name: &str) -> io::Result<()> {
         read_diablo_hosts(&mut feeds, dhosts)?;
     }
     if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.config.dspool_ctl) {
-        read_dspool_ctl(dspoolctl, &mut cfg.spool)?;
+        read_dspool_ctl(dspoolctl, &cfg.paths.spool.clone(), &mut cfg.spool)?;
     }
     feeds.init_hostcache();
 
