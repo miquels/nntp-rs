@@ -49,7 +49,7 @@ use history::History;
 use spool::Spool;
 
 fn main() -> io::Result<()> {
-    env_logger::init();
+    logger::nntp_logger_init();
 
     let matches = clap_app!(nntp_rs =>
         (version: "0.1")
