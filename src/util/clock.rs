@@ -33,17 +33,22 @@ pub enum ClockId {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[derive(PartialEq, Eq)]
 pub enum ClockId {
     /// realtime since the Unix epoch. can jump back or forward.
     Realtime = libc::CLOCK_REALTIME as isize,
-    /// on this non-linux platform RealtimeCoarse is the same as Realtime
-    RealtimeCoarse = libc::CLOCK_REALTIME as isize,
     /// time since some internal epoch. monotonic, no jumps.
     Monotonic = libc::CLOCK_MONOTONIC as isize,
-    /// on this non-linux platform MonotonicCoarse is the same as Monotonic
-    MonotonicCoarse = libc::CLOCK_MONOTONIC as isize,
     #[doc(hidden)]
     _Placeholder = -1,
+}
+#[cfg(not(target_os = "linux"))]
+#[allow(non_upper_case_globals)]
+impl ClockId {
+    /// on this non-linux platform RealtimeCoarse is the same as Realtime
+    pub const RealtimeCoarse : ClockId = ClockId::Realtime;
+    /// on this non-linux platform MonotonicCoarse is the same as Monotonic
+    pub const MonotonicCoarse : ClockId = ClockId::Monotonic;
 }
 
 /// Read the internal clock of the system.
