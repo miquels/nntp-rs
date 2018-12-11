@@ -587,9 +587,9 @@ impl StatVfs {
         } else {
             let bs = sv.f_frsize;
             Ok(StatVfs{
-                b_total:    bs * (sv.f_blocks - (sv.f_bfree - sv.f_bavail)),
-                b_avail:    bs * sv.f_bavail,
-                b_used:     bs * (sv.f_blocks - sv.f_bfree),
+                b_total:    bs * (sv.f_blocks - (sv.f_bfree - sv.f_bavail)) as u64,
+                b_avail:    bs * sv.f_bavail as u64,
+                b_used:     bs * (sv.f_blocks - sv.f_bfree) as u64,
             })
         }
     }
