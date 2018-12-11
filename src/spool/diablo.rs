@@ -114,6 +114,32 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
     Ok(unsafe { mem::transmute(buf) })
 }
 
+struct ReadAhead{}
+trait ReadAheadTrait {
+    // Optimization: when reading the header of the article, and we
+    // know we're going to read more after that, ask the kernel
+    // to do read-ahead.
+    fn article(_part: &ArtPart, _loc: &DArtLocation, _file: &fs::File) {
+    }
+}
+impl ReadAheadTrait for ReadAhead {
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    fn article(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
+        let size = match part {
+            ArtPart::Stat => 0,
+            ArtPart::Head => 16384,
+            ArtPart::Article | ArtPart::Body => loc.size,
+        };
+        if size > 0 {
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                libc::posix_fadvise(file.as_raw_fd(), loc.pos as libc::off_t,
+                            size as libc::off_t, libc::POSIX_FADV_WILLNEED);
+            }
+        }
+    }
+}
+
 /// This is the main backend implementation.
 impl DSpool {
 
@@ -181,20 +207,7 @@ impl DSpool {
         path.push(flnm);
         let file = fs::File::open(&path)?;
 
-        // tell kernel to read the headers, or the entire file.
-        let size = match part {
-            ArtPart::Stat => 0,
-            ArtPart::Head => 16384,
-            ArtPart::Article | ArtPart::Body => loc.size,
-        };
-        if size > 0 {
-            unsafe {
-                use std::os::unix::io::AsRawFd;
-                libc::posix_fadvise(file.as_raw_fd(), loc.pos as libc::off_t,
-                                size as libc::off_t, libc::POSIX_FADV_WILLNEED);
-            }
-        }
-
+        ReadAhead::article(&part, &loc, &file);
         let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
 
         debug!("art header: {:?}", dh);
