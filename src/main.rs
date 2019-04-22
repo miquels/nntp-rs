@@ -46,8 +46,8 @@ use std::process::exit;
 use std::thread;
 
 use net2::unix::UnixTcpBuilderExt;
-use history::History;
-use spool::Spool;
+use crate::history::History;
+use crate::spool::Spool;
 
 fn main() -> io::Result<()> {
     logger::nntp_logger_init();

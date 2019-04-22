@@ -242,7 +242,7 @@ impl LruMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use HistStatus;
+    use crate::history::HistStatus;
 
     #[test]
     fn test_simple() {
@@ -278,7 +278,7 @@ mod tests {
         };
 
         // fill up the cache to the limit.
-        for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS*CACHE_LISTLEN {
+        for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS {
             let msgid = format!("<{}@bla>", i);
             let h = histent.clone();
             let mut p = cache.lock_partition(&msgid);
@@ -293,7 +293,7 @@ mod tests {
             assert!(he.time == histent.time);
         }
         // add a bunch more.
-        for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS*CACHE_LISTLEN {
+        for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS {
             let msgid = format!("<{}@bla2>", i);
             let h = histent.clone();
             let mut p = cache.lock_partition(&msgid);

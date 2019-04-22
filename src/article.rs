@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::str;
 
-use arttype::ArtType;
-use errors::*;
+use crate::arttype::ArtType;
+use crate::errors::*;
 
 use bytes::BytesMut;
 use memchr::memchr;

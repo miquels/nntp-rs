@@ -10,10 +10,10 @@ use std::time::Duration;
 use std::thread;
 
 use dns_lookup::{self,AddrInfoHints,SockType,LookupErrorKind};
-use util;
+use crate::util;
 use parking_lot::Mutex;
 
-use newsfeeds::NewsFeeds;
+use crate::newsfeeds::NewsFeeds;
 
 const DNS_REFRESH_SECS : u64 = 3600;
 const DNS_MAX_TEMPERROR_SECS : u64 = 86400;
@@ -177,7 +177,7 @@ impl HostCache {
             // Critical section.
             let (host, o_addrs, lastupdate) = {
 
-                let mut inner = self.inner.lock();
+                let inner = self.inner.lock();
 
                 // retry if changed.
                 if generation != inner.generation {

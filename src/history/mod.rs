@@ -17,7 +17,7 @@ pub mod memdb;
 use std::io;
 use std::path::Path;
 
-use spool;
+use crate::spool;
 use self::cache::HCache;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
@@ -310,7 +310,7 @@ pub(crate) mod tests {
     fn test_simple() {
         logger_init();
         debug!("history test");
-        let mut h = History::open("memdb", "[memdb]").unwrap();
+        let h = History::open("memdb", "[memdb]", None).unwrap();
         let he = HistEnt{
             status:     HistStatus::Tentative,
             time:       SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
@@ -323,7 +323,7 @@ pub(crate) mod tests {
             .then(|res| {
                 match res {
                     Err(e) => panic!("store_commit: {:?}", e),
-                    Ok(v) => assert!(v == true),
+                    Ok(()) => {},
                 }
                 res
             })

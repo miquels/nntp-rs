@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_wildmat() {
-		let w = WildMatList::new("hal*[o]");
+		let w = WildMatList::new("name", "hal*[o]");
         assert!(w.matches("hallo") == MatchResult::Match);
     }
 }

@@ -1,13 +1,13 @@
 
 use log::{self, LevelFilter, Log, Metadata, Record};
-use std::fs;
+
 use std::io::{self,Write};
 
 use parking_lot::Mutex;
 
-use article::Article;
-use errors::*;
-use newsfeeds::NewsPeer;
+use crate::article::Article;
+use crate::errors::*;
+use crate::newsfeeds::NewsPeer;
 
 pub fn incoming_reject(label: &str, art: &Article, error: ArtError) {
     info!("{} - {} {} {} {:?}", label, art.msgid, art.len, art.arttype, error);

@@ -7,10 +7,10 @@ use chrono::{self,Datelike};
 use parking_lot::RwLock;
 use regex::{Captures,Regex};
 
-use dconfig::*;
-use newsfeeds::NewsFeeds;
-use spool::SpoolCfg;
-use util;
+use crate::dconfig::*;
+use crate::newsfeeds::NewsFeeds;
+use crate::spool::SpoolCfg;
+use crate::util;
 
 use toml;
 

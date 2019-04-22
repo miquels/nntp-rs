@@ -14,7 +14,7 @@ use bytes::{BufMut,BytesMut};
 use libc;
 use parking_lot::Mutex;
 
-use util::unixtime;
+use crate::util::unixtime;
 use super::{ArtLoc,ArtPart,Backend,MetaSpool,SpoolBackend,SpoolDef};
 
 const MAX_SPOOLFILE_SIZE : u64 = 1_000_000_000;

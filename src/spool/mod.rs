@@ -15,10 +15,10 @@ use futures::{Future,future};
 
 mod diablo;
 
-use article::Article;
-use arttype::ArtType;
-use config;
-use util::{self, MatchResult};
+use crate::article::Article;
+use crate::arttype::ArtType;
+use crate::config;
+use crate::util::{self, MatchResult};
 
 // Faux spoolno's returned by get_spool.
 pub const SPOOL_REJECTARTS : u8 = 253;

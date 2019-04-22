@@ -14,11 +14,11 @@ use std::io::{self, BufReader};
 use std::str::FromStr;
 use std::time::Duration;
 
-use arttype::ArtType;
-use newsfeeds::*;
-use util::WildMatList;
-use util;
-use spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
+use crate::arttype::ArtType;
+use crate::newsfeeds::*;
+use crate::util::WildMatList;
+use crate::util;
+use crate::spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
 
 macro_rules! invalid_data {
     ($($expr:expr),*) => (

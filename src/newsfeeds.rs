@@ -20,10 +20,10 @@ use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use article::Article;
-use arttype::ArtType;
-use hostcache::HostCache;
-use util::{self,MatchList,MatchResult,WildMatList};
+use crate::article::Article;
+use crate::arttype::ArtType;
+use crate::hostcache::HostCache;
+use crate::util::{self,MatchList,MatchResult,WildMatList};
 
 use ipnet::IpNet;
 

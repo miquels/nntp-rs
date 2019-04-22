@@ -8,17 +8,17 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::{Future,future};
 use time;
 
-use article::{Article,Headers,HeaderName,HeadersParser};
-use commands::{Capb, Cmd, CmdParser};
-use config::{self,Config};
-use errors::*;
-use logger;
-use newsfeeds::{NewsFeeds,NewsPeer};
-use nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
-use history::{HistEnt,HistError,HistStatus};
-use spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
-use util::{self,MatchList,MatchResult};
-use server::Server;
+use crate::article::{Article,Headers,HeaderName,HeadersParser};
+use crate::commands::{Capb, Cmd, CmdParser};
+use crate::config::{self,Config};
+use crate::errors::*;
+use crate::logger;
+use crate::newsfeeds::{NewsFeeds,NewsPeer};
+use crate::nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
+use crate::history::{HistEnt,HistError,HistStatus};
+use crate::spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
+use crate::util::{self,MatchList,MatchResult};
+use crate::server::Server;
 
 #[derive(Debug,PartialEq,Eq)]
 pub enum NntpState {
@@ -259,7 +259,7 @@ impl NntpSession {
                     Cmd::Stat => (223, ArtPart::Stat),
                     _ => unreachable!(),
                 };
-                let mut buf = BytesMut::from(format!("{} 0 {}\r\n", code, args[0]));
+                let buf = BytesMut::from(format!("{} 0 {}\r\n", code, args[0]));
                 return self.read_article(part, args[0], buf);
             },
             Cmd::Capabilities => {
