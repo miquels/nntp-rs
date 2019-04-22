@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::time::SystemTime;
 
 use parking_lot::{Mutex,MutexGuard};
 

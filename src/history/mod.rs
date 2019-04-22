@@ -217,7 +217,7 @@ impl History {
                     None
                 },
                 Some(HistStatus::Tentative) if what == HistStatus::Writing => {
-                    partition.store_tentative(what);
+                    partition.store_update(what);
                     None
                 },
                 Some(HistStatus::Writing) => Some(HistStatus::Tentative),

@@ -219,7 +219,7 @@ impl NntpSession {
             Ok(l) => {
                 if !l.ends_with("\r\n") {
                     // allow QUIT even with improper line-ending.
-                    let l = l.trim_right();
+                    let l = l.trim_end();
                     if !l.eq_ignore_ascii_case("quit") && l != "" {
                         // otherwise complain
                         return Box::new(future::ok(NntpResult::text("500 Lines must end with CRLF")));

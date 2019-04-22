@@ -575,7 +575,7 @@ fn parse_list(list: &mut Vec<String>, words: &[&str], sep: &str) -> io::Result<(
         let _ : Vec<_> = w
             .split(|s: char| sep.contains(s))
             .filter(|s| !s.is_empty())
-            .map(|s| { s.trim(); list.push(s.to_string()); s } )
+            .map(|s| { let s = s.trim(); list.push(s.to_string()); s } )
             .collect();
     }
     Ok(())
