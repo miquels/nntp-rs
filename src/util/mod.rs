@@ -1,6 +1,6 @@
 //! A bunch of helper and utility functions.
 
-mod clock;
+pub(crate) mod clock;
 mod dateparser;
 mod de;
 mod dhash;

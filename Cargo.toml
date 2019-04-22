@@ -27,6 +27,7 @@ parking_lot = "0.6.4"
 regex = "1.0.5"
 chrono = "0.4.6"
 byteorder = "1.2.6"
+linked-hash-map = "0.5.2"
 
 #nntp-rs-history = { path = "../history" }
 #nntp-rs-spool = { path = "../spool" }

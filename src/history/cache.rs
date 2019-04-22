@@ -6,33 +6,31 @@ use std::time::SystemTime;
 
 use parking_lot::{Mutex,MutexGuard};
 
-use history::{HistEnt,HistStatus};
+use super::{HistEnt,HistStatus};
 
 // Constants that define how the cache behaves.
-const NUM_PARTITIONS: u32 = 32;
-const CACHE_BUCKETS: u32 = 128;
-const CACHE_LISTLEN: u32 = 16;
-const CACHE_MAX_AGE: u32 = 300;
+pub const NUM_PARTITIONS: u32 = 32;
+pub const CACHE_BUCKETS: u32 = 16384;
+pub const CACHE_MAX_AGE: u32 = 300;
 
-/// FIFO size and time limited cache.
+/// LRU size and time limited cache.
 /// The cache is partitioned for parallel access.
 pub struct HCache {
-    partitions:         Vec<Mutex<FifoMap>>,
+    partitions:         Vec<Mutex<LruMap>>,
     num_partitions:     u32,
 }
 
 // helper.
+#[inline]
 fn hash_str(s: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
-    let h = hasher.finish();
-    trace!("hash({}) -> {}", s, h);
-    h
+    hasher.finish()
 }
 
-// another helper.
+#[inline]
 fn unixtime() -> u32 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as u32
+    crate::util::clock::unixtime() as u32
 }
 
 impl HCache {
@@ -40,18 +38,16 @@ impl HCache {
     /// Return a new HCache. Using hardcoded params for now (defined at the top of this file):
     ///
     /// - 32 partitions
-    /// - 128 buckets per partition
-    /// - max 16 entries per bucket.
+    /// - 4096 entries per partition
+    /// - max age 5 minutes.
     ///
-    /// This totals 64K entries, good for 30 seconds of cache with
+    /// This totals 128K entries, good for 60 seconds of cache with
     /// current usenet feed peak rates (2000/sec, sep 2018).
-    ///
-    /// TODO: We need metrics.
     pub fn new() -> HCache {
 
         let mut partitions = Vec::new();
         for _ in 0..NUM_PARTITIONS {
-            let map = FifoMap::new(CACHE_BUCKETS, CACHE_LISTLEN, CACHE_MAX_AGE);
+            let map = LruMap::new(CACHE_BUCKETS, CACHE_MAX_AGE);
             partitions.push(Mutex::new(map));
         }
 
@@ -77,7 +73,7 @@ impl HCache {
 /// Returned by HCache.lock_partition(). Serves as a handle and a mutex guard.
 /// As long as this struct is not dropped, the cache partition remains locked.
 pub struct HCachePartition<'a> {
-    inner:              MutexGuard<'a, FifoMap>,
+    inner:              MutexGuard<'a, LruMap>,
     hash:               u64,
     when:               u32,
 }
@@ -109,6 +105,22 @@ impl<'a> HCachePartition<'a> {
         });
     }
 
+    /// update entry (to go from tentative to writing).
+    pub fn store_update(&mut self, what: HistStatus) {
+        let he = HistEnt{
+            status:     what,
+            time:       self.when as u64,
+            head_only:  false,
+            location:   None,
+        };
+        let inner = &mut *self.inner;
+        inner.update(HCacheEnt{
+            histent: he,
+            hash: self.hash,
+            when: self.when,
+        });
+    }
+
     /// make entry permanent.
     pub fn store_commit(&mut self, he: HistEnt) -> bool {
         let inner = &mut *self.inner;
@@ -122,7 +134,7 @@ impl<'a> HCachePartition<'a> {
     /// remove entry.
     pub fn store_rollback(&mut self) {
         let inner = &mut *self.inner;
-        inner.remove(self.hash, self.when);
+        inner.remove(self.hash)
     }
 }
 
@@ -134,98 +146,99 @@ struct HCacheEnt {
     when:       u32,
 }
 
-// Simple FIFO hashmap. Might replace with LinkedHashMap.
-struct FifoMap {
-    buckets:        Vec<VecDeque<HCacheEnt>>,
+// We create our own Hasher that always hashes an u64
+// into the exact same u64 (hey, it's a perfect hash!).
+use std::hash::BuildHasher;
+use std::convert::TryInto;
+
+struct MyBuildHasher;
+impl BuildHasher for MyBuildHasher {
+    type Hasher = MyHasher;
+    fn build_hasher(&self) -> Self::Hasher {
+        MyHasher(0)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct MyHasher(u64);
+impl Hasher for MyHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = u64::from_ne_bytes(bytes.try_into().unwrap());
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+use linked_hash_map::LinkedHashMap;
+
+// Simple FIFO hashmap.
+struct LruMap {
+    map:                LinkedHashMap<u64, HCacheEnt, MyBuildHasher>,
     num_buckets:        u32,
-    max_listlen:        u32,
     max_age:            u32,
 }
 
 // This is the inner map. Really simple, it has N buckets, each bucket has
 // a VecDeque as a list, and we push new entries on the front and pop old
 // entries from the back.
-impl FifoMap {
-    fn new(num_buckets: u32, max_listlen: u32, max_age: u32) -> FifoMap {
-        let mut buckets = Vec::with_capacity(num_buckets as usize);
-        for _ in 0..num_buckets {
-            buckets.push(VecDeque::with_capacity(max_listlen as usize));
+impl LruMap {
+    fn new(num_buckets: u32, max_age: u32) -> LruMap {
+        LruMap{
+            map:            LinkedHashMap::with_capacity_and_hasher(num_buckets as usize, MyBuildHasher{}),
+            num_buckets:    num_buckets,
+            max_age:        max_age,
         }
-        FifoMap{ buckets, num_buckets, max_listlen, max_age }
-    }
-
-    // Get a mutable entry.
-    fn get_mut(&mut self, hash: u64, now: u32) -> Option<&mut HCacheEnt> {
-        let bi = ((((hash >> 16) & 0xffffffff) as u32) % self.num_buckets) as usize;
-        for b in self.buckets[bi].iter_mut() {
-            if b.when + self.max_age < now + 1 {
-                break;
-            }
-            if b.hash == hash {
-                return Some(b);
-            }
-        }
-        None
     }
 
     // Get an entry.
     fn get(&self, hash: u64, now: u32) -> Option<HCacheEnt> {
-        let bi = ((((hash >> 16) & 0xffffffff) as u32) % self.num_buckets) as usize;
-        for b in self.buckets[bi].iter() {
-            if b.when + self.max_age < now + 1 {
-                break;
-            }
-            if b.hash == hash {
-                return Some(b.clone());
-            }
+        match self.map.get(&hash) {
+            Some(e) if e.when + self.max_age > now => Some(e.clone()),
+            _ => None,
         }
-        None
     }
 
     // Insert an entry.
     fn insert(&mut self, ent: HCacheEnt) {
-        let bi = ((((ent.hash >> 16) & 0xffffffff) as u32) % self.num_buckets) as usize;
-        trace!("FifoMap.insert hash={} now={} bi={}", ent.hash, ent.when, bi);
-        self.buckets[bi].push_front(ent);
-        if self.buckets[bi].len() > self.max_listlen as usize {
-            self.buckets[bi].pop_back();
+        if self.map.len() >= self.num_buckets as usize {
+            if let Some((_, oldest)) = self.map.pop_front() {
+                // ent.when == "now" for all intents and purposes.
+                if oldest.when + self.max_age > ent.when &&
+                   oldest.histent.status == HistStatus::Writing {
+                    // This is a very unlikely race condition, the entry expiring
+                    // from the LRU cache while we're writing it to disk, but
+                    // if it happens, just move it to the front again.
+                    self.map.insert(oldest.hash, oldest);
+                }
+            }
         }
+        self.map.insert(ent.hash, ent);
     }
 
     // Update an entry.
     fn update(&mut self, ent: HCacheEnt) -> bool {
-        let mut do_insert = false;
-        let r = match self.get_mut(ent.hash, ent.when) {
-            Some(oent) => {
-                if oent.when >= ent.when - 1 {
-                    // if it's recent enough just update existing entry
-                    oent.histent = ent.histent.clone();
-                } else {
-                    // otherwise insert a new one at the head.
-                    // Must do that outside of this block because of the
-                    // borrow checker - will probably be fixed when we have NLL.
-                    do_insert = true;
-                }
-                true
-            },
-            None => false,
-        };
-        if do_insert {
-            self.insert(ent);
+        if self.map.get_refresh(&ent.hash).is_none() {
+            return false;
         }
-        r
+        if let Some(e) = self.map.get_mut(&ent.hash) {
+            // ent.when == "now" for all intents and purposes.
+            if e.when + self.max_age > ent.when {
+                *e = ent;
+                return true;
+            }
+        }
+        false
     }
 
     // Remove an entry.
-    fn remove(&mut self, hash: u64, now: u32) {
-        match self.get_mut(hash, now) {
-            Some(ent) => {
-                ent.histent.status = HistStatus::NotFound;
-            },
-            None => {},
+    fn remove(&mut self, hash: u64) {
+        if let Some(ent) = self.map.get_mut(&hash) {
+            ent.histent.status = HistStatus::NotFound;
         }
     }
-
 }
 
 #[cfg(test)]
@@ -235,7 +248,6 @@ mod tests {
 
     #[test]
     fn test_simple() {
-        ::tests::logger_init();
         debug!("test_simple()");
         let cache = HCache::new();
         let histent = HistEnt{
@@ -248,7 +260,7 @@ mod tests {
         {
             let mut p = cache.lock_partition(msgid.clone());
             let h = histent.clone();
-            p.store_begin();
+            p.store_tentative(h.status);
             p.store_commit(h);
         }
         let p = cache.lock_partition(msgid);
@@ -258,7 +270,6 @@ mod tests {
 
     #[test]
     fn test_full() {
-        ::tests::logger_init();
         debug!("test_full()");
         let cache = HCache::new();
         let histent = HistEnt{
@@ -271,9 +282,9 @@ mod tests {
         // fill up the cache to the limit.
         for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS*CACHE_LISTLEN {
             let msgid = format!("<{}@bla>", i);
-            let mut h = histent.clone();
+            let h = histent.clone();
             let mut p = cache.lock_partition(&msgid);
-            p.store_begin();
+            p.store_tentative(h.status);
             p.store_commit(h);
         }
         // first entry should still be there
@@ -286,9 +297,9 @@ mod tests {
         // add a bunch more.
         for i in 0 .. NUM_PARTITIONS*CACHE_BUCKETS*CACHE_LISTLEN {
             let msgid = format!("<{}@bla2>", i);
-            let mut h = histent.clone();
+            let h = histent.clone();
             let mut p = cache.lock_partition(&msgid);
-            p.store_begin();
+            p.store_tentative(h.status);
             p.store_commit(h);
         }
         // first entry should be gone.

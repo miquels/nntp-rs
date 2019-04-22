@@ -11,6 +11,7 @@ extern crate env_logger;
 extern crate futures_cpupool;
 extern crate ipnet;
 extern crate libc;
+extern crate linked_hash_map;
 extern crate memchr;
 extern crate net2;
 extern crate num_cpus;
