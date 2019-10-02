@@ -144,7 +144,7 @@ impl ReadAheadTrait for ReadAhead {
 impl DSpool {
 
     /// Create a new diablo-type spool backend.
-    pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<SpoolBackend>> {
+    pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<dyn SpoolBackend>> {
         let file_reallocint = if ms.reallocint.as_secs() > 0 {
             ms.reallocint.as_secs() as u32
         } else {

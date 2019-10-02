@@ -1,8 +1,9 @@
 #[macro_use] extern crate clap;
-#[macro_use] extern crate futures;
+/*#[macro_use]*/ extern crate futures;
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
 #[macro_use] extern crate serde_derive;
+/*
 extern crate byteorder;
 extern crate bytes;
 extern crate chrono;
@@ -22,9 +23,11 @@ extern crate time;
 extern crate tk_listen;
 extern crate tokio;
 extern crate toml;
+*/
 
 pub mod article;
 pub mod arttype;
+pub mod blocking;
 pub mod commands;
 pub mod config;
 pub mod dconfig;

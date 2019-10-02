@@ -6,9 +6,10 @@
 //!
 
 use std::sync::Arc;
+use std::future::Future;
 
-use futures_cpupool::{self,CpuPool};
-use futures::{Future,future};
+use futures::future;
+use futures::future::{Either, FutureExt, TryFutureExt};
 
 mod cache;
 pub mod diablo;
@@ -18,12 +19,11 @@ use std::io;
 use std::path::Path;
 
 use crate::spool;
+use crate::blocking::BlockingPool;
 use self::cache::HCache;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
 const PRESTORE_MAX_AGE: u32 = 60;
-
-type HistStatusFuture = Future<Item=Option<HistStatus>, Error=io::Error> + Send;
 
 /// Functionality a backend history database needs to make available.
 pub trait HistBackend: Send + Sync {
@@ -40,9 +40,9 @@ pub struct History {
 }
 
 struct HistoryInner {
-    cache:      HCache,
-    backend:    Box<HistBackend>,
-    cpu_pool:   CpuPool,
+    cache:          HCache,
+    backend:        Box<dyn HistBackend>,
+    blocking_pool:  BlockingPool,
 }
 
 /// One history entry.
@@ -86,7 +86,7 @@ impl History {
 
     /// Open history database.
     pub fn open(tp: &str, path: impl AsRef<Path>, threads: Option<usize>) -> io::Result<History> {
-        let h : Box<HistBackend> = match tp {
+        let h : Box<dyn HistBackend> = match tp {
             "diablo" => {
                 Box::new(diablo::DHistory::open(path.as_ref())?)
             },
@@ -98,15 +98,11 @@ impl History {
             },
         };
 
-        let mut builder = futures_cpupool::Builder::new();
-        builder.name_prefix("history-");
-        builder.pool_size(threads.unwrap_or(32));
-
         Ok(History{
             inner:  Arc::new(HistoryInner{
-                cache:  HCache::new(),
-                backend:    h,
-                cpu_pool:   builder.create(),
+                cache:          HCache::new(),
+                backend:        h,
+                blocking_pool:  BlockingPool::new(threads.unwrap_or(32)),
             })
         })
     }
@@ -144,24 +140,23 @@ impl History {
 
     /// Find an entry in the history database. This lookup ignores the
     /// write-cache, it goes straight to the backend.
-    pub fn lookup(&self, msgid: &str) -> impl Future<Item=Option<HistEnt>, Error=io::Error> + Send {
+    pub fn lookup(&self, msgid: &str) -> impl Future<Output=Result<Option<HistEnt>, io::Error>> + Send + 'static {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
-        self.inner.cpu_pool.spawn_fn(move || {
-            use std::thread;
-            trace!("history worker on thread {:?}", thread::current().id());
+        self.inner.blocking_pool.spawn_fn(move || {
+            trace!("history worker on thread {:?}", std::thread::current().id());
             match inner.backend.lookup(&msgid) {
                 Ok(he) => {
                     if he.status == HistStatus::NotFound {
-                        future::ok(None)
+                        Ok(None)
                     } else {
-                        future::ok(Some(he))
+                        Ok(Some(he))
                     }
                 },
                 Err(e) => {
                     // we simply log an error and return not found.
                     warn!("backend_lookup: {}", e);
-                    future::ok(None)
+                    Ok(None)
                 },
             }
         })
@@ -177,7 +172,7 @@ impl History {
     /// - HistStatus::Tentative - message-id already tentative in cache
     /// - HistEnt with any other status - message-id already present
     ///
-    pub fn check(&self, msgid: &str) -> Box<HistStatusFuture> {
+    pub fn check(&self, msgid: &str) -> impl Future<Output=Result<Option<HistStatus>, io::Error>> + Send + 'static {
         self.do_check(msgid, HistStatus::Tentative)
     }
 
@@ -188,8 +183,8 @@ impl History {
     ///
     /// Returns future::ok if we succesfully set the cache entry to state Writing,
     /// future::err(HistError) otherwise.
-    pub fn store_begin(&self, msgid: &str) -> Box<Future<Item=(), Error=HistError> + Send> {
-        let fut = self.do_check(msgid, HistStatus::Writing)
+    pub fn store_begin(&self, msgid: &str) -> impl Future<Output=Result<(), HistError>> + Send + 'static {
+        self.do_check(msgid, HistStatus::Writing)
             .then(|res| {
                 match res {
                     Err(e) => future::err(HistError::IoError(e)),
@@ -199,12 +194,11 @@ impl History {
                         Some(s) => future::err(HistError::Status(s)),
                     }
                 }
-            });
-        Box::new(fut)
+            })
     }
 
     // Function that does the actual work for check / store_begin.
-    fn do_check(&self, msgid: &str, what: HistStatus) -> Box<HistStatusFuture> {
+    fn do_check(&self, msgid: &str, what: HistStatus) -> impl Future<Output=Result<Option<HistStatus>, io::Error>> + Send + 'static {
 
         // First check the cache. HistStatus::NotFound means it WAS found in
         // the cache as negative entry, so we do not need to go check
@@ -224,14 +218,14 @@ impl History {
                 hs @ Some(_) => hs,
                 None => break,
             };
-            return Box::new(future::ok(f));
+            return Either::Left(future::ok(f));
         }
 
         // No cache entry. Check the actual history database.
         let this = self.clone();
         let msgid2 = msgid.to_string();
         let f = self.lookup(msgid)
-            .map(move |he| {
+            .map_ok(move |he| {
                 match he {
                     Some(he) => Some(he.status),
                     None => {
@@ -253,12 +247,12 @@ impl History {
                     },
                 }
             });
-        Box::new(f)
+        Either::Right(f)
     }
 
     /// Done writing to the spool. Update the cache-entry and write-through
     /// to the actual history database backend.
-    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Item=(), Error=io::Error> {
+    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Output=Result<(), io::Error>> + '_ {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
@@ -267,13 +261,9 @@ impl History {
         }
         let inner = self.inner.clone();
         let msgid = msgid.to_string().into_bytes();
-        let f = self.inner.cpu_pool.spawn_fn(move || {
-            match inner.backend.store(&msgid, &he) {
-                Ok(()) => future::ok(()),
-                Err(e) => future::err(e),
-            }
-        });
-        f
+        self.inner.blocking_pool.spawn_fn(move || {
+            inner.backend.store(&msgid, &he)
+        })
     }
 
     /// Something went wrong writing to the spool. Cancel the reservation

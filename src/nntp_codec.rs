@@ -1,13 +1,15 @@
 use std::io;
 use std::net::Shutdown;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
 
 use bytes::{Bytes, BytesMut};
-use futures::{Async, AsyncSink,  Poll, Stream, Sink, StartSend};
+use futures::{Stream, Sink};
 use memchr::memchr;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -114,7 +116,7 @@ impl NntpCodec {
     }
 
     // fill the read buffer as much as possible.
-    fn fill_read_buf(&mut self) -> Result<Async<()>, io::Error> {
+    fn fill_read_buf(mut self: Pin<&mut Self>, cx: &mut Context,) -> Poll<Result<(), io::Error>> {
         loop {
             let mut buflen = self.rd.len();
             if self.rd_overflow && buflen > 32768 {
@@ -128,15 +130,27 @@ impl NntpCodec {
             self.rd.reserve(size);
 
             // Read data into the buffer if it's available.
-            let n = try_ready!(self.socket.read_buf(&mut self.rd));
+            // This is stupid.
+            let mut rd = BytesMut::new();
+            std::mem::swap(&mut self.rd, &mut rd);
+            let res = {
+                let mut selfref = self.as_mut();
+                let socket = Pin::new(&mut selfref.socket);
+                socket.poll_read_buf(cx, &mut rd)
+            };
+            std::mem::swap(&mut self.rd, &mut rd);
 
-            if n == 0 {
-                return Ok(Async::Ready(()));
-            }
+            match res {
+                Poll::Ready(Ok(n)) if n == 0 => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+                _ => {},
+            };
         }
     }
 
-    fn read_line(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
+    //fn read_line(mut self: Pin<&mut Self>) -> Poll<Option<Result<NntpInput, io::Error>>> {
+    fn read_line(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         // resume where we left off.
         let bufpos = self.rd_pos;
         let buflen = self.rd.len();
@@ -146,16 +160,17 @@ impl NntpCodec {
                 Some(z) => bufpos + z,
                 None => {
                     self.rd_pos = buflen;
-                    return Ok(Async::NotReady);
+                    return Poll::Pending;
                 },
             }
         };
         let buf = self.rd.split_to(nl_pos + 1);
         self.rd_pos = 0;
-        Ok(Async::Ready(Some(NntpInput::Line(buf))))
+        Poll::Ready(Some(Ok(NntpInput::Line(buf))))
     }
 
-    fn read_block(&mut self, do_scan: bool) -> Result<Async<Option<NntpInput>>, io::Error> {
+    //fn read_block(mut self: Pin<&mut Self>, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
+    fn read_block(&mut self, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
 
         // resume where we left off.
         let mut bufpos = self.rd_pos;
@@ -238,20 +253,21 @@ impl NntpCodec {
             if self.rd_overflow {
                 // recoverable error.
                 self.rd_overflow = false;
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "Overflow"));
+                return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::InvalidData, "Overflow"))));
             }
-            return Ok(Async::Ready(Some(NntpInput::Block(buf))));
+            return Poll::Ready(Some(Ok(NntpInput::Block(buf))));
         }
 
         // continue
-        Ok(Async::NotReady)
+        Poll::Pending
     }
 
     // read_article is a small wrapper around read_block that returns
     // an Article struct with the BytesMut and some article metadata.
-    fn read_article(&mut self) -> Result<Async<Option<NntpInput>>, io::Error> {
+    //fn read_article(self: Pin<&mut Self>) -> Poll<Option<Result<NntpInput, io::Error>>> {
+    fn read_article(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         match self.read_block(true) {
-            Ok(Async::Ready(Some(NntpInput::Block(buf)))) => {
+            Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
                 let article = Article{
                     msgid:      self.control.get_msgid(),
                     len:        buf.len(),
@@ -260,65 +276,63 @@ impl NntpCodec {
                     lines:      self.arttype_scanner.lines(),
                 };
                 self.arttype_scanner.reset();
-                Ok(Async::Ready(Some(NntpInput::Article(article))))
+                Poll::Ready(Some(Ok(NntpInput::Article(article))))
             },
-            buf => buf,
+            data => data,
         }
     }
 
-	fn nntp_start_send(&mut self, item: Bytes) -> StartSend<Bytes, io::Error> {
-
-        // If we're still sending out the previous item...
-        if !self.wr.is_empty() {
-
-            // flush it ...
-            self.nntp_sink_poll_complete()?;
-
-            // not done yet, reject this item.
-            if !self.wr.is_empty() {
-                return Ok(AsyncSink::NotReady(item));
-            }
-        } else {
-            let _ = self.socket.set_nodelay(false);
-        }
-
-        self.wr = item;
-
-        Ok(AsyncSink::Ready)
-    }
-
-	fn nntp_sink_poll_complete(&mut self) -> Poll<(), io::Error> {
+	fn nntp_sink_poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         trace!("flushing buffer");
 
         while !self.wr.is_empty() {
             trace!("writing; remaining={}", self.wr.len());
 
-            let n = try_ready!(self.socket.poll_write(&self.wr));
+            let socket = Pin::new(&mut self.socket);
+            let n = match socket.poll_write(cx, &self.wr) {
+                Poll::Ready(Ok(n)) => n,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
 
             if n == 0 {
                 let _ = self.socket.set_nodelay(true);
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
-                                          write buffer to socket").into());
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
+                                          write buffer to socket")));
             }
 
             let _ = self.wr.split_to(n);
         }
 
         // Try flushing the underlying IO
-        try_ready!(self.socket.poll_flush());
+        let socket = Pin::new(&mut self.socket);
+        match socket.poll_flush(cx) {
+            Poll::Ready(Ok(_)) => {},
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        };
 
         // Flushed, and done, so immediately send packet(s).
         // XXX FIXME for Linux use TCP_CORK
         let _ = self.socket.set_nodelay(true);
 
         trace!("buffer flushed");
-        Ok(Async::Ready(()))
+        Poll::Ready(Ok(()))
 	}
 
-	fn nntp_sink_close(&mut self) -> Poll<(), io::Error> {
-        try_ready!(self.nntp_sink_poll_complete());
+	fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
+        let _ = self.socket.set_nodelay(false);
+        self.wr = item;
+        Ok(())
+    }
+
+	fn nntp_sink_poll_close(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        match self.nntp_sink_poll_ready(cx) {
+            Poll::Ready(Ok(())) => {},
+            other => return other,
+        }
         self.socket.shutdown(Shutdown::Write)?;
-        Ok(Async::Ready(()))
+        Poll::Ready(Ok(()))
 	}
 }
 
@@ -367,58 +381,64 @@ impl NntpCodecControl {
 /// - NntpInput::Block(BytesMut):       multiline block
 ///
 impl Stream for NntpCodec {
-    type Item = NntpInput;
-    type Error = io::Error;
+    type Item = Result<NntpInput, io::Error>;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
 
-        let rd_mode = self.control.get_mode();
+        let self2 = &mut self.as_mut();
+
+        let rd_mode = self2.control.get_mode();
         match rd_mode {
             CodecMode::Connect => {
-                self.control.set_mode(CodecMode::ReadLine);
-                return Ok(Async::Ready(Some(NntpInput::Connect)));
+                self2.control.set_mode(CodecMode::ReadLine);
+                return Poll::Ready(Some(Ok(NntpInput::Connect)));
             },
             CodecMode::WriteError => {
-                let e = match self.control.error.lock().take() {
+                let e = match self2.control.error.lock().take() {
                     Some(e) => e,
                     None => {
                         error!("nntp_codec::poll: CodecMode::WriteError but no error available");
                         io::Error::new(io::ErrorKind::Other, "write error")
                     },
                 };
-                self.control.quit();
-                return Ok(Async::Ready(Some(NntpInput::WriteError(e))));
+                self2.control.quit();
+                return Poll::Ready(Some(Ok(NntpInput::WriteError(e))));
             },
-            CodecMode::Quit => return Ok(Async::Ready(None)),
+            CodecMode::Quit => return Poll::Ready(None),
             _ => {},
         }
 
         // read as much data as we can.
-        let sock_closed = self.fill_read_buf()?.is_ready();
+        let sock_closed = match self2.as_mut().fill_read_buf(cx) {
+            Poll::Ready(Ok(())) => true,
+            Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+            Poll::Pending => false,
+        };
 
         // other side closed.
         if sock_closed {
-            if self.rd_state != State::Eof {
+            if self2.rd_state != State::Eof {
                 // we were still processing data .. this was unexpected!
-                if self.rd.len() > 0 {
-                    self.rd_state = State::Eof;
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
+                if self2.rd.len() > 0 {
+                    self2.rd_state = State::Eof;
+                    let err = Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
+                    return Poll::Ready(Some(err));
                 }
 
                 // return an end-of-file indication once, the next poll will
                 // return end-of-stream.
-                self.rd_state = State::Eof;
-                return Ok(Async::Ready(Some(NntpInput::Eof)));
+                self2.rd_state = State::Eof;
+                return Poll::Ready(Some(Ok(NntpInput::Eof)));
             }
             // end stream.
-            return Ok(Async::Ready(None));
+            return Poll::Ready(None);
         }
 
         // Then process the data.
         match rd_mode {
-            CodecMode::ReadLine => self.read_line(),
-            CodecMode::ReadBlock => self.read_block(false),
-            CodecMode::ReadArticle => self.read_article(),
+            CodecMode::ReadLine => self2.read_line(),
+            CodecMode::ReadBlock => self2.read_block(false),
+            CodecMode::ReadArticle => self2.read_article(),
             _ => unreachable!(),
         }
     }
@@ -427,21 +447,23 @@ impl Stream for NntpCodec {
 /// The Sink is what writes the buffered data to the socket. We handle
 /// a "Bytes" struct as one item. We do not buffer (yet), only one
 /// item can be in-flight at a time.
-impl Sink for NntpCodec {
-    type SinkItem = Bytes;
-    type SinkError = io::Error;
+impl Sink<Bytes> for NntpCodec {
+    type Error = io::Error;
 
-	fn poll_complete(&mut self) -> Poll<(), io::Error> {
-        self.nntp_sink_poll_complete()
+	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        self.as_mut().nntp_sink_poll_ready(cx)
     }
 
-	fn start_send(&mut self, item: Bytes) -> StartSend<Bytes, io::Error> {
-        self.nntp_start_send(item)
+	fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
+        self.nntp_sink_start_send(item)
     }
 
-	fn close(&mut self) -> Poll<(), io::Error> {
-        self.nntp_sink_close()
+	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        self.as_mut().nntp_sink_poll_ready(cx)
+    }
+
+	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        self.as_mut().nntp_sink_poll_close(cx)
     }
 }
-
 

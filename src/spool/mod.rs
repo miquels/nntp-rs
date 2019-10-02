@@ -8,15 +8,15 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::future::Future;
 
 use bytes::BytesMut;
-use futures_cpupool::{self,CpuPool};
-use futures::{Future,future};
 
 mod diablo;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
+use crate::blocking::BlockingPool;
 use crate::config;
 use crate::util::{self, MatchResult};
 
@@ -197,13 +197,13 @@ pub struct SpoolDef {
 /// Article storage (spool) functionality.
 #[derive(Clone)]
 pub struct Spool {
-    cpu_pool:   CpuPool,
+    pool:       BlockingPool,
     inner:      Arc<SpoolInner>,
 }
 
 // Inner stuff.
 struct BackendDef {
-    backend:    Box<SpoolBackend>,
+    backend:    Box<dyn SpoolBackend>,
     weight:     u32,
 }
 
@@ -321,35 +321,31 @@ impl Spool {
             });
         }
 
-        let mut builder = futures_cpupool::Builder::new();
-        builder.name_prefix("spool-");
-        builder.pool_size(64);
-
         Ok(Spool{
             inner: Arc::new(SpoolInner{
                 spool:      spools,
                 metaspool:  spoolgroup,
                 groupmap:   groupmap,
             }),
-            cpu_pool:   builder.create(),
+            pool:   BlockingPool::new(64),
         })
     }
 
-    pub fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> impl Future<Item=BytesMut, Error=io::Error> + Send {
+    pub fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> impl Future<Output=Result<BytesMut, io::Error>> + Send {
         let inner = self.inner.clone();
-        self.cpu_pool.spawn_fn(move || {
+        self.pool.spawn_fn(move || {
             use std::thread;
             trace!("spool reader on thread {:?}", thread::current().id());
             let be = match inner.spool.get(&art_loc.spool as &u8) {
                 None => {
-                    return future::err(io::Error::new(io::ErrorKind::NotFound,
+                    return Err(io::Error::new(io::ErrorKind::NotFound,
                                    format!("spool {} not found", art_loc.spool)));
                 },
                 Some(be) => &be.backend,
             };
             match be.read(&art_loc, part, &mut buf) {
-                Ok(()) => future::ok(buf),
-                Err(e) => future::err(e),
+                Ok(()) => Ok(buf),
+                Err(e) => Err(e),
             }
         })
     }
@@ -425,10 +421,10 @@ impl Spool {
     /// NOTE: we stay as close to wireformat as possible. So
     /// - head_only: body is empty.
     /// - !headonly: body includes hdr/body seperator, ends in .\r\n
-    pub fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> impl Future<Item=ArtLoc, Error=io::Error> + Send {
+    pub fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> impl Future<Output=Result<ArtLoc, io::Error>> + Send {
 
         let inner = self.inner.clone();
-        self.cpu_pool.spawn_fn(move || {
+        self.pool.spawn_fn(move || {
             use std::thread;
             trace!("spool writer on thread {:?}", thread::current().id());
             let spool = &inner.spool.get(&spoolno).unwrap().backend;

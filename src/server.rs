@@ -5,14 +5,11 @@ use std::net::TcpListener;
 use std::process::exit;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-use futures::{Future,Stream};
 use num_cpus;
 use parking_lot::Mutex;
-use tk_listen::ListenExt;
-use tokio::prelude::*;
 use tokio;
+use tokio::prelude::*;
 use tokio::runtime::current_thread;
 
 use crate::bind_socket;
@@ -75,44 +72,49 @@ impl Server {
                 let handle = runtime.handle();
 
                 trace!("current_thread::runtime on {:?}", thread::current().id());
-                let reactor_handle = tokio::reactor::Handle::default();
+                let reactor_handle = tokio_net::driver::Handle::default();
 
                 let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
                     .expect("cannot convert from net2 listener to tokio listener");
 
                 // Pull out a stream of sockets for incoming connections
-                let nntp_server = listener.incoming()
-                    .sleep_on_error(Duration::from_millis(100))
-                    .map(move |socket| {
+                let nntp_server = async move {
+                    let mut incoming = listener.incoming();
+                    while let Some(socket) = incoming.next().await {
+
+                        let socket = match socket {
+                            Ok(s) => s,
+                            Err(_) => continue, // sleep on error 100 ms
+                        };
 
                         // set up codec for reader and writer.
                         let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
                         let codec = NntpCodec::new(socket);
                         let control = codec.control();
-                        let (writer, reader) = codec.split();
+                        let (mut writer, mut reader) = codec.split();
 
                         // build an nntp session.
                         let mut session = NntpSession::new(peer, control.clone(), server.clone());
 
-                        let responses = reader.then(move |result| {
-                            match result {
-                                Err(e) => session.on_read_error(e),
-                                Ok(input) => match input {
-                                    NntpInput::Connect => session.on_connect(),
-                                    NntpInput::WriteError(e) => session.on_write_error(e),
-                                    NntpInput::Eof => session.on_eof(),
-                                    buf @ NntpInput::Line(_)|
-                                    buf @ NntpInput::Block(_)|
-                                    buf @ NntpInput::Article(_) => session.on_input(buf),
+                        let task = async move {
+                            while let Some(result) = reader.next().await {
+                                let response = match result {
+                                    Err(e) => session.on_read_error(e).await,
+                                    Ok(input) => match input {
+                                        NntpInput::Connect => session.on_connect().await,
+                                        NntpInput::WriteError(e) => session.on_write_error(e).await,
+                                        NntpInput::Eof => session.on_eof().await,
+                                        buf @ NntpInput::Line(_)|
+                                        buf @ NntpInput::Block(_)|
+                                        buf @ NntpInput::Article(_) => session.on_input(buf).await,
+                                    }
+                                }.unwrap();
+                                if let Err(e) = writer.send(response.data).await {
+                                    control.write_error(e);
+                                    break;
                                 }
                             }
-                        })
-                        .map(move |r| r.data);
-
-                        let session = writer
-                            .send_all(responses)
-                            .map_err(move |e| control.write_error(e))
-                            .map(|_| ());
+                        };
 
                         /*
                         let session = AssertUnwindSafe(session);
@@ -126,9 +128,9 @@ impl Server {
                             }
                         })).map_err(|_| ())
                         */
-                        handle.spawn(session).map_err(|e| error!("run: error {}", e))
-                    })
-                    .listen(65524);
+                        let _ = handle.spawn(task).map_err(|e| error!("run: error {}", e));
+                    }
+                };
 
                 // And spawn it on the thread-local runtime.
                 let _ = runtime.block_on(nntp_server);

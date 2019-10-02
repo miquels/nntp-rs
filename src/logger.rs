@@ -75,7 +75,7 @@ impl Log for NntpLogger {
 }
 
 struct LoggerInner {
-	file:		Box<Write + Send>,
+	file:		Box<dyn Write + Send>,
 	name:		String,
 }
 
