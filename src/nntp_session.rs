@@ -16,7 +16,7 @@ use crate::newsfeeds::{NewsFeeds,NewsPeer};
 use crate::nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
 use crate::history::{HistEnt,HistError,HistStatus};
 use crate::spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
-use crate::util::{self,MatchList,MatchResult};
+use crate::util::{self,HashFeed,MatchList,MatchResult};
 use crate::server::Server;
 
 #[derive(Debug,PartialEq,Eq)]
@@ -541,7 +541,7 @@ impl NntpSession {
         // see if the article matches the IFILTER label.
         let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
         if let Some(ref ifilter) = self.newsfeeds.infilter {
-            if ifilter.wants(art, &[], &mut grouplist, distribution.as_ref()) {
+            if ifilter.wants(art, &HashFeed::default(), &[], &mut grouplist, distribution.as_ref()) {
                 return Err(ArtError::IncomingFilter);
             }
         }
@@ -553,7 +553,7 @@ impl NntpSession {
         let mut v = Vec::with_capacity(peers.len());
         for idx in 0 .. peers.len() {
             let peer = &peers[idx];
-            if peer.wants(art, &pathelems, &mut grouplist, distribution.as_ref()) {
+            if peer.wants(art, &peer.hashfeed, &pathelems, &mut grouplist, distribution.as_ref()) {
                 v.push(idx as u32);
             }
         }

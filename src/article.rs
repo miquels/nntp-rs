@@ -5,7 +5,6 @@ use std::str;
 
 use crate::arttype::ArtType;
 use crate::errors::*;
-use crate::util::DHash;
 
 use bytes::BytesMut;
 use memchr::memchr;
@@ -468,7 +467,7 @@ pub struct Article {
     pub msgid:      String,
     pub lines:      u32,
     pub len:        usize,
-    pub dhash:      DHash,
+    pub hash:       u128,
 }
 
 /// Clones everything but self.data.
@@ -480,7 +479,7 @@ impl Clone for Article {
             msgid:      self.msgid.clone(),
             lines:      self.lines,
             len:        self.len,
-            dhash:      self.dhash.clone(),
+            hash:       self.hash.clone(),
         }
     }
 }

@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
-use crate::util::DHash;
+use crate::util::HashFeed;
 
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, Sink};
@@ -271,7 +271,7 @@ impl NntpCodec {
             Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
                 let msgid = self.control.get_msgid();
                 let article = Article{
-                    dhash:      DHash::hash_str(&msgid),
+                    hash:       HashFeed::hash_str(&msgid),
                     msgid:      msgid,
                     len:        buf.len(),
                     data:       buf,

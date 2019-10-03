@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use crate::arttype::ArtType;
 use crate::newsfeeds::*;
-use crate::util::WildMatList;
-use crate::util;
+use crate::util::{self, HashFeed, WildMatList};
 use crate::spool::{GroupMap,MetaSpool,SpoolCfg,SpoolDef};
 
 macro_rules! invalid_data {
@@ -358,7 +357,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "mincross" => peer.mincross = parse_num::<u32>(words)?,
         "minpath" => peer.minpath = parse_num::<u32>(words)?,
         "arttypes" => parse_arttype(&mut peer.arttypes, words)?,
-        "hashfeed" => peer.hashfeed = parse_string(words)?,
+        "hashfeed" => peer.hashfeed = parse_hashfeed(words)?,
         "requiregroup" => peer.requiregroups.push(parse_string(words)?),
 
         "distributions" => parse_list(&mut peer.distributions, words, ",")?,
@@ -474,7 +473,7 @@ fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
         "dontstore" => ms.dontstore = parse_bool(words)?,
         "rejectarts" => ms.rejectarts = parse_bool(words)?,
 
-        "hashfeed" => ms.hashfeed = parse_string(words)?,
+        "hashfeed" => ms.hashfeed = parse_hashfeed(words)?,
         "maxsize" => ms.maxsize = parse_size(words)?,
         "maxcross" => ms.maxcross = parse_num::<u32>(words)?,
         "reallocint" => ms.reallocint = parse_duration(words)?,
@@ -504,6 +503,19 @@ fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
 //
 // Below are a bunch of parsing helpers for the set_STRUCT_item functions.
 //
+
+// parse a hashfeed.
+fn parse_hashfeed(words: &[&str]) -> io::Result<HashFeed> {
+    if words.len() != 2 {
+        return Err(invalid_data!("{}: expected 1 argument", words[0]));
+    }
+    match HashFeed::new(words[1]) {
+        Ok(hf) => Ok(hf),
+        Err(e) => {
+            return Err(invalid_data!("{} {}: {}", words[0], words[1], e));
+        }
+    }
+}
 
 // parse a single word.
 fn parse_string(words: &[&str]) -> io::Result<String> {

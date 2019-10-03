@@ -17,7 +17,7 @@ use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::BlockingPool;
 use crate::config;
-use crate::util::{self, MatchResult};
+use crate::util::{self, MatchResult, HashFeed};
 
 // Faux spoolno's returned by get_spool.
 pub const SPOOL_REJECTARTS : u8 = 253;
@@ -141,7 +141,7 @@ pub struct MetaSpool {
     pub groups:         Vec<String>,
     /// Match articles on the hash of their message-id.
     #[serde(default)]
-    pub hashfeed:       String,
+    pub hashfeed:       HashFeed,
     /// Match based on where we received this article from (label from newsfeeds file).
     #[serde(default)]
     pub label:          Vec<String>,

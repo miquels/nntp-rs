@@ -23,7 +23,7 @@ use std::str::FromStr;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::hostcache::HostCache;
-use crate::util::{self,MatchList,MatchResult,WildMatList};
+use crate::util::{self,HashFeed,MatchList,MatchResult,WildMatList};
 
 use ipnet::IpNet;
 
@@ -142,7 +142,7 @@ pub struct NewsPeer {
     pub groups:             WildMatList,
     pub requiregroups:      Vec<String>,
     pub distributions:      Vec<String>,
-    pub hashfeed:           String,
+    pub hashfeed:           HashFeed,
 
     /// used with the outgoing feed.
     pub outhost:            String,
@@ -171,10 +171,15 @@ impl NewsPeer {
     }
 
     /// Check if this peer wants to have this article.
-    pub fn wants(&self, art: &Article, path: &[&str], newsgroups: &mut MatchList, dist: Option<&Vec<&str>>) -> bool {
+    pub fn wants(&self, art: &Article, hashfeed: &HashFeed, path: &[&str], newsgroups: &mut MatchList, dist: Option<&Vec<&str>>) -> bool {
 
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
+            return false;
+        }
+
+        // check hashfeed.
+        if !hashfeed.matches(art.hash) {
             return false;
         }
 

@@ -5,7 +5,7 @@ use std::default::Default;
 
 use md5;
 
-#[derive(Default)]
+#[derive(Clone, Default, Debug, Deserialize)]
 struct HashEntry {
     num:    u32,
     modu:   u32,
@@ -14,6 +14,7 @@ struct HashEntry {
 }
 
 /// A HashFeed is a list of hash matches.
+#[derive(Default, Debug, Clone, Deserialize)]
 pub struct HashFeed {
     has_and:    bool,
     list:       Vec<HashEntry>,
@@ -109,6 +110,9 @@ impl HashFeed {
 
     /// See if a hash matches one of the hashmatches in this hashfeed.
     pub fn matches(&self, hash: u128) -> bool {
+        if self.list.len() == 0 {
+            return true;
+        }
         let mut matches = false;
         for h in &self.list {
             let n = ((hash >> (h.offset * 8)) & 0xffffffff) as u32;
@@ -122,11 +126,11 @@ impl HashFeed {
         }
         matches
     }
-}
 
-/// Hash a string into an u128 (md5)
-pub fn hash_str(s: &str) -> u128 {
-    let digest = md5::compute(s.as_bytes());
-    u128::from_be_bytes(digest.0)
-}
+    /// Hash a string into an u128 (md5)
+    pub fn hash_str(s: &str) -> u128 {
+        let digest = md5::compute(s.as_bytes());
+        u128::from_be_bytes(digest.0)
+    }
 
+}
