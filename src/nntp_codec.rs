@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
+use crate::util::DHash;
 
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, Sink};
@@ -268,8 +269,10 @@ impl NntpCodec {
     fn read_article(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         match self.read_block(true) {
             Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
+                let msgid = self.control.get_msgid();
                 let article = Article{
-                    msgid:      self.control.get_msgid(),
+                    dhash:      DHash::hash_str(&msgid),
+                    msgid:      msgid,
                     len:        buf.len(),
                     data:       buf,
                     arttype:    self.arttype_scanner.art_type(),

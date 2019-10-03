@@ -1,6 +1,6 @@
 
 /// Diablo CRC64 hash.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct DHash {
     pub h1:     u32,

@@ -443,7 +443,7 @@ impl NntpSession {
         };
 
         // OK now we can go ahead and store the parsed article.
-        let label = self.thispeer().label;
+        let label = self.thispeer().label.clone();
         let history = self.server.history.clone();
         let spool = self.server.spool.clone();
         let msgid = art.msgid.clone();
