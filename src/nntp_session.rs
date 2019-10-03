@@ -289,8 +289,6 @@ impl NntpSession {
             },
             Cmd::Ihave => {
                 let ok = "335 Send article; end with CRLF DOT CRLF";
-                let codec_control = self.codec_control.clone();
-                let msgid = args[0].to_string();
                 self.state = NntpState::Ihave;
                 let he = self.server.history.check(args[0]).await?;
                 let r = match he {
@@ -299,8 +297,8 @@ impl NntpSession {
                     _ => "435 Duplicate",
                 };
                 if r == ok {
-                    codec_control.set_msgid(&msgid);
-                    codec_control.set_mode(CodecMode::ReadArticle);
+                    self.codec_control.set_msgid(args[0]);
+                    self.codec_control.set_mode(CodecMode::ReadArticle);
                 }
                 return Ok(NntpResult::text(r));
             },
@@ -352,26 +350,26 @@ impl NntpSession {
 
     /// IHAVE body has been received.
     async fn ihave_body(&self, art: Article) -> io::Result<NntpResult> {
-        let msgid = art.msgid.clone();
-        let status = self.received_article(art, true).await?;
+        let mut art = art;
+        let status = self.received_article(&mut art, true).await?;
         let code = match status {
             ArtAccept::Accept => 235,
             ArtAccept::Defer => 436,
             ArtAccept::Reject => 437,
         };
-        Ok(NntpResult::text(&format!("{} {}", code, msgid)))
+        Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
     }
 
     /// TAKETHIS body has been received.
     async fn takethis_body(&self, art: Article) -> io::Result<NntpResult> {
-        let msgid = art.msgid.clone();
-        let status = self.received_article(art, false).await?;
+        let mut art = art;
+        let status = self.received_article(&mut art, false).await?;
         let code = match status {
             ArtAccept::Accept => 239,
             ArtAccept::Defer|
             ArtAccept::Reject => 439,
         };
-        Ok(NntpResult::text(&format!("{} {}", code, msgid)))
+        Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
     }
 
     async fn reject_art(&self, art: &Article, recv_time: u64, e: ArtError) -> io::Result<ArtAccept> {
@@ -381,7 +379,7 @@ impl NntpSession {
             head_only:  false,
             location:   None,
         };
-        let label = &self.thispeer().label; //.clone();
+        let label = &self.thispeer().label;
         let res = self.server.history.store_begin(&art.msgid).await;
         match res {
             Ok(_) => {
@@ -400,11 +398,10 @@ impl NntpSession {
     }
 
     // Received article: see if we want it, find out if it needs to be sent to other peers.
-    async fn received_article(&self, art: Article, can_defer: bool) -> io::Result<ArtAccept> {
+    async fn received_article(&self, mut art: &mut Article, can_defer: bool) -> io::Result<ArtAccept> {
         let recv_time = util::unixtime();
 
         // parse article.
-        let mut art = art;
         let (headers, body, wantpeers) = match self.process_headers(&mut art) {
             Err(e) => {
                 return match e {
@@ -416,16 +413,16 @@ impl NntpSession {
                     ArtError::MsgIdMismatch|
                     ArtError::NoPath => {
                         if can_defer {
-                            logger::incoming_defer(&self.logger, &self.thispeer().label, &art, e);
+                            logger::incoming_defer(&self.logger, &self.thispeer().label, art, e);
                             Ok(ArtAccept::Defer)
                         } else {
-                            logger::incoming_reject(&self.logger, &self.thispeer().label, &art, e);
+                            logger::incoming_reject(&self.logger, &self.thispeer().label, art, e);
                             Ok(ArtAccept::Reject)
                         }
                     },
 
                     // all other errors. add a reject entry to the history file.
-                    e => return self.reject_art(&art, recv_time, e).await,
+                    e => return self.reject_art(art, recv_time, e).await,
                 };
             },
             Ok(art) => art,
@@ -434,25 +431,25 @@ impl NntpSession {
         // See which spool we want the article to be stored in.
         let spool_no = {
             let newsgroups = headers.newsgroups().unwrap();
-            match self.server.spool.get_spool(&art, &newsgroups) {
-                None => return self.reject_art(&art, recv_time, ArtError::NoSpool).await,
-                Some(SPOOL_DONTSTORE) => return self.reject_art(&art, recv_time, ArtError::DontStore).await,
-                Some(SPOOL_REJECTARTS) => return self.reject_art(&art, recv_time, ArtError::RejSpool).await,
+            match self.server.spool.get_spool(art, &newsgroups) {
+                None => return self.reject_art(art, recv_time, ArtError::NoSpool).await,
+                Some(SPOOL_DONTSTORE) => return self.reject_art(art, recv_time, ArtError::DontStore).await,
+                Some(SPOOL_REJECTARTS) => return self.reject_art(art, recv_time, ArtError::RejSpool).await,
                 Some(sp) => sp,
             }
         };
 
         // OK now we can go ahead and store the parsed article.
-        let label = self.thispeer().label.clone();
-        let history = self.server.history.clone();
-        let spool = self.server.spool.clone();
-        let msgid = art.msgid.clone();
+        let label = &self.thispeer().label;
+        let history = &self.server.history;
+        let spool = &self.server.spool;
+        let msgid = &art.msgid;
 
-        let res = self.server.history.store_begin(&art.msgid).await;
+        let res = history.store_begin(msgid).await;
         match res {
             Err(HistError::Status(_)) => {
                 // message-id seen before, log "duplicate"
-                logger::incoming_reject(&self.logger, &label, &art, ArtError::PostDuplicate);
+                logger::incoming_reject(&self.logger, label, art, ArtError::PostDuplicate);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => {
@@ -460,10 +457,6 @@ impl NntpSession {
                 Err(e)
             },
             Ok(_) => {
-                // success, continue.
-                let msgid2 = msgid.clone();
-                let history2 = history.clone();
-
                 // store the article.
                 let mut buffer = BytesMut::new();
                 headers.header_bytes(&mut buffer);
@@ -474,18 +467,18 @@ impl NntpSession {
                     head_only:  false,
                     location:   Some(artloc),
                 };
-                match history.store_commit(&msgid, he).await {
+                match history.store_commit(msgid, he).await {
                     Err(e) => {
                         // XXX FIXME do not map I/O errors to reject; the
                         // caller of this future must do that. It should
                         // probably return a 400 error and close the connection.
-                        error!("takethis {}: write: {}", &msgid2, e);
-                        history2.store_rollback(&msgid2);
+                        error!("takethis {}: write: {}", msgid, e);
+                        history.store_rollback(msgid);
                         Ok(ArtAccept::Reject)
                     },
                     Ok(_) => {
                         let peers = &self.newsfeeds.peers;
-                        logger::incoming_accept(&self.logger, &label, &art, peers, &wantpeers);
+                        logger::incoming_accept(&self.logger, label, art, peers, &wantpeers);
                         Ok(ArtAccept::Accept)
                     },
                 }
@@ -588,7 +581,6 @@ impl NntpSession {
 
     async fn read_article(&self, part: ArtPart, msgid: &str, buf: BytesMut) -> io::Result<NntpResult> {
 
-        let spool = self.server.spool.clone();
         let result = match self.server.history.lookup(msgid).await {
             Err(_) => return Ok(NntpResult::text("430 Not found")),
             Ok(None) => return Ok(NntpResult::text("430 Not found")),
@@ -603,7 +595,7 @@ impl NntpSession {
                 }
             },
         };
-        match spool.read(loc, part, buf).await {
+        match self.server.spool.read(loc, part, buf).await {
             Ok(mut buf) => {
                 if part == ArtPart::Head {
                     buf.extend_from_slice(b".\r\n");
