@@ -1,9 +1,7 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{future, future::Either};
-use futures::future::FutureExt;
+use futures::future;
 use tokio_executor::threadpool;
 use tokio_sync::semaphore::{Semaphore, Permit};
 
@@ -30,7 +28,7 @@ impl BlockingPool {
         }
     }
 
-    pub fn spawn_fn<F, T>(&self, func: F) -> impl Future<Output=T> + Send + 'static
+    pub async fn spawn_fn<F, T>(&self, func: F) -> T
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -55,22 +53,23 @@ impl BlockingPool {
             }
         };
 
-        let self2 = self.clone();
         let mut permit = Permit::new();
-        future::poll_fn(move |cx| permit.poll_acquire(cx, &self2.inner.sem))
-            .then(move |_| {
-                if use_pool {
-                    return Either::Left(tokio_executor::blocking::run(move || func()))
-                }
-                let mut func = Some(func);
-                Either::Right(future::poll_fn(move |_| threadpool::blocking(|| (func.take().unwrap())()))
-                    .map(|res| {
-                        match res {
-                            Ok(x) => x,
-                            Err(_) => panic!("the thread pool has shut down"),
-                        }
-                    })
-                )
-            })
+        if future::poll_fn(|cx| permit.poll_acquire(cx, &self.inner.sem)).await.is_err() {
+            panic!("BlockingPool::spawn_fn: poll_acquire() returned error (cannot happen)");
+        }
+
+        let res = if use_pool {
+            tokio_executor::blocking::run(move || func()).await
+        } else {
+            let mut func = Some(func);
+            let r = future::poll_fn(move |_| threadpool::blocking(|| (func.take().unwrap())())).await;
+            match r {
+                Ok(x) => x,
+                Err(_) => panic!("the thread pool has shut down"),
+            }
+        };
+
+        permit.release(&self.inner.sem);
+        res
     }
 }
