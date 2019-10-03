@@ -405,7 +405,7 @@ impl NntpSession {
 
         // parse article.
         let mut art = art;
-        let (headers, body) = match self.process_headers(&mut art) {
+        let (headers, body, wantpeers) = match self.process_headers(&mut art) {
             Err(e) => {
                 return match e {
                     // article was mangled on the way. do not store the message-id
@@ -443,7 +443,7 @@ impl NntpSession {
         };
 
         // OK now we can go ahead and store the parsed article.
-        let label = self.thispeer().label.clone();
+        let label = self.thispeer().label;
         let history = self.server.history.clone();
         let spool = self.server.spool.clone();
         let msgid = art.msgid.clone();
@@ -483,7 +483,11 @@ impl NntpSession {
                         history2.store_rollback(&msgid2);
                         Ok(ArtAccept::Reject)
                     },
-                    Ok(_) => Ok(ArtAccept::Accept),
+                    Ok(_) => {
+                        let peers = &self.newsfeeds.peers;
+                        logger::incoming_accept(&self.logger, &label, &art, peers, &wantpeers);
+                        Ok(ArtAccept::Accept)
+                    },
                 }
             },
         }
@@ -491,7 +495,7 @@ impl NntpSession {
 
     // parse the received article headers, then see if we want it.
     // Note: modifies/updates the Path: header.
-    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers,BytesMut)> {
+    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers,BytesMut,Vec<u32>)> {
 
         let mut parser = HeadersParser::new();
         let buffer = mem::replace(&mut art.data, BytesMut::new());
@@ -532,57 +536,54 @@ impl NntpSession {
         let mut mm : Option<String> = None;
         let thispeer = self.thispeer();
 
-        {
-            let newsgroups = headers.newsgroups().ok_or(ArtError::NoNewsgroups)?;
-            let distribution = headers.distribution();
+        let newsgroups = headers.newsgroups().ok_or(ArtError::NoNewsgroups)?;
+        let distribution = headers.distribution();
 
-            // see if any of the groups in the NewsGroups: header
-            // matched a "filter" statement in this peer's config.
-            if thispeer.filter.matchlist(&newsgroups) == MatchResult::Match {
-                return Err(ArtError::GroupFilter);
-            }
-
-            // see if the article matches the IFILTER label.
-            let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
-            if let Some(ref ifilter) = self.newsfeeds.infilter {
-                if ifilter.wants(art, &[], &mut grouplist, distribution.as_ref()) {
-                    return Err(ArtError::IncomingFilter);
-                }
-            }
-
-            let mut pathelems = headers.path().ok_or(ArtError::NoPath)?; // .clone();
-
-            // Now check which of our peers wants a copy.
-            let peers = &self.newsfeeds.peers;
-            let mut v = Vec::with_capacity(peers.len());
-            for idx in 0 .. peers.len() {
-                let peer = &peers[idx];
-                if peer.wants(art, &pathelems, &mut grouplist, distribution.as_ref()) {
-                    v.push(idx as u32);
-                }
-            }
-            logger::incoming_accept(&self.logger, &self.thispeer().label, &art, peers, &v);
-
-            // should match one of the pathaliases.
-            if !thispeer.nomismatch {
-                let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
-                if !is_match {
-                    info!("{} {} Path element fails to match aliases: {} in {}",
-                        thispeer.label, self.remote.ip(), pathelems[0], art.msgid);
-                    mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
-                    pathelems.insert(0, mm.as_ref().unwrap());
-                }
-            }
-
-            // insert our own name.
-            pathelems.insert(0, &self.config.server.hostname);
-            new_path = pathelems.join("!");
+        // see if any of the groups in the NewsGroups: header
+        // matched a "filter" statement in this peer's config.
+        if thispeer.filter.matchlist(&newsgroups) == MatchResult::Match {
+            return Err(ArtError::GroupFilter);
         }
+
+        // see if the article matches the IFILTER label.
+        let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
+        if let Some(ref ifilter) = self.newsfeeds.infilter {
+            if ifilter.wants(art, &[], &mut grouplist, distribution.as_ref()) {
+                return Err(ArtError::IncomingFilter);
+            }
+        }
+
+        let mut pathelems = headers.path().ok_or(ArtError::NoPath)?;
+
+        // Now check which of our peers wants a copy.
+        let peers = &self.newsfeeds.peers;
+        let mut v = Vec::with_capacity(peers.len());
+        for idx in 0 .. peers.len() {
+            let peer = &peers[idx];
+            if peer.wants(art, &pathelems, &mut grouplist, distribution.as_ref()) {
+                v.push(idx as u32);
+            }
+        }
+
+        // should match one of the pathaliases.
+        if !thispeer.nomismatch {
+            let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
+            if !is_match {
+                info!("{} {} Path element fails to match aliases: {} in {}",
+                    thispeer.label, self.remote.ip(), pathelems[0], art.msgid);
+                mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
+                pathelems.insert(0, mm.as_ref().unwrap());
+            }
+        }
+
+        // insert our own name.
+        pathelems.insert(0, &self.config.server.hostname);
+        new_path = pathelems.join("!");
 
         // update.
         headers.update(HeaderName::Path, new_path.as_bytes());
 
-        Ok((headers, body))
+        Ok((headers, body, v))
     }
 
     async fn read_article(&self, part: ArtPart, msgid: &str, buf: BytesMut) -> io::Result<NntpResult> {
