@@ -8,7 +8,6 @@ use std::io;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::future::Future;
 
 use bytes::BytesMut;
 
@@ -331,7 +330,7 @@ impl Spool {
         })
     }
 
-    pub fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> impl Future<Output=Result<BytesMut, io::Error>> + Send {
+    pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> Result<BytesMut, io::Error> {
         let inner = self.inner.clone();
         self.pool.spawn_fn(move || {
             use std::thread;
@@ -347,7 +346,7 @@ impl Spool {
                 Ok(()) => Ok(buf),
                 Err(e) => Err(e),
             }
-        })
+        }).await
     }
 
     /// Find out which spool we want to put this article in.
@@ -421,15 +420,14 @@ impl Spool {
     /// NOTE: we stay as close to wireformat as possible. So
     /// - head_only: body is empty.
     /// - !headonly: body includes hdr/body seperator, ends in .\r\n
-    pub fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> impl Future<Output=Result<ArtLoc, io::Error>> + Send {
-
+    pub async fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> Result<ArtLoc, io::Error> {
         let inner = self.inner.clone();
         self.pool.spawn_fn(move || {
             use std::thread;
             trace!("spool writer on thread {:?}", thread::current().id());
             let spool = &inner.spool.get(&spoolno).unwrap().backend;
             spool.write(&headers[..], &body[..])
-        })
+        }).await
     }
 }
 
