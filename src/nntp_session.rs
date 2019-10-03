@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{future, prelude::*};
 use time;
 
 use crate::article::{Article,Headers,HeaderName,HeadersParser};
@@ -52,14 +51,6 @@ impl NntpResult {
         NntpResult{
             data:       b,
         }
-    }
-
-    fn text_fut2(s: &str) -> impl Future<Output=io::Result<NntpResult>> + Send {
-        Box::new(future::ok(NntpResult::text(s)))
-    }
-
-    fn text_fut(s: &str) -> Box<dyn Future<Output=io::Result<NntpResult>> + Send> {
-        Box::new(future::ok(NntpResult::text(s)))
     }
 
     fn bytes(b: Bytes) -> NntpResult {
