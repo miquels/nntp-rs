@@ -6,10 +6,6 @@
 //!
 
 use std::sync::Arc;
-use std::future::Future;
-
-use futures::future;
-use futures::future::{Either, FutureExt, TryFutureExt};
 
 mod cache;
 pub mod diablo;
@@ -140,7 +136,7 @@ impl History {
 
     /// Find an entry in the history database. This lookup ignores the
     /// write-cache, it goes straight to the backend.
-    pub fn lookup(&self, msgid: &str) -> impl Future<Output=Result<Option<HistEnt>, io::Error>> + Send + 'static {
+    pub async fn lookup(&self, msgid: &str) -> Result<Option<HistEnt>, io::Error> {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
         self.inner.blocking_pool.spawn_fn(move || {
@@ -159,8 +155,9 @@ impl History {
                     Ok(None)
                 },
             }
-        })
+        }).await
     }
+
 
     /// The CHECK command.
     ///
@@ -172,8 +169,8 @@ impl History {
     /// - HistStatus::Tentative - message-id already tentative in cache
     /// - HistEnt with any other status - message-id already present
     ///
-    pub fn check(&self, msgid: &str) -> impl Future<Output=Result<Option<HistStatus>, io::Error>> + Send + 'static {
-        self.do_check(msgid, HistStatus::Tentative)
+    pub async fn check(&self, msgid: &str) -> Result<Option<HistStatus>, io::Error> {
+        self.do_check(msgid, HistStatus::Tentative).await
     }
 
     /// Article received. Call this before writing to history / spool.
@@ -181,24 +178,21 @@ impl History {
     /// Much like the check method, but succeeds when the cache entry
     /// is Tentative, and sets the cache entry to status Writing.
     ///
-    /// Returns future::ok if we succesfully set the cache entry to state Writing,
-    /// future::err(HistError) otherwise.
-    pub fn store_begin(&self, msgid: &str) -> impl Future<Output=Result<(), HistError>> + Send + 'static {
-        self.do_check(msgid, HistStatus::Writing)
-            .then(|res| {
-                match res {
-                    Err(e) => future::err(HistError::IoError(e)),
-                    Ok(h) => match h {
-                        None|
-                        Some(HistStatus::NotFound) => future::ok(()),
-                        Some(s) => future::err(HistError::Status(s)),
-                    }
-                }
-            })
+    /// Returns Ok(()) if we succesfully set the cache entry to state Writing,
+    /// Err(HistError) otherwise.
+    pub async fn store_begin(&self, msgid: &str) -> Result<(), HistError> {
+        match self.do_check(msgid, HistStatus::Writing).await {
+            Err(e) => Err(HistError::IoError(e)),
+            Ok(h) => match h {
+                None|
+                Some(HistStatus::NotFound) => Ok(()),
+                Some(s) => Err(HistError::Status(s)),
+            },
+        }
     }
 
     // Function that does the actual work for check / store_begin.
-    fn do_check(&self, msgid: &str, what: HistStatus) -> impl Future<Output=Result<Option<HistStatus>, io::Error>> + Send + 'static {
+    async fn do_check(&self, msgid: &str, what: HistStatus) -> Result<Option<HistStatus>, io::Error> {
 
         // First check the cache. HistStatus::NotFound means it WAS found in
         // the cache as negative entry, so we do not need to go check
@@ -218,41 +212,37 @@ impl History {
                 hs @ Some(_) => hs,
                 None => break,
             };
-            return Either::Left(future::ok(f));
+            return Ok(f);
         }
 
         // No cache entry. Check the actual history database.
-        let this = self.clone();
-        let msgid2 = msgid.to_string();
-        let f = self.lookup(msgid)
-            .map_ok(move |he| {
-                match he {
-                    Some(he) => Some(he.status),
-                    None => {
-                        // Not present. Try to put a tentative entry in the cache.
-                        let mut partition = this.inner.cache.lock_partition(&msgid2);
-                        match this.cache_lookup(&mut partition, &msgid2) {
-                            None|
-                            Some(HistStatus::NotFound) => {
-                                partition.store_tentative(what);
-                                None
-                            },
-                            Some(HistStatus::Tentative) if what == HistStatus::Writing => {
-                                partition.store_tentative(what);
-                                None
-                            },
-                            Some(HistStatus::Writing) => Some(HistStatus::Tentative),
-                            hs @ Some(_) => hs,
-                        }
+        let res = match self.lookup(msgid).await? {
+            Some(he) => Some(he.status),
+            None => {
+                // Not present. Try to put a tentative entry in the cache.
+                let mut partition = self.inner.cache.lock_partition(msgid);
+                match self.cache_lookup(&mut partition, msgid) {
+                    None|
+                    Some(HistStatus::NotFound) => {
+                        partition.store_tentative(what);
+                        None
                     },
+                    Some(HistStatus::Tentative) if what == HistStatus::Writing => {
+                        partition.store_tentative(what);
+                        None
+                    },
+                    Some(HistStatus::Writing) => Some(HistStatus::Tentative),
+                    hs @ Some(_) => hs,
                 }
-            });
-        Either::Right(f)
+            },
+        };
+        Ok(res)
     }
+
 
     /// Done writing to the spool. Update the cache-entry and write-through
     /// to the actual history database backend.
-    pub fn store_commit(&self, msgid: &str, he: HistEnt) -> impl Future<Output=Result<(), io::Error>> + '_ {
+    pub async fn store_commit(&self, msgid: &str, he: HistEnt) -> Result<(), io::Error> {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
@@ -263,7 +253,7 @@ impl History {
         let msgid = msgid.to_string().into_bytes();
         self.inner.blocking_pool.spawn_fn(move || {
             inner.backend.store(&msgid, &he)
-        })
+        }).await
     }
 
     /// Something went wrong writing to the spool. Cancel the reservation
