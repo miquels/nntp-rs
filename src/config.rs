@@ -28,6 +28,8 @@ pub struct Config {
     pub history:    HistFile,
     pub paths:      Paths,
     pub config:     CfgFiles,
+    #[serde(default)]
+    pub logging:    Logging,
     #[serde(skip)]
     pub timestamp:  u64,
 }
@@ -60,9 +62,10 @@ pub struct CfgFiles {
 }
 
 /// Logging.
-pub struct Log {
-    pub general:        String,
-    pub incoming:       String,
+#[derive(Deserialize, Debug, Default)]
+pub struct Logging {
+    pub general:        Option<String>,
+    pub incoming:       Option<String>,
 }
 
 /// Histfile config table in Toml config file.

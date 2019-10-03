@@ -48,12 +48,26 @@ use std::panic;
 use std::process::exit;
 use std::thread;
 
+use parking_lot::RwLock;
 use net2::unix::UnixTcpBuilderExt;
-use crate::history::History;
-use crate::spool::Spool;
+
+use history::History;
+use spool::Spool;
+use logger::{LogDest, Logger};
+
+lazy_static! {
+    static ref INCOMING_LOG: RwLock<Option<Logger>> = RwLock::new(None);
+}
+
+/// Get a clone of the incoming.log logger.
+pub fn get_incoming_logger() -> Logger {
+    match INCOMING_LOG.read().as_ref() {
+		Some(l) => l.clone(),
+		None => Logger::new(LogDest::Null).unwrap(),
+    }
+}
 
 fn main() -> io::Result<()> {
-    logger::nntp_logger_init();
 
     let matches = clap_app!(nntp_rs =>
         (version: "0.1")
@@ -67,6 +81,28 @@ fn main() -> io::Result<()> {
         exit(1);
     }
     let config = config::get_config();
+
+    // Open the general log.
+    let g_log = config.logging.general.as_ref();
+    let g_log2 = g_log.map(|s| s.as_str()).unwrap_or("stderr");
+    let d = logger::LogDest::from_str(g_log2);
+    if let Err(e) = logger::logger_init(d) {
+        eprintln!("logging.general: {}: {}", g_log2, e);
+        exit(1);
+    }
+
+    // Open the incoming log
+    let i_log = config.logging.incoming.as_ref();
+    let i_log2 = i_log.map(|s| s.as_str()).unwrap_or("null");
+    let d = logger::LogDest::from_str(i_log2);
+    let l = match Logger::new(d) {
+        Err(e) => {
+            eprintln!("logging.incoming: {}: {}", i_log2, e);
+            exit(1);
+        },
+        Ok(d) => d,
+    };
+    *INCOMING_LOG.write() = Some(l);
 
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
@@ -90,7 +126,7 @@ fn main() -> io::Result<()> {
         eprintln!("nntp-rs: {}", e);
         exit(1);
     }).unwrap();
-    println!("Listening on port {}", addr.port());
+    info!("Listening on port {}", addr.port());
 
     // install custom panic logger.
     //handle_panic();

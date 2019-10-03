@@ -11,7 +11,7 @@ use crate::article::{Article,Headers,HeaderName,HeadersParser};
 use crate::commands::{Capb, Cmd, CmdParser};
 use crate::config::{self,Config};
 use crate::errors::*;
-use crate::logger;
+use crate::logger::{self, Logger};
 use crate::newsfeeds::{NewsFeeds,NewsPeer};
 use crate::nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
 use crate::history::{HistEnt,HistError,HistStatus};
@@ -35,6 +35,7 @@ pub struct NntpSession {
     remote:         SocketAddr,
     newsfeeds:      Arc<NewsFeeds>,
     config:         Arc<Config>,
+    logger:         Logger,
     peer_idx:       usize,
     active:         bool,
 }
@@ -78,6 +79,7 @@ impl NntpSession {
     pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server) -> NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
+        let logger = super::get_incoming_logger();
         NntpSession {
             state:          NntpState::Cmd,
             codec_control:  control,
@@ -86,6 +88,7 @@ impl NntpSession {
             remote:         peer,
             newsfeeds:      newsfeeds,
             config:         config,
+            logger:         logger,
             peer_idx:       0,
             active:         false,
         }
@@ -384,12 +387,12 @@ impl NntpSession {
             Ok(_) => {
                 // succeeded adding reject entry.
                 let _ = self.server.history.store_commit(&art.msgid, he).await;
-                logger::incoming_reject(label, &art, e);
+                logger::incoming_reject(&self.logger, label, &art, e);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::Status(_)) => {
                 // message-id seen before, log "duplicate"
-                logger::incoming_reject(label, &art, ArtError::PostDuplicate);
+                logger::incoming_reject(&self.logger, label, &art, ArtError::PostDuplicate);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => Err(e),
@@ -413,10 +416,10 @@ impl NntpSession {
                     ArtError::MsgIdMismatch|
                     ArtError::NoPath => {
                         if can_defer {
-                            logger::incoming_defer(&self.thispeer().label, &art, e);
+                            logger::incoming_defer(&self.logger, &self.thispeer().label, &art, e);
                             Ok(ArtAccept::Defer)
                         } else {
-                            logger::incoming_reject(&self.thispeer().label, &art, e);
+                            logger::incoming_reject(&self.logger, &self.thispeer().label, &art, e);
                             Ok(ArtAccept::Reject)
                         }
                     },
@@ -449,7 +452,7 @@ impl NntpSession {
         match res {
             Err(HistError::Status(_)) => {
                 // message-id seen before, log "duplicate"
-                logger::incoming_reject(&label, &art, ArtError::PostDuplicate);
+                logger::incoming_reject(&self.logger, &label, &art, ArtError::PostDuplicate);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => {
@@ -558,7 +561,7 @@ impl NntpSession {
                     v.push(idx as u32);
                 }
             }
-            logger::incoming_accept(&self.thispeer().label, &art, peers, &v);
+            logger::incoming_accept(&self.logger, &self.thispeer().label, &art, peers, &v);
 
             // should match one of the pathaliases.
             if !thispeer.nomismatch {
@@ -578,7 +581,6 @@ impl NntpSession {
 
         // update.
         headers.update(HeaderName::Path, new_path.as_bytes());
-
 
         Ok((headers, body))
     }
