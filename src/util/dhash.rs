@@ -1,4 +1,3 @@
-
 /// Diablo CRC64 hash.
 #[derive(Clone, Debug, Default, PartialEq)]
 #[repr(C)]
@@ -211,10 +210,10 @@ impl DHash {
 
     /// Get the hash as a 61 bit value. 61 bits, because we leave out the
     /// highest bit of h1, and the lower bits of both h1 and h2.
+    // Remind me why we do this again?
     pub fn as_u64(&self) -> u64 {
         let h1 = ((self.h1 & 0x7ffffff) >> 1) as u64;
         let h2 = (self.h2 >> 1) as u64;
         (h1 << 31) | h2
     }
 }
-
