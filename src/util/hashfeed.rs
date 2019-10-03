@@ -7,7 +7,8 @@ use md5;
 
 #[derive(Clone, Default, Debug, Deserialize)]
 struct HashEntry {
-    num:    u32,
+    start:  u32,
+    end:    u32,
     modu:   u32,
     offset: u32,
     and:    bool,
@@ -24,7 +25,7 @@ impl HashFeed {
     /// Parse a string of hash matches.
     pub fn new(list: &str) -> io::Result<HashFeed> {
         let mut has_and = false;
-        let mut valid = false;
+        let mut valid = true;
         let mut seps: Vec<char> = Vec::new();
         let mut list: Vec<HashEntry> = list.split(|x| {
             if x == ',' || x == '&' || x == '|' {
@@ -39,6 +40,7 @@ impl HashFeed {
             // Split this entry up in a number and a modules.
             let a: Vec<&str> = hm.splitn(2, '/').collect();
             if a.len() != 2 {
+                println!("fuck 1");
                 valid = false;
                 return dh;
             }
@@ -51,21 +53,42 @@ impl HashFeed {
                 if x > 0 {
                     dh.modu = x;
                 } else {
+                    println!("fuck 2");
                     valid = false;
                 }
             } else {
+                    println!("fuck 3");
                 valid = false;
             }
 
-            // Parse the number.
-            if let Ok(x) = a[0].parse::<u32>() {
+            // Parse the number or number range.
+            let c: Vec<&str> = a[0].splitn(2, '-').collect();
+            if let Ok(x) = c[0].parse::<u32>() {
                 if x > 0 && x <= dh.modu {
-                    dh.num = x;
+                    dh.start = x;
+                    dh.end = x;
                 } else {
+                    println!("fuck4");
                     valid = false;
                 }
             } else {
+                    println!("fuck 5: {}", a[0]);
                 valid = false;
+            }
+
+            // parse the second part of the range, if present.
+            if c.len() > 1 {
+                if let Ok(x) = c[1].parse::<u32>() {
+                    if x > 0 && x >= dh.start && x <= dh.modu {
+                        dh.end = x;
+                    } else {
+                        println!("fuck42");
+                        valid = false;
+                    }
+                } else {
+                        println!("fuck 52: {}", c[1]);
+                    valid = false;
+                }
             }
 
             // Parse the offset.
@@ -75,9 +98,11 @@ impl HashFeed {
                     if x <= 12 {
                         dh.offset = x;
                     } else {
+                    println!("fuck 6");
                         valid = false;
                     }
                 } else {
+                    println!("fuck 7");
                     valid = false;
                 }
             } else {
@@ -86,6 +111,7 @@ impl HashFeed {
             }
             dh
         }).collect();
+        seps.push(',');
 
         if !valid {
             return Err(io::Error::new(io::ErrorKind::Other, "cannot parse hashfeed"));
@@ -116,7 +142,8 @@ impl HashFeed {
         let mut matches = false;
         for h in &self.list {
             let n = ((hash >> (h.offset * 8)) & 0xffffffff) as u32;
-            if (n % (h.modu - 1)) == (h.num - 1) {
+            let n = n % (h.modu - 1);
+            if n >= (h.start - 1) && n <= (h.end - 1) {
                 matches = true;
             } else {
                 if h.and {
