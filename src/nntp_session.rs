@@ -116,7 +116,7 @@ impl NntpSession {
 
         let count = self.server.add_connection(&peer.label);
         self.active = true;
-        if count > peer.maxconnect as usize {
+        if count > peer.maxconnect as usize && peer.maxconnect > 0 {
             self.codec_control.quit();
             info!("connrefused reason=maxconnect peer={} conncount={} addr={}",
                   peer.label, count - 1 , remote);
