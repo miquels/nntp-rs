@@ -286,10 +286,7 @@ pub(crate) mod tests {
         logger_init();
     }
 
-    #[test]
-    fn test_simple() {
-        logger_init();
-        debug!("history test");
+    async fn test_simple_async() -> Result<Option<HistEnt>, io::Error> {
         let h = History::open("memdb", "[memdb]", None).unwrap();
         let he = HistEnt{
             status:     HistStatus::Tentative,
@@ -298,30 +295,28 @@ pub(crate) mod tests {
             location:   None,
         };
         let msgid = "<12345@abcde>";
-        h.store_begin(msgid);
-        let fut = h.store_commit(msgid, he.clone())
-            .then(|res| {
-                match res {
-                    Err(e) => panic!("store_commit: {:?}", e),
-                    Ok(()) => {},
-                }
-                res
-            })
-            .then(|res| {
-                if let Err(e) = res {
-                    panic!("store msgid: {:?}", e);
-                }
-                Box::new(h.lookup(msgid))
-            })
-            .then(|res| {
-                match res {
-                    Err(e) => panic!("lookup msgid: {:?}", e),
-                    Ok(Some(ref e)) => assert!(e.time == he.time),
-                    Ok(None) => panic!("lookup msgid: None result"),
-                }
-                debug!("final result: {:?}", res);
-                res
-            });
-        fut.wait().expect("future returned error");
+        let res = h.store_begin(msgid).await;
+        if let Err(e) = res {
+            panic!("store_begin: {:?}", e);
+        }
+        let res = h.store_commit(msgid, he.clone()).await;
+        if let Err(e) = res {
+            panic!("store_commit: {:?}", e);
+        }
+        let res = h.lookup(msgid).await;
+        match res {
+            Err(e) => panic!("lookup msgid: {:?}", e),
+            Ok(Some(ref e)) => assert!(e.time == he.time),
+            Ok(None) => panic!("lookup msgid: None result"),
+        }
+        debug!("final result: {:?}", res);
+        res
+    }
+
+    #[test]
+    fn test_simple() {
+        use futures::executor::block_on;
+        logger_init();
+        block_on(test_simple_async()).expect("future returned error");
 	}
 }
