@@ -9,7 +9,7 @@ use md5;
 struct HashEntry {
     start:  u32,
     end:    u32,
-    modu:   u32,
+    modval: u32,
     offset: u32,
     and:    bool,
 }
@@ -26,7 +26,7 @@ impl HashFeed {
     pub fn new(list: &str) -> io::Result<HashFeed> {
         let mut has_and = false;
         let mut valid = true;
-        let mut seps: Vec<char> = Vec::new();
+        let mut seps = vec![ ',' ];
         let mut list: Vec<HashEntry> = list.split(|x| {
             if x == ',' || x == '&' || x == '|' {
                 seps.push(x);
@@ -37,56 +37,49 @@ impl HashFeed {
         }).map(|hm| {
             let mut dh = HashEntry::default();
 
-            // Split this entry up in a number and a modules.
+            // Split this entry up in a number and a modulo..
             let a: Vec<&str> = hm.splitn(2, '/').collect();
             if a.len() != 2 {
-                println!("fuck 1");
                 valid = false;
                 return dh;
             }
 
-            // After the modules there might be a :offset
+            // After the modulo there might be a :offset
             let b: Vec<&str> = a[1].splitn(2, ':').collect();
 
-            // Parse the modules.
+            // Parse the modulo.
             if let Ok(x) = b[0].parse::<u32>() {
                 if x > 0 {
-                    dh.modu = x;
+                    dh.modval = x;
                 } else {
-                    println!("fuck 2");
                     valid = false;
                 }
             } else {
-                    println!("fuck 3");
                 valid = false;
             }
 
             // Parse the number or number range.
             let c: Vec<&str> = a[0].splitn(2, '-').collect();
             if let Ok(x) = c[0].parse::<u32>() {
-                if x > 0 && x <= dh.modu {
+                if x > 0 && x <= dh.modval {
                     dh.start = x;
                     dh.end = x;
                 } else {
-                    println!("fuck4");
                     valid = false;
                 }
             } else {
-                    println!("fuck 5: {}", a[0]);
                 valid = false;
             }
 
             // parse the second part of the range, if present.
             if c.len() > 1 {
                 if let Ok(x) = c[1].parse::<u32>() {
-                    if x > 0 && x >= dh.start && x <= dh.modu {
+                    if x > 0 && x >= dh.start && x <= dh.modval {
                         dh.end = x;
                     } else {
-                        println!("fuck42");
                         valid = false;
                     }
                 } else {
-                        println!("fuck 52: {}", c[1]);
                     valid = false;
                 }
             }
@@ -98,11 +91,9 @@ impl HashFeed {
                     if x <= 12 {
                         dh.offset = x;
                     } else {
-                    println!("fuck 6");
                         valid = false;
                     }
                 } else {
-                    println!("fuck 7");
                     valid = false;
                 }
             } else {
@@ -111,7 +102,6 @@ impl HashFeed {
             }
             dh
         }).collect();
-        seps.push(',');
 
         if !valid {
             return Err(io::Error::new(io::ErrorKind::Other, "cannot parse hashfeed"));
@@ -142,13 +132,17 @@ impl HashFeed {
         let mut matches = false;
         for h in &self.list {
             let n = ((hash >> (h.offset * 8)) & 0xffffffff) as u32;
-            let n = n % (h.modu - 1);
-            if n >= (h.start - 1) && n <= (h.end - 1) {
-                matches = true;
-            } else {
-                if h.and {
-                    matches = false;
+            let n = n % h.modval + 1;
+            let mut hashmatch = n >= h.start && n <= h.end;
+            if h.and {
+                if hashmatch && matches {
+                    break;
                 }
+                matches = false;
+                hashmatch = false;
+            }
+            if hashmatch {
+                matches = true;
             }
         }
         matches
@@ -159,5 +153,39 @@ impl HashFeed {
         let digest = md5::compute(s.as_bytes());
         u128::from_be_bytes(digest.0)
     }
+}
 
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    #[test]
+    fn test_example_hashfeed() {
+        // Test the examples from diablo/lib/hashfeed.c
+        let mut md5: [u8; 16] = [0; 16];
+        md5[0] = 0x38;
+        md5[1] = 0x55;
+        md5[2] = 0x9c;
+        md5[3] = 0x87;
+        md5[4] = 0x1f;
+        md5[5] = 0xba;
+        md5[6] = 0x28;
+        md5[7] = 0xd9;
+        md5[8] = 0x92;
+        md5[9] = 0xea;
+        md5[10] = 0xd5;
+        md5[11] = 0x15;
+        md5[12] = 0x49;
+        md5[13] = 0x36;
+        md5[14] = 0x7f;
+        md5[15] = 0x83;
+        let m = u128::from_be_bytes(md5);
+        let n = HashFeed::hash_str("<>");
+        assert!(m == n);
+
+        assert!(((n >> 0*8) & 0xffffffff) as u32 == 0x49367f83);
+        assert!(((n >> 1*8) & 0xffffffff) as u32 == 0x1549367f);
+        assert!(((n >> 6*8) & 0xffffffff) as u32 == 0x28d992ea);
+
+	}
 }
