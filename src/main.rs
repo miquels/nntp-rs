@@ -117,7 +117,8 @@ fn main() -> io::Result<()> {
     }).unwrap();
 
     // start listening on a socket.
-    let listen = matches.value_of("LISTEN").unwrap_or("[::]:1119");
+    let cfg_listen = config.server.listen.as_ref().map(|s| s.as_str());
+    let listen = matches.value_of("LISTEN").unwrap_or(cfg_listen.unwrap_or("[::]:119"));
     let addr = listen.parse().map_err(|e| {
         eprintln!("nntp-rs: listen address {}: {}", listen, e);
         exit(1);
