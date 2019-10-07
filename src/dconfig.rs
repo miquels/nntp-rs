@@ -345,8 +345,8 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "maxconnect" => peer.maxconnect = parse_num::<u32>(words)?,
         "readonly" => peer.readonly = parse_bool(words)?,
 
-        "filter" => peer.filter.push(parse_string(words)?),
-        "nofilter" => peer.filter.push(&format!("!{}", parse_string(words)?)),
+        "filter" => peer.filter.push(parse_group(words)?),
+        "nofilter" => peer.filter.push(&format!("!{}", parse_group(words)?)),
         "nomismatch" => peer.nomismatch = parse_bool(words)?,
         "precomreject" => peer.precomreject = parse_bool(words)?,
 
@@ -358,17 +358,17 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "minpath" => peer.minpath = parse_num::<u32>(words)?,
         "arttypes" => parse_arttype(&mut peer.arttypes, words)?,
         "hashfeed" => peer.hashfeed = parse_hashfeed(words)?,
-        "requiregroup" => peer.requiregroups.push(parse_string(words)?),
+        "requiregroup" => peer.requiregroups.push(parse_group(words)?),
 
         "distributions" => parse_list(&mut peer.distributions, words, ",")?,
         "adddist" => peer.distributions.push(parse_string(words)?),
         "deldist" => peer.distributions.push("!".to_string() + &parse_string(words)?),
 
         //"groups" => parse_num_list(&mut peer.groups.patterns, words, ",")?,
-        "addgroup" => peer.groups.push(parse_string(words)?),
-        "delgroup" => peer.groups.push("!".to_string() + &parse_string(words)?),
-        "delgroupany" => peer.groups.push("@".to_string() + &parse_string(words)?),
-        "groupref" => peer.groups.push("=".to_string() + &parse_string(words)?),
+        "addgroup" => peer.groups.push(parse_group(words)?),
+        "delgroup" => peer.groups.push("!".to_string() + &parse_group(words)?),
+        "delgroupany" => peer.groups.push("@".to_string() + &parse_group(words)?),
+        "groupref" => peer.groups.push("=".to_string() + &parse_group(words)?),
 
         "outhost" => peer.outhost = parse_string(words)?,
         "hostname" => peer.outhost = parse_string(words)?,
@@ -522,6 +522,18 @@ fn parse_string(words: &[&str]) -> io::Result<String> {
     if words.len() != 2 {
         return Err(invalid_data!("{}: expected 1 argument", words[0]));
     }
+    Ok(words[1].to_string())
+}
+
+// parse a single word as a newsgroup
+fn parse_group(words: &[&str]) -> io::Result<String> {
+    if words.len() != 2 {
+        return Err(invalid_data!("{}: expected 1 argument", words[0]));
+    }
+    if words[1].starts_with('!') || words[1].starts_with('=') || words[1].starts_with('@') || words[1].contains(',') {
+        return Err(invalid_data!("{}: invalid group name {}", words[0], words[1]));
+    }
+
     Ok(words[1].to_string())
 }
 

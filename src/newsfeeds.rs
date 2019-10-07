@@ -140,7 +140,7 @@ pub struct NewsPeer {
     pub minpath:            u32,
     pub arttypes:           Vec<ArtType>,
     pub groups:             WildMatList,
-    pub requiregroups:      Vec<String>,
+    pub requiregroups:      WildMatList,
     pub distributions:      Vec<String>,
     pub hashfeed:           HashFeed,
 
@@ -229,6 +229,11 @@ impl NewsPeer {
 
         // newsgroup matching.
         if self.groups.matchlistx(newsgroups) != MatchResult::Match {
+            return false;
+        }
+
+        // requiregroups matching.
+        if self.requiregroups.patterns.len() > 0 && self.requiregroups.matchlistx(newsgroups) != MatchResult::Match {
             return false;
         }
 
