@@ -1,29 +1,7 @@
-#[macro_use] extern crate clap;
-/*#[macro_use]*/ extern crate futures;
 #[macro_use] extern crate lazy_static;
 #[macro_use] extern crate log;
+#[macro_use] extern crate clap;
 #[macro_use] extern crate serde_derive;
-/*
-extern crate byteorder;
-extern crate bytes;
-extern crate chrono;
-extern crate dns_lookup;
-extern crate env_logger;
-extern crate futures_cpupool;
-extern crate ipnet;
-extern crate libc;
-extern crate linked_hash_map;
-extern crate memchr;
-extern crate net2;
-extern crate num_cpus;
-extern crate parking_lot;
-extern crate regex;
-extern crate serde;
-extern crate time;
-extern crate tk_listen;
-extern crate tokio;
-extern crate toml;
-*/
 
 pub mod article;
 pub mod arttype;
