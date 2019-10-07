@@ -212,9 +212,9 @@ impl LogDest {
             LogDest::FileData(FileData{ref mut file, when, ..}) => {
                 let ns = ((*when % 1000) * 1_000_000) as u32;
                 let now = Local.timestamp((*when/1000) as i64, ns);
-                let t = format!("{:04}-{:02}-{:02} {:02}:{:02}.{:03}",
+                let t = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
                                 now.year(), now.month(), now.day(),
-                                now.minute(), now.second(),
+                                now.hour(), now.minute(), now.second(),
                                 now.timestamp_subsec_millis());
                 let _ = write!(file, "{} {}\n", t, line);
             },
