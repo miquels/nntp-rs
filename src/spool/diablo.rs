@@ -332,8 +332,8 @@ impl DSpool {
             let mut path = self.path.clone();
             let mut dir = (now / 60) as u32;
             dir -= dir % (self.dir_reallocint / 60);
+            path.push(format!("D.{:08x}", dir));
             if dir != writer.dir {
-                path.push(format!("D.{:08x}", dir));
                 if let Err(e) = fs::create_dir(&path) {
                     if e.kind() != io::ErrorKind::AlreadyExists {
                         return Err(io::Error::new(e.kind(), format!("create {:?}: {}", path, e)));
