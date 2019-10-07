@@ -116,20 +116,19 @@ pub fn read_config(name: &str) -> io::Result<()> {
 /// expand ${path} in string.
 pub fn expand_path(paths: &Paths, path: &str) -> String {
     let re = Regex::new(r"(\$\{[a-z]+\})").unwrap();
-    let mut dt = None;
     re.replace_all(path, |caps: &Captures| {
         match &caps[1] {
-            "${config}" => paths.config.as_str(),
-            "${spool}"  => paths.spool.as_str(),
-            "${log}"    => paths.log.as_str(),
-            "${db}"     => paths.db.as_str(),
-            "${run}"    => paths.run.as_str(),
+            "${config}" => paths.config.clone(),
+            "${spool}"  => paths.spool.clone(),
+            "${log}"    => paths.log.clone(),
+            "${db}"     => paths.db.clone(),
+            "${run}"    => paths.run.clone(),
             "${date}"   => {
                 let now = chrono::offset::Local::now();
-                dt.get_or_insert(format!("{:04}{:02}{:02}", now.year(), now.month(), now.day()))
+                format!("{:04}{:02}{:02}", now.year(), now.month(), now.day())
             },
-            p           => p,
-        }.to_string()
+            p           => p.to_string(),
+        }
     }).to_string()
 }
 
