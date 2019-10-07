@@ -1,8 +1,10 @@
 use std::io::{self,Write};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::thread;
 use std::time::Duration;
 
+use chrono::{Datelike, Timelike, offset::Local, offset::TimeZone};
 use crossbeam_channel as channel;
 use log::{self, LevelFilter, Log, Metadata, Record};
 use parking_lot::Mutex;
@@ -51,13 +53,21 @@ lazy_static! {
 
 }
 
+pub struct FileData {
+    file:       io::BufWriter<fs::File>,
+    name:       String,
+    curname:    String,
+    ino:        u64,
+    when:       u64,
+}
+
 pub enum LogDest {
     Stderr,
     File(String),
     Syslog,
     Null,
     #[doc(hidden)]
-    FileData{ file: fs::File, name: String, curname: String, when: u64 }
+    FileData(FileData),
 }
 
 enum Message {
@@ -82,7 +92,7 @@ impl Logger {
             loop {
                 channel::select! {
                     recv(ticker) -> _ => {
-                        /* XXX check if file needs to be reopened */
+                        let _ = dest.check();
                     },
                     recv(rx) -> msg => {
                         match msg {
@@ -161,7 +171,7 @@ impl LogDest {
                 };
                 self.log_line(r.0, line);
             },
-            LogDest::FileData{..} => {
+            LogDest::FileData(_) => {
                 self.log_line(r.0, format!("[{}] [{}] {}\n", r.0, r.1, r.2));
             },
             LogDest::Stderr => {
@@ -175,6 +185,9 @@ impl LogDest {
     }
 
     fn log_line(&mut self, level: log::Level, line: String) {
+
+        let _ = self.check();
+
         match self {
             LogDest::Syslog => {
                 let formatter = syslog::Formatter3164 {
@@ -196,8 +209,14 @@ impl LogDest {
                     }
                 }
             },
-            LogDest::FileData{ref mut file, ..} => {
-                let _ = write!(file, "{}\n", line);
+            LogDest::FileData(FileData{ref mut file, when, ..}) => {
+                let ns = ((*when % 1000) * 1_000_000) as u32;
+                let now = Local.timestamp((*when/1000) as i64, ns);
+                let t = format!("{:04}-{:02}-{:02} {:02}:{:02}.{:03}",
+                                now.year(), now.month(), now.day(),
+                                now.minute(), now.second(),
+                                now.timestamp_subsec_millis());
+                let _ = write!(file, "{} {}\n", t, line);
             },
             LogDest::Stderr => {
                 let _ = eprintln!("{}", line);
@@ -219,18 +238,65 @@ impl LogDest {
         let d = match dest {
             LogDest::Stderr => LogDest::Stderr,
             LogDest::Syslog => LogDest::Syslog,
-            LogDest::FileData{..} => unreachable!(),
+            LogDest::FileData(_) => unreachable!(),
             LogDest::Null => LogDest::Null,
             LogDest::File(name) => {
                 let config = config::get_config();
                 let curname = config::expand_path(&config.paths, &name);
                 let file = fs::OpenOptions::new().write(true).create(true).append(true).open(&curname)
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
-                let when = util::unixtime();
-                LogDest::FileData{ file, name, curname, when }
+                let ino = file.metadata()?.ino();
+                let file = io::BufWriter::new(file);
+                let when = util::unixtime_ms();
+                LogDest::FileData(FileData{ file, name, curname, ino, when })
             },
         };
         Ok(d)
+    }
+
+    // check if we need to reopen the logfile.
+    fn check(&mut self) -> io::Result<()> {
+        // only if we're the FileData variant.
+        let mut fd = match self {
+            &mut LogDest::FileData(ref mut fd) => fd,
+            _ => return Ok(()),
+        };
+        // max once a second.
+        let now = util::unixtime_ms();
+        let when = fd.when;
+        fd.when = now;
+        if now / 1000 <= when / 1000 {
+            return Ok(());
+        }
+
+        // flush buffer.
+        let _ = fd.file.flush();
+
+        // First check if the filename has a date in it,
+        // and that date changed.
+        let mut do_reopen = false;
+        if fd.name.contains("${date}") {
+            let config = config::get_config();
+            let curname = config::expand_path(&config.paths, &fd.name);
+            if curname != fd.curname {
+                do_reopen = true;
+            }
+        }
+
+        // Might not have changed, but see if file was renamed/moved.
+        if !do_reopen {
+            do_reopen = match fs::metadata(&fd.curname) {
+                Ok(m) => m.ino() != fd.ino,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+                Err(e) => return Err(e),
+            };
+        }
+
+        if do_reopen {
+            let name = fd.name.clone();
+            *self = LogDest::open(LogDest::File(name))?;
+        }
+        Ok(())
     }
 
     pub fn from_str(d: &str) -> LogDest {
