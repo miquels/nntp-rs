@@ -111,8 +111,15 @@ fn main() -> io::Result<()> {
     //handle_panic();
 
     // and start server.
-    let server = server::Server::new(hist, spool);
-    server.run(listener)
+    let mut server = server::Server::new(hist, spool);
+    match config.server.executor.as_ref().map(|s| s.as_str()) {
+        None|Some("threadpool") => server.run_threadpool(listener),
+        Some("current_thread") => server.run_current_thread(listener),
+        Some(e) => {
+            eprintln!("nntp-rs: unknown executor {}", e);
+            exit(1);
+        }
+    }
 }
 
 /// Create a socket, set SO_REUSEPORT on it, bind it to an address,

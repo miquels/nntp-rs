@@ -41,6 +41,8 @@ pub struct Server {
     pub hostname:       String,
     pub listen:         Option<String>,
     pub threads:        Option<usize>,
+    #[serde(default)]
+    pub executor:       Option<String>,
 }
 
 /// Paths.
