@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike, offset::Local, offset::TimeZone};
 use crossbeam_channel as channel;
-use log::{self, LevelFilter, Log, Metadata, Record};
-use parking_lot::Mutex;
+use log::{self, Log, Metadata, Record};
+use parking_lot::{Mutex, RwLock};
 
 use crate::article::Article;
-use crate::config;
+use crate::config::{self, Config};
 use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
 use crate::util;
@@ -46,14 +46,17 @@ lazy_static! {
     static ref LOGGER: Logger = {
         LOGGER_.lock().take().unwrap()
     };
-    static ref INCOMING_: Mutex<Option<Logger>> = Mutex::new(None);
-    static ref INCOMING: Logger = {
-        INCOMING_.lock().take().unwrap()
-    };
-
+    static ref INCOMING_LOG: RwLock<Option<Logger>> = RwLock::new(None);
 }
 
-pub struct FileData {
+/// Target destination of the log. First create a LogTarget, then
+/// use it to construct a new Logger, or pass it to Logger.reconfig().
+pub struct LogTarget {
+    dest:   LogDest,
+}
+
+// Open logfile.
+struct FileData {
     file:       io::BufWriter<fs::File>,
     name:       String,
     curname:    String,
@@ -61,7 +64,8 @@ pub struct FileData {
     when:       u64,
 }
 
-pub enum LogDest {
+// Type of log.
+enum LogDest {
     Stderr,
     File(String),
     Syslog,
@@ -70,6 +74,7 @@ pub enum LogDest {
     FileData(FileData),
 }
 
+// Message sent over the channel to the logging thread.
 enum Message {
     Record((log::Level, String, String)),
     Line(String),
@@ -77,14 +82,20 @@ enum Message {
     Quit,
 }
 
+/// Contains a channel over which messages can be sent to the logger thread.
 #[derive(Clone)]
 pub struct Logger {
     tx:     channel::Sender<Message>,
 }
 
 impl Logger {
-    pub fn new(d: LogDest) -> io::Result<Logger> {
-        let mut dest = LogDest::open(d)?;
+    /// Create a new Logger.
+    pub fn new(target: LogTarget) -> Logger {
+        Logger::new2(target.dest, false)
+    }
+
+    // This one does the actual work.
+    fn new2(mut dest: LogDest, is_log: bool) -> Logger {
         let (tx, rx) = channel::unbounded();
 
         thread::spawn(move || {
@@ -92,13 +103,19 @@ impl Logger {
             loop {
                 channel::select! {
                     recv(ticker) -> _ => {
-                        let _ = dest.check();
+                        // every second, check.
+                        if let Err(e) = dest.check() {
+                            if !is_log {
+                                error!("{}", e);
+                            }
+                        }
                     },
                     recv(rx) -> msg => {
+                        // got a message over the channel.
                         match msg {
-                            Ok(Message::Record(r)) => dest.log_record(r),
-                            Ok(Message::Line(s)) => dest.log_line(log::Level::Info, s),
-                            Ok(Message::Reconfig(d)) => dest.reopen(d),
+                            Ok(Message::Record(r)) => dest.log_record(is_log, r),
+                            Ok(Message::Line(s)) => dest.log_line(is_log, log::Level::Info, s),
+                            Ok(Message::Reconfig(d)) => dest = d,
                             Ok(Message::Quit) |
                             Err(_) => break,
                         }
@@ -107,10 +124,11 @@ impl Logger {
             }
         });
 
-        Ok(Logger{ tx })
+        Logger{ tx }
     }
 
-    pub fn log_record(&self, record: &Record) {
+    /// For use with the 'log' crate.
+    fn log_record(&self, record: &Record) {
 
         // strip the program-name prefix from "target". If it is then
         // empty, replace it with "main". If the "target" prefix is NOT
@@ -138,8 +156,8 @@ impl Logger {
         let _ = self.tx.send(Message::Line(s));
     }
 
-    pub fn reconfig(&self, d: LogDest) {
-        let _ = self.tx.send(Message::Reconfig(d));
+    pub fn reconfig(&self, t: LogTarget) {
+        let _ = self.tx.send(Message::Reconfig(t.dest));
     }
 
     pub fn quit(&self) {
@@ -148,12 +166,14 @@ impl Logger {
 }
 
 impl Log for Logger {
-    fn enabled(&self, _: &Metadata) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= log::max_level()
     }
 
     fn log(&self, record: &Record) {
-        self.log_record(record);
+        if self.enabled(record.metadata()) {
+            self.log_record(record);
+        }
     }
 
     fn flush(&self) {
@@ -161,7 +181,8 @@ impl Log for Logger {
 }
 
 impl LogDest {
-    fn log_record(&mut self, r: (log::Level, String, String)) {
+    // Log a "log" crate record to the destination.
+    fn log_record(&mut self, is_log: bool, r: (log::Level, String, String)) {
         match self {
             LogDest::Syslog => {
                 // Do not add [target] for info level messages.
@@ -169,13 +190,13 @@ impl LogDest {
                     log::Level::Info => r.2,
                     _ => format!("[{}] {}", r.1, r.2),
                 };
-                self.log_line(r.0, line);
+                self.log_line(is_log, r.0, line);
             },
             LogDest::FileData(_) => {
-                self.log_line(r.0, format!("[{}] [{}] {}\n", r.0, r.1, r.2));
+                self.log_line(is_log, r.0, format!("[{}] [{}] {}\n", r.0, r.1, r.2));
             },
             LogDest::Stderr => {
-                self.log_line(r.0, format!("[{}] [{}] {}", r.0, r.1, r.2));
+                self.log_line(is_log, r.0, format!("[{}] [{}] {}", r.0, r.1, r.2));
             },
             LogDest::File(_) => {
                 unreachable!();
@@ -184,9 +205,14 @@ impl LogDest {
         }
     }
 
-    fn log_line(&mut self, level: log::Level, line: String) {
+    // Log a simple line to the destination.
+    fn log_line(&mut self, is_log: bool, level: log::Level, line: String) {
 
-        let _ = self.check();
+        if let Err(e) = self.check() {
+            if !is_log {
+                error!("{}", e);
+            }
+        }
 
         match self {
             LogDest::Syslog => {
@@ -194,7 +220,7 @@ impl LogDest {
                     facility:   syslog::Facility::LOG_NEWS,
                     hostname:   None,
                     process:    "nntp-rs-server".to_string(),
-                    pid:        0,
+                    pid:        unsafe { libc::getpid() },
                 };
                 match syslog::unix(formatter) {
                     Err(_) => {},
@@ -228,20 +254,14 @@ impl LogDest {
         }
     }
 
-    fn reopen(&mut self, dest: LogDest) {
-        if let Ok(d) = LogDest::open(dest) {
-            *self = d;
-        }
-    }
-
-    fn open(dest: LogDest) -> io::Result<LogDest> {
+    // Open a log destination.
+    fn open(dest: LogDest, config: &Config) -> io::Result<LogDest> {
         let d = match dest {
             LogDest::Stderr => LogDest::Stderr,
             LogDest::Syslog => LogDest::Syslog,
             LogDest::FileData(_) => unreachable!(),
             LogDest::Null => LogDest::Null,
             LogDest::File(name) => {
-                let config = config::get_config();
                 let curname = config::expand_path(&config.paths, &name);
                 let file = fs::OpenOptions::new().write(true).create(true).append(true).open(&curname)
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
@@ -272,8 +292,7 @@ impl LogDest {
         // flush buffer.
         let _ = fd.file.flush();
 
-        // First check if the filename has a date in it,
-        // and that date changed.
+        // First check if the filename has a date in it, and that date changed.
         let mut do_reopen = false;
         if fd.name.contains("${date}") {
             let config = config::get_config();
@@ -288,31 +307,64 @@ impl LogDest {
             do_reopen = match fs::metadata(&fd.curname) {
                 Ok(m) => m.ino() != fd.ino,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => true,
-                Err(e) => return Err(e),
+                Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {}", fd.curname, e))),
             };
         }
 
         if do_reopen {
             let name = fd.name.clone();
-            *self = LogDest::open(LogDest::File(name))?;
+            let config = config::get_config();
+            *self = LogDest::open(LogDest::File(name), &config)?;
         }
         Ok(())
     }
+}
 
-    pub fn from_str(d: &str) -> LogDest {
-        match d {
+impl LogTarget {
+    /// Create a new LogTarget with a Config.
+    pub fn new_with(d: &str, cfg: &Config) -> io::Result<LogTarget> {
+        let dest = match d {
             "" | "null" | "/dev/null" => LogDest::Null,
             "stderr" => LogDest::Stderr,
             "syslog" => LogDest::Syslog,
-            x => LogDest::File(x.to_string()),
-        }
+            name => LogDest::open(LogDest::File(name.to_string()), cfg)?,
+        };
+        Ok(LogTarget{ dest })
+    }
+
+    /// Create a new LogTarget.
+    pub fn new(d: &str) -> io::Result<LogTarget> {
+        LogTarget::new_with(d, &config::get_config())
     }
 }
 
-pub fn logger_init(dest: LogDest) -> io::Result<()> {
-    log::set_max_level(LevelFilter::Debug);
-    (*LOGGER_.lock()) = Some(Logger::new(dest)?);
+/// initialize global logger.
+pub fn logger_init(target: LogTarget) {
+    (*LOGGER_.lock()) = Some(Logger::new2(target.dest, true));
     let _ = log::set_logger(&*LOGGER);
-    Ok(())
+}
+
+/// reconfigure global logger.
+pub fn logger_reconfig(target: LogTarget) {
+    let l = &*LOGGER;
+    l.reconfig(target);
+}
+
+/// Get a clone of the incoming.log logger.
+pub fn get_incoming_logger() -> Logger {
+    match INCOMING_LOG.read().as_ref() {
+        Some(l) => l.clone(),
+        None => Logger::new2(LogDest::Null, false),
+    }
+}
+
+/// Set the incoming.log logger.
+pub fn set_incoming_logger(target: LogTarget) {
+    let mut lock = INCOMING_LOG.write();
+    if let Some(l) = lock.as_ref() {
+        l.reconfig(target);
+    } else {
+        *lock = Some(Logger::new(target));
+    }
 }
 

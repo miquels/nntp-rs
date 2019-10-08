@@ -79,7 +79,7 @@ impl NntpSession {
     pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server) -> NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
-        let logger = super::get_incoming_logger();
+        let logger = logger::get_incoming_logger();
         NntpSession {
             state:          NntpState::Cmd,
             codec_control:  control,
@@ -144,15 +144,15 @@ impl NntpSession {
 
     /// Called when we got an error writing to the socket.
     /// Log an error, clean up, and exit.
-    pub async fn on_write_error(&self, _err: io::Error) -> io::Result<NntpResult> {
-        println!("nntp_session.on_write_error");
+    pub async fn on_write_error(&self, err: io::Error) -> io::Result<NntpResult> {
+        println!("nntp_session.on_write_error: {}", err);
         Ok(NntpResult::empty())
     }
 
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
-    pub async fn on_read_error(&self, _err: io::Error) -> io::Result<NntpResult> {
-        println!("nntp_session.on_read_error");
+    pub async fn on_read_error(&self, err: io::Error) -> io::Result<NntpResult> {
+        println!("nntp_session.on_read_error: {}", err);
         Ok(NntpResult::empty())
     }
 

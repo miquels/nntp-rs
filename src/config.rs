@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use regex::{Captures,Regex};
 
 use crate::dconfig::*;
+use crate::logger::{self, LogTarget};
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
 use crate::util;
@@ -95,6 +96,23 @@ pub fn read_config(name: &str) -> io::Result<()> {
             Some(h) => h,
             None => "unconfigured".to_string(),
         }
+    }
+
+
+    // Open the general log.
+    let g_log = cfg.logging.general.as_ref();
+    let g_log = g_log.map(|s| s.as_str()).unwrap_or("stderr");
+    match LogTarget::new_with(g_log, &cfg) {
+        Ok(t) => logger::logger_init(t),
+        Err(e) => return Err(io::Error::new(e.kind(), format!("logging.general: {}: {}", g_log, e))),
+    }
+
+    // Open the incoming log
+    let i_log = cfg.logging.incoming.as_ref();
+    let i_log = i_log.map(|s| s.as_str()).unwrap_or("null");
+    match logger::LogTarget::new_with(i_log, &cfg) {
+        Ok(t) => logger::set_incoming_logger(t),
+        Err(e) => return Err(io::Error::new(e.kind(), format!("logging.general: {}: {}", i_log, e))),
     }
 
     let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
