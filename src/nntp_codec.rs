@@ -117,7 +117,7 @@ impl NntpCodec {
     }
 
     // fill the read buffer as much as possible.
-    fn fill_read_buf(mut self: Pin<&mut Self>, cx: &mut Context,) -> Poll<Result<(), io::Error>> {
+    fn fill_read_buf(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         loop {
             let mut buflen = self.rd.len();
             if self.rd_overflow && buflen > 32768 {
@@ -418,11 +418,28 @@ impl Stream for NntpCodec {
             Poll::Pending => false,
         };
 
-        // other side closed.
+        // Then process the data.
+        if self2.rd.len() > 0 {
+            let res = match rd_mode {
+                CodecMode::ReadLine => self2.read_line(),
+                CodecMode::ReadBlock => self2.read_block(false),
+                CodecMode::ReadArticle => self2.read_article(),
+                _ => unreachable!(),
+            };
+            match res {
+                Poll::Pending => {},
+                res => return res,
+            }
+        }
+
+        // see if the other side closed the socket.
         if sock_closed {
             if self2.rd_state != State::Eof {
+
                 // we were still processing data .. this was unexpected!
                 if self2.rd.len() > 0 {
+                    // We were still reading a line, or a block, and hit EOF
+                    // before the end. That's unexpected.
                     self2.rd_state = State::Eof;
                     let err = Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
                     return Poll::Ready(Some(err));
@@ -433,17 +450,12 @@ impl Stream for NntpCodec {
                 self2.rd_state = State::Eof;
                 return Poll::Ready(Some(Ok(NntpInput::Eof)));
             }
+
             // end stream.
             return Poll::Ready(None);
         }
 
-        // Then process the data.
-        match rd_mode {
-            CodecMode::ReadLine => self2.read_line(),
-            CodecMode::ReadBlock => self2.read_block(false),
-            CodecMode::ReadArticle => self2.read_article(),
-            _ => unreachable!(),
-        }
+        Poll::Pending
     }
 }
 
