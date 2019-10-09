@@ -39,7 +39,7 @@ impl Server {
         }
     }
 
-    /// Run the server.
+    /// Run the server on a bunch of current_thread executors.
     pub fn run_current_thread(self, listener: TcpListener) -> io::Result<()> {
 
         trace!("main server running on thread {:?}", thread::current().id());
@@ -71,7 +71,6 @@ impl Server {
 
                 // tokio runtime for this thread alone.
                 let mut runtime = current_thread::Runtime::new().unwrap();
-                let handle = runtime.handle();
 
                 trace!("current_thread::runtime on {:?}", thread::current().id());
                 let reactor_handle = tokio_net::driver::Handle::default();
@@ -79,75 +78,7 @@ impl Server {
                 let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
                     .expect("cannot convert from net2 listener to tokio listener");
 
-                // Pull out a stream of sockets for incoming connections
-                let nntp_server = async move {
-                    let mut incoming = listener.incoming();
-                    while let Some(socket) = incoming.next().await {
-
-                        let socket = match socket {
-                            Ok(s) => s,
-                            Err(_) => {
-                                tokio::timer::delay_for(Duration::from_millis(50));
-                                continue;
-                            },
-                        };
-
-                        // set up codec for reader and writer.
-                        let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
-                        let fdno = socket.as_raw_fd() as u32;
-                        let codec = NntpCodec::new(socket);
-                        let control = codec.control();
-                        let (mut writer, mut reader) = codec.split();
-
-                        let stats = SessionStats{
-                            hostname:   peer.to_string(),
-                            ipaddr:     peer.to_string(),
-                            label:      "unknown".to_string(),
-                            fdno:       fdno,
-                            ..SessionStats::default()
-                        };
-
-                        // build an nntp session.
-                        let mut session = NntpSession::new(peer, control.clone(), server.clone(), stats);
-
-                        let task = async move {
-                            while let Some(result) = reader.next().await {
-                                let response = match result {
-                                    Err(e) => session.on_read_error(e).await,
-                                    Ok(input) => match input {
-                                        NntpInput::Connect => session.on_connect().await,
-                                        NntpInput::WriteError(e) => session.on_write_error(e).await,
-                                        NntpInput::Eof => session.on_eof().await,
-                                        buf @ NntpInput::Line(_)|
-                                        buf @ NntpInput::Block(_)|
-                                        buf @ NntpInput::Article(_) => session.on_input(buf).await,
-                                    }
-                                }.unwrap();
-                                if let Err(e) = writer.send(response.data).await {
-                                    control.write_error(e);
-                                    break;
-                                }
-                            }
-                        };
-
-                        /*
-                        let session = AssertUnwindSafe(session);
-                        handle.spawn(session.catch_unwind().then(|result| {
-                            match result {
-                                Ok(f) => f,
-                                Err(_) => {
-                                    error!("thread panicked - recovering");
-                                    Ok(())
-                                },
-                            }
-                        })).map_err(|_| ())
-                        */
-                        let _ = handle.spawn(task).map_err(|e| error!("run: error {}", e));
-                    }
-                };
-
-                // And spawn it on the thread-local runtime.
-                let _ = runtime.block_on(nntp_server);
+                runtime.block_on(server.run(listener));
             });
 
             threads.push(tid);
@@ -160,6 +91,7 @@ impl Server {
         Ok(())
     }
 
+    // run the server on the default threadpool executor.
     pub fn run_threadpool(&mut self, listener: TcpListener) -> io::Result<()> {
 
         let reactor_handle = tokio_net::driver::Handle::default();
@@ -167,65 +99,66 @@ impl Server {
         let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
             .expect("cannot convert from net2 listener to tokio listener");
 
-        // Pull out a stream of sockets for incoming connections
-        let nntp_server = async move {
-            let mut incoming = listener.incoming();
-            while let Some(socket) = incoming.next().await {
-
-                let socket = match socket {
-                    Ok(s) => s,
-                    Err(_) => {
-                        tokio::timer::delay_for(Duration::from_millis(50));
-                        continue;
-                    },
-                };
-
-                // set up codec for reader and writer.
-                let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
-                let fdno = socket.as_raw_fd() as u32;
-                let codec = NntpCodec::new(socket);
-                let control = codec.control();
-                let (mut writer, mut reader) = codec.split();
-
-                let stats = SessionStats{
-                    hostname:   peer.to_string(),
-                    ipaddr:     peer.to_string(),
-                    label:      "unknown".to_string(),
-                    fdno:       fdno,
-                    ..SessionStats::default()
-                };
-
-                // build an nntp session.
-                let mut session = NntpSession::new(peer, control.clone(), self.clone(), stats);
-
-                let task = async move {
-                    while let Some(result) = reader.next().await {
-                        let response = match result {
-                            Err(e) => session.on_read_error(e).await,
-                            Ok(input) => match input {
-                                NntpInput::Connect => session.on_connect().await,
-                                NntpInput::WriteError(e) => session.on_write_error(e).await,
-                                NntpInput::Eof => session.on_eof().await,
-                                buf @ NntpInput::Line(_)|
-                                buf @ NntpInput::Block(_)|
-                                buf @ NntpInput::Article(_) => session.on_input(buf).await,
-                            }
-                        }.unwrap();
-                        if let Err(e) = writer.send(response.data).await {
-                            control.write_error(e);
-                            break;
-                        }
-                    }
-                };
-
-                tokio::spawn(task);
-            }
-        };
-
         // And spawn it on the default (threadpool) runtime.
-        runtime.block_on(nntp_server);
+        runtime.block_on(self.run(listener));
 
         Ok(())
+    }
+
+    async fn run(&self, listener: tokio::net::TcpListener)
+    {
+        // Pull out a stream of sockets for incoming connections
+        let mut incoming = listener.incoming();
+        while let Some(socket) = incoming.next().await {
+
+            let socket = match socket {
+                Ok(s) => s,
+                Err(_) => {
+                    tokio::timer::delay_for(Duration::from_millis(50));
+                    continue;
+                },
+            };
+
+            // set up codec for reader and writer.
+            let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
+            let fdno = socket.as_raw_fd() as u32;
+            let codec = NntpCodec::new(socket);
+            let control = codec.control();
+            let (mut writer, mut reader) = codec.split();
+
+            let stats = SessionStats{
+                hostname:   peer.to_string(),
+                ipaddr:     peer.to_string(),
+                label:      "unknown".to_string(),
+                fdno:       fdno,
+                ..SessionStats::default()
+            };
+
+            // build an nntp session.
+            let mut session = NntpSession::new(peer, control.clone(), self.clone(), stats);
+
+            let task = async move {
+                while let Some(result) = reader.next().await {
+                    let response = match result {
+                        Err(e) => session.on_read_error(e).await,
+                        Ok(input) => match input {
+                            NntpInput::Connect => session.on_connect().await,
+                            NntpInput::WriteError(e) => session.on_write_error(e).await,
+                            NntpInput::Eof => session.on_eof().await,
+                            buf @ NntpInput::Line(_)|
+                            buf @ NntpInput::Block(_)|
+                            buf @ NntpInput::Article(_) => session.on_input(buf).await,
+                        }
+                    }.unwrap();
+                    if let Err(e) = writer.send(response.data).await {
+                        control.write_error(e);
+                        break;
+                    }
+                }
+            };
+
+            tokio::spawn(task);
+        }
     }
 
     /// Increment the connection counter for this peer, and return the new value.
