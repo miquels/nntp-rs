@@ -9,6 +9,7 @@ pub mod blocking;
 pub mod commands;
 pub mod config;
 pub mod dconfig;
+pub mod diag;
 pub mod errors;
 pub mod history;
 pub mod hostcache;

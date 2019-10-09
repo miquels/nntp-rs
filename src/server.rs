@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::TcpListener;
-
+use std::os::unix::io::AsRawFd;
 use std::process::exit;
 use std::sync::Arc;
 use std::thread;
@@ -15,6 +15,7 @@ use tokio::runtime::current_thread;
 
 use crate::bind_socket;
 use crate::config;
+use crate::diag::SessionStats;
 use crate::nntp_codec::{NntpCodec,NntpInput};
 use crate::history::History;
 use crate::spool::Spool;
@@ -93,12 +94,21 @@ impl Server {
 
                         // set up codec for reader and writer.
                         let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
+                        let fdno = socket.as_raw_fd() as u32;
                         let codec = NntpCodec::new(socket);
                         let control = codec.control();
                         let (mut writer, mut reader) = codec.split();
 
+                        let stats = SessionStats{
+                            hostname:   peer.to_string(),
+                            ipaddr:     peer.to_string(),
+                            label:      "unknown".to_string(),
+                            fdno:       fdno,
+                            ..SessionStats::default()
+                        };
+
                         // build an nntp session.
-                        let mut session = NntpSession::new(peer, control.clone(), server.clone());
+                        let mut session = NntpSession::new(peer, control.clone(), server.clone(), stats);
 
                         let task = async move {
                             while let Some(result) = reader.next().await {
@@ -172,12 +182,21 @@ impl Server {
 
                 // set up codec for reader and writer.
                 let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
+                let fdno = socket.as_raw_fd() as u32;
                 let codec = NntpCodec::new(socket);
                 let control = codec.control();
                 let (mut writer, mut reader) = codec.split();
 
+                let stats = SessionStats{
+                    hostname:   peer.to_string(),
+                    ipaddr:     peer.to_string(),
+                    label:      "unknown".to_string(),
+                    fdno:       fdno,
+                    ..SessionStats::default()
+                };
+
                 // build an nntp session.
-                let mut session = NntpSession::new(peer, control.clone(), self.clone());
+                let mut session = NntpSession::new(peer, control.clone(), self.clone(), stats);
 
                 let task = async move {
                     while let Some(result) = reader.next().await {

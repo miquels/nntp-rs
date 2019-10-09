@@ -10,6 +10,7 @@ use time;
 use crate::article::{Article,Headers,HeaderName,HeadersParser};
 use crate::commands::{Capb, Cmd, CmdParser};
 use crate::config::{self,Config};
+use crate::diag::SessionStats;
 use crate::errors::*;
 use crate::logger::{self, Logger};
 use crate::newsfeeds::{NewsFeeds,NewsPeer};
@@ -38,6 +39,7 @@ pub struct NntpSession {
     logger:         Logger,
     peer_idx:       usize,
     active:         bool,
+    stats:          SessionStats,
 }
 
 pub struct NntpResult {
@@ -76,7 +78,7 @@ enum ArtAccept {
 }
 
 impl NntpSession {
-    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server) -> NntpSession {
+    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server, stats: SessionStats) -> NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let logger = logger::get_incoming_logger();
@@ -91,6 +93,7 @@ impl NntpSession {
             logger:         logger,
             peer_idx:       0,
             active:         false,
+            stats:          stats,
         }
     }
 
@@ -104,12 +107,12 @@ impl NntpSession {
 
     /// Initial connect. Here we decide if we want to accept this
     /// connection, or refuse it.
-    pub async fn on_connect(&mut self, ) -> io::Result<NntpResult> {
+    pub async fn on_connect(&mut self) -> io::Result<NntpResult> {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
-                info!("connrefused reason=unknownpeer addr={}", remote);
+                info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
                 let msg = format!("502 permission denied to {}", remote); 
                 return Ok(NntpResult::text(&msg));
             },
@@ -121,13 +124,14 @@ impl NntpSession {
         self.active = true;
         if count > peer.maxconnect as usize && peer.maxconnect > 0 {
             self.codec_control.quit();
-            info!("connrefused reason=maxconnect peer={} conncount={} addr={}",
-                  peer.label, count - 1 , remote);
+            info!("Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
+                  peer.label, remote, count, peer.maxconnect);
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
             return Ok(NntpResult::text(&msg))
         }
 
-        info!("connstart peer={} addr={} ", peer.label, remote);
+        self.stats.on_connect(remote.to_string(), peer.label.clone());
+
         let code = if peer.readonly {
             201
         } else {
