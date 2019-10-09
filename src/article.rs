@@ -468,6 +468,7 @@ pub struct Article {
     pub lines:      u32,
     pub len:        usize,
     pub hash:       u128,
+    pub pathhost:   Option<String>,
 }
 
 /// Clones everything but self.data.
@@ -480,6 +481,7 @@ impl Clone for Article {
             lines:      self.lines,
             len:        self.len,
             hash:       self.hash.clone(),
+            pathhost:   self.pathhost.clone(),
         }
     }
 }

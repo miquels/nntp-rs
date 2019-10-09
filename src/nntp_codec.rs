@@ -277,6 +277,7 @@ impl NntpCodec {
                     data:       buf,
                     arttype:    self.arttype_scanner.art_type(),
                     lines:      self.arttype_scanner.lines(),
+                    pathhost:   None,
                 };
                 self.arttype_scanner.reset();
                 Poll::Ready(Some(Ok(NntpInput::Article(article))))

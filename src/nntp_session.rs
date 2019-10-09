@@ -516,6 +516,9 @@ impl NntpSession {
         }
         let (mut headers, body) = parser.into_headers(buffer);
 
+        let mut pathelems = headers.path().ok_or(ArtError::NoPath)?;
+        art.pathhost = Some(pathelems[0].to_string());
+
         // some more header checks.
         {
             let msgid_ok = match headers.message_id() {
@@ -559,8 +562,6 @@ impl NntpSession {
                 return Err(ArtError::IncomingFilter);
             }
         }
-
-        let mut pathelems = headers.path().ok_or(ArtError::NoPath)?;
 
         // Now check which of our peers wants a copy.
         let peers = &self.newsfeeds.peers;

@@ -16,12 +16,14 @@ use crate::newsfeeds::NewsPeer;
 use crate::util;
 
 pub fn incoming_reject(logger: &Logger, label: &str, art: &Article, error: ArtError) {
-    let l = format!("{} - {} {} {} {:?}", label, art.msgid, art.len, art.arttype, error);
+    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+    let l = format!("{} - {} {} {} {:?}", pathhost, art.msgid, art.len, art.arttype, error);
     logger.log_line(l);
 }
 
 pub fn incoming_defer(logger: &Logger, label: &str, art: &Article, error: ArtError) {
-    let l = format!("{} d {} {} {} {:?}", label, art.msgid, art.len, art.arttype, error);
+    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+    let l = format!("{} d {} {} {} {:?}", pathhost, art.msgid, art.len, art.arttype, error);
     logger.log_line(l);
 }
 
@@ -37,7 +39,8 @@ pub fn incoming_accept(logger: &Logger, label: &str, art: &Article, peers: &[New
         }
     }
     // and log.
-    let l = format!("{} + {} {} {} {}", label, art.msgid, art.len, art.arttype, s);
+    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+    let l = format!("{} + {} {} {} {}", pathhost, art.msgid, art.len, art.arttype, s);
     logger.log_line(l);
 }
 
