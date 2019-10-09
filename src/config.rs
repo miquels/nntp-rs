@@ -6,9 +6,10 @@ use std::io;
 use chrono::{self,Datelike};
 use parking_lot::RwLock;
 use regex::{Captures,Regex};
+use users::switch::{set_effective_gid, set_effective_uid};
+use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
 use crate::dconfig::*;
-use crate::logger::{self, LogTarget};
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
 use crate::util;
@@ -33,6 +34,8 @@ pub struct Config {
     pub logging:    Logging,
     #[serde(skip)]
     pub timestamp:  u64,
+    #[serde(skip)]
+    newsfeeds:      Option<NewsFeeds>,
 }
 
 /// Server config table in Toml config file.
@@ -44,6 +47,16 @@ pub struct Server {
     pub threads:        Option<usize>,
     #[serde(default)]
     pub executor:       Option<String>,
+    #[serde(default)]
+    pub user:           Option<String>,
+    #[serde(default)]
+    pub group:          Option<String>,
+    #[serde(skip)]
+    pub uid:            Option<users::uid_t>,
+    #[serde(skip)]
+    pub gid:            Option<users::gid_t>,
+    #[serde(default)]
+    pub log_panics:     bool,
 }
 
 /// Paths.
@@ -80,7 +93,7 @@ pub struct HistFile {
 }
 
 /// Read the configuration.
-pub fn read_config(name: &str) -> io::Result<()> {
+pub fn read_config(name: &str) -> io::Result<Config> {
     let mut f = File::open(name)?;
     let mut buffer = String::new();
     f.read_to_string(&mut buffer)?;
@@ -98,22 +111,8 @@ pub fn read_config(name: &str) -> io::Result<()> {
         }
     }
 
-
-    // Open the general log.
-    let g_log = cfg.logging.general.as_ref();
-    let g_log = g_log.map(|s| s.as_str()).unwrap_or("stderr");
-    match LogTarget::new_with(g_log, &cfg) {
-        Ok(t) => logger::logger_init(t),
-        Err(e) => return Err(io::Error::new(e.kind(), format!("logging.general: {}: {}", g_log, e))),
-    }
-
-    // Open the incoming log
-    let i_log = cfg.logging.incoming.as_ref();
-    let i_log = i_log.map(|s| s.as_str()).unwrap_or("null");
-    match logger::LogTarget::new_with(i_log, &cfg) {
-        Ok(t) => logger::set_incoming_logger(t),
-        Err(e) => return Err(io::Error::new(e.kind(), format!("logging.general: {}: {}", i_log, e))),
-    }
+    // If user or group was set
+    resolve_user_group(&mut cfg)?;
 
     let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
     if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
@@ -122,17 +121,81 @@ pub fn read_config(name: &str) -> io::Result<()> {
     if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.config.dspool_ctl) {
         read_dspool_ctl(dspoolctl, &cfg.paths.spool.clone(), &mut cfg.spool)?;
     }
-    feeds.init_hostcache();
+    cfg.newsfeeds = Some(feeds);
 
-    // replace the NEWSFEEDS config.
-    *NEWSFEEDS.write() = Some(Arc::new(feeds));
+    return Ok(cfg);
+}
+
+pub fn set_config(mut cfg: Config) -> Arc<Config> {
+
+    if let Some(mut feeds) = cfg.newsfeeds.take() {
+        // replace the NEWSFEEDS config.
+        feeds.init_hostcache();
+        *NEWSFEEDS.write() = Some(Arc::new(feeds));
+    }
 
     // replace the CONFIG config.
     *CONFIG.write() = Some(Arc::new(cfg));
 
+    get_config()
+}
+
+// lookup user and group.
+fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
+    let user = cfg.server.user.as_ref();
+    let group = cfg.server.group.as_ref();
+
+    // lookup username and group.
+    let (uid, ugid) = match user {
+        Some(u) => {
+            let user = get_user_by_name(u).ok_or(
+                io::Error::new(io::ErrorKind::NotFound, format!("user {}: not found", u))
+            )?;
+            (Some(user.uid()), Some(user.primary_group_id()))
+        },
+        None => (None, None),
+    };
+    // lookup group if specified separately.
+    let gid = match group {
+        Some(g) => {
+            let group = get_group_by_name(g).ok_or(
+                io::Error::new(io::ErrorKind::NotFound, format!("group {}: not found", g))
+            )?;
+            Some(group.gid())
+        },
+        None => ugid,
+    };
+    cfg.server.uid = uid;
+    cfg.server.gid = gid;
     Ok(())
 }
 
+// do setuid/setgid.
+pub fn switch_uids(cfg: &Config) -> io::Result<()> {
+    let uid = cfg.server.uid;
+    let gid = cfg.server.gid;
+
+    // if user and group not set, return.
+    if uid.is_none() && gid.is_none() {
+        return Ok(());
+    }
+    let euid = get_effective_uid();
+    let egid = get_effective_gid();
+    // if user and group are unchanged, return.
+    if Some(euid) == uid && Some(egid) == gid {
+        return Ok(());
+    }
+    // switch to root.
+    if let Err(e) = set_effective_uid(0) {
+        return Err(io::Error::new(e.kind(), "change user/group: insufficient priviliges"));
+    }
+    // this will panic on fail, but that's what we want.
+    set_effective_gid(gid.unwrap_or(egid)).unwrap();
+    set_effective_uid(uid.unwrap_or(euid)).unwrap();
+    Ok(())
+}
+
+///
 /// expand ${path} in string.
 pub fn expand_path(paths: &Paths, path: &str) -> String {
     let re = Regex::new(r"(\$\{[a-z]+\})").unwrap();

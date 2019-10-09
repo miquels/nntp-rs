@@ -493,9 +493,11 @@ fn is_cont(line: &[u8]) -> bool {
 }
 
 // helper
+/*
 fn header_name(wk: &HeaderName) -> &str {
     str::from_utf8(HEADER_NAMES[wk]).unwrap()
 }
+*/
 
 // cheap ASCII lowercasing.
 pub fn lowercase<'a>(b: &'a [u8], buf: &'a mut [u8]) -> &'a [u8] {

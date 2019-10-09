@@ -27,6 +27,7 @@ use std::panic;
 use std::process::exit;
 use std::thread;
 
+use logger::LogTarget;
 use net2::unix::UnixTcpBuilderExt;
 
 use history::History;
@@ -50,12 +51,58 @@ fn main() -> io::Result<()> {
         log::set_max_level(log::LevelFilter::Info);
     }
 
+    // first read the config file.
     let cfg_file = matches.value_of("CONFIG").unwrap_or("config.toml");
-    if let Err(e) = config::read_config(cfg_file) {
-        eprintln!("{}", e);
+    let config = match config::read_config(cfg_file) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{}", e);
+            exit(1);
+        },
+    };
+
+    // start listening on a socket.
+    let cfg_listen = config.server.listen.as_ref().map(|s| s.as_str());
+    let listen = matches.value_of("LISTEN").unwrap_or(cfg_listen.unwrap_or("[::]:119"));
+    let addr = listen.parse().map_err(|e| {
+        eprintln!("nntp-rs: listen address {}: {}", listen, e);
+        exit(1);
+    }).unwrap();
+    let listener = bind_socket(&addr).map_err(|e| {
+        eprintln!("nntp-rs: {}", e);
+        exit(1);
+    }).unwrap();
+
+    // switch uids after binding the socket.
+    if let Err(e) = config::switch_uids(&config) {
+        eprintln!("nntp-rs: {}", e);
         exit(1);
     }
-    let config = config::get_config();
+
+    // Open the general log.
+    let g_log = config.logging.general.as_ref();
+    let g_log = g_log.map(|s| s.as_str()).unwrap_or("stderr");
+    match LogTarget::new_with(g_log, &config) {
+        Ok(t) => logger::logger_init(t),
+        Err(e) => {
+            eprintln!("nntp-rs: logging.general: {}: {}", g_log, e);
+            exit(1);
+        },
+    }
+
+    // save the config permanently.
+    let config = config::set_config(config);
+
+    // Open the incoming log
+    let i_log = config.logging.incoming.as_ref();
+    let i_log = i_log.map(|s| s.as_str()).unwrap_or("null");
+    match logger::LogTarget::new_with(i_log, &config) {
+        Ok(t) => logger::set_incoming_logger(t),
+        Err(e) => {
+            eprintln!("nntp-rs: logging.incoming: {}: {}", i_log, e);
+            exit(1);
+        },
+    }
 
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
@@ -69,21 +116,12 @@ fn main() -> io::Result<()> {
          exit(1);
     }).unwrap();
 
-    // start listening on a socket.
-    let cfg_listen = config.server.listen.as_ref().map(|s| s.as_str());
-    let listen = matches.value_of("LISTEN").unwrap_or(cfg_listen.unwrap_or("[::]:119"));
-    let addr = listen.parse().map_err(|e| {
-        eprintln!("nntp-rs: listen address {}: {}", listen, e);
-        exit(1);
-    }).unwrap();
-    let listener = bind_socket(&addr).map_err(|e| {
-        eprintln!("nntp-rs: {}", e);
-        exit(1);
-    }).unwrap();
     info!("Listening on port {}", addr.port());
 
     // install custom panic logger.
-    //handle_panic();
+    if config.server.log_panics {
+        handle_panic();
+    }
 
     // and start server.
     let mut server = server::Server::new(hist, spool);
