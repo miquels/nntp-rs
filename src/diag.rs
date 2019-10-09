@@ -3,6 +3,9 @@
 use std::default::Default;
 use std::time::Instant;
 
+use crate::article::Article;
+use crate::errors::ArtError;
+
 #[repr(usize)]
 pub enum Stats {
     Offered,            // offered (ihave/check)
@@ -149,7 +152,7 @@ impl SessionStats {
     }
 
     pub fn log_rejstats(&self) {
-        info!("{} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={}",
+        info!("{} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
             self.hostname,
             self.stats[Stats::Rejected as usize],
             self.stats[Stats::RejFailsafe as usize],
@@ -175,8 +178,53 @@ impl SessionStats {
             self.stats[Stats::RejNoHdrEnd as usize],
             self.stats[Stats::RejBigHeader as usize],
             self.stats[Stats::RejBareCR as usize],
-            self.stats[Stats::RejErr as usize]
+            self.stats[Stats::RejErr as usize],
+            self.stats[Stats::RejTooBig as usize],
         );
+    }
+
+    pub fn art_error(&mut self, art: &Article, e: &ArtError) {
+        let rej = match e {
+            &ArtError::PostDuplicate      => Stats::RejPosDup,
+            &ArtError::ArtIncomplete      => Stats::RejArtIncompl,
+            &ArtError::TooSmall           => Stats::RejTooSmall,
+            &ArtError::TooBig             => Stats::RejTooBig,
+            &ArtError::NotInActive        => Stats::RejNotInActv,
+            &ArtError::TooOld             => Stats::RejTooOld,
+            &ArtError::HdrOnlyNoBytes     => Stats::RejNoBytes,
+            &ArtError::GroupFilter        => Stats::RejGrpFilter,
+            &ArtError::IncomingFilter     => Stats::RejIncFilter,
+            &ArtError::InternalSpamFilter => Stats::RejIntSpamFilter,
+            &ArtError::ExternalSpamFilter => Stats::RejExtSpamFilter,
+            &ArtError::RejSpool           => Stats::RejNoSpool,
+            &ArtError::NoSpool            => Stats::RejNoSpool,
+            &ArtError::FileWriteError     => Stats::RejIOError,
+            &ArtError::IOError            => Stats::RejIOError,
+            &ArtError::NoHdrEnd           => Stats::RejNoHdrEnd,
+            &ArtError::HeaderTooBig       => Stats::RejBigHeader,
+            &ArtError::BadHdrName         => Stats::RejHdrError,
+            &ArtError::DupHdr             => Stats::RejHdrError,
+            &ArtError::EmptyHdr           => Stats::RejHdrError,
+            &ArtError::BadUtf8Hdr         => Stats::RejHdrError,
+            &ArtError::MsgIdMismatch      => Stats::RejMsgIdMis,
+            &ArtError::MissingHeader      => Stats::RejMissHdrs,
+            &ArtError::NoNewsgroups       => Stats::RejMissHdrs,
+            &ArtError::NoPath             => Stats::RejMissHdrs,
+            &ArtError::PathTab            => Stats::RejPathTab,
+            &ArtError::NewsgroupsTab      => Stats::RejNgTab,
+            &ArtError::ArticleNul         => Stats::RejArtNul,
+            &ArtError::BareCR             => Stats::RejBareCR,
+        };
+        self.inc(rej);
+        self.inc(Stats::Received);
+        self.add(Stats::RejectedBytes, art.len as u64);
+    }
+
+    pub fn art_accepted(&mut self, art: &Article) {
+        self.inc(Stats::Received);
+        self.inc(Stats::Accepted);
+        self.add(Stats::AcceptedBytes, art.len as u64);
+        self.add(Stats::ReceivedBytes, art.len as u64);
     }
 }
 

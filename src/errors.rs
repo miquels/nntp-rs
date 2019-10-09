@@ -4,16 +4,12 @@
 pub enum ArtError {
     /// after receiving article we already had it anyway.
     PostDuplicate,
-    /// racing another article.
-    Deferred,
     /// article is incomplete
     ArtIncomplete,
     /// if headers + body < 80 chars
     TooSmall,
     /// too big
     TooBig,
-    /// no matching group found in active file.
-    NotInActive,
     /// message is too old (checks Date: header)
     TooOld,
     /// header-only feed article is missing Bytes: header.
@@ -38,9 +34,6 @@ pub enum ArtError {
     NoHdrEnd,
     /// header too big to be sane.
     HeaderTooBig,
-    /// matched a "dontstore" in the spool. this is not an error
-    /// really, but we log it in the incoming.log file.
-    DontStore,
     /// No colon in header or invalid header name.
     BadHdrName,
     /// Duplicate header
@@ -57,6 +50,16 @@ pub enum ArtError {
     NoNewsgroups,
     /// Path: header present but empty or invalid.
     NoPath,
+    /// Not in active file XXX TODO
+    NotInActive,
+    /// Tab found in Path: XXX TODO
+    PathTab,
+    /// Tab found in Newsgroups: XXX TODO
+    NewsgroupsTab,
+    /// NUL found in article XXX TODO
+    ArticleNul,
+    /// Bare CR found in article XXX TODO
+    BareCR,
 }
 
 pub type ArtResult<T> = Result<T, ArtError>;

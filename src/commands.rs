@@ -328,7 +328,13 @@ impl CmdParser {
 
 /// Is this a valid message-id?
 pub fn is_msgid(m: &str) -> bool {
-    m.starts_with("<")
+    if !m.starts_with("<") {
+        return false;
+    }
+    match m.find('>') {
+        Some(x) if x > 1 && x == m.len() - 1 => true,
+        _ => false,
+    }
 }
 
 /// Parse article number.
