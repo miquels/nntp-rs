@@ -91,8 +91,13 @@ impl SessionStats {
         self.add(field, 1);
     }
 
-    pub fn on_connect(&mut self, hostname: String, label: String) {
-        self.hostname = hostname;
+    pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
+        // XXX FIXME, run via a BlockingPool, or use the "trustdns" resolver crate.
+        let host = tokio_executor::blocking::run(move || {
+            let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
+            dns_lookup::lookup_addr(&ipaddr).unwrap_or(ipaddr_str)
+        }).await;
+        self.hostname = host;
         self.label = label;
         info!("Connection {} from {} {} [{}]", self.fdno, self.hostname, self.ipaddr, self.label);
     }

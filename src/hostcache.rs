@@ -204,6 +204,8 @@ impl HostCache {
                 (entry.hostname.clone(), entry.addrs.clone(), entry.lastupdate)
             };
 
+            debug!("Refreshing host cache for {}", host);
+
             // We are not locked here anymore. Lookup "hostname".
             let (mut addrs, mut lastupdate) = match dns_lookup::getaddrinfo(Some(&host), None, Some(hints)) {
                 Ok(a) => {

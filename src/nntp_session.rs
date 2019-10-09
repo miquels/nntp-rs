@@ -130,7 +130,7 @@ impl NntpSession {
             return Ok(NntpResult::text(&msg))
         }
 
-        self.stats.on_connect(remote.to_string(), peer.label.clone());
+        self.stats.on_connect(remote.to_string(), peer.label.clone()).await;
 
         let code = if peer.readonly {
             201
@@ -149,20 +149,29 @@ impl NntpSession {
     /// Called when we got an error writing to the socket.
     /// Log an error, clean up, and exit.
     pub async fn on_write_error(&self, err: io::Error) -> io::Result<NntpResult> {
-        println!("nntp_session.on_write_error: {}", err);
+        let stats = &self.stats;
+        info!("Write error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        stats.on_disconnect();
         Ok(NntpResult::empty())
     }
 
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
     pub async fn on_read_error(&self, err: io::Error) -> io::Result<NntpResult> {
-        println!("nntp_session.on_read_error: {}", err);
+        let stats = &self.stats;
+        info!("Read error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        stats.on_disconnect();
         Ok(NntpResult::empty())
     }
 
-    /// Call on end-of-file.
+    /// Called when QUIT is received
+    pub fn on_quit(&self) {
+        self.stats.on_disconnect();
+    }
+
+    /// Called on end-of-file.
     pub async fn on_eof(&self) -> io::Result<NntpResult> {
-        println!("nntp_session.on_eof");
+        self.stats.on_disconnect();
         Ok(NntpResult::empty())
     }
 
@@ -333,6 +342,7 @@ impl NntpSession {
             },
             Cmd::Quit => {
                 self.codec_control.quit();
+                self.on_quit();
                 return Ok(NntpResult::text("205 Bye"));
             },
             Cmd::Takethis => {
