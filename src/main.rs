@@ -33,6 +33,10 @@ use net2::unix::UnixTcpBuilderExt;
 use history::History;
 use spool::Spool;
 
+// use jemalloc instead of system malloc.
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 fn main() -> io::Result<()> {
 
     let matches = clap_app!(nntp_rs =>
