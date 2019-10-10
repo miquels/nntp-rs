@@ -1,20 +1,22 @@
 [server]
 listen = "[::]:1119"
-threads = 1
+user = "news"
+group = "news"
+runtime = "multisingle"
 
 [paths]
-config = "."
-spool = "/news/spool/news"
+config = "/etc/news"
+spool = "/var/spool/news"
 log = "/var/log/news"
-db = "/home/mikevs/tmp"
-run = "/var/run/news"
+db = "/var/lib/news"
+run = "/run/news"
 
 [config]
 dnewsfeeds = "${config}/dnewsfeeds"
 dspool_ctl = "${config}/dspool.ctl"
 
 [log]
-general = "STDOUT"
+general = "syslog"
 incoming = "${log}/incoming.log.${date}"
 
 [active]
@@ -24,7 +26,13 @@ backend = "diablo"
 [history]
 file = "${db}/dhistory"
 backend = "diablo"
-threads = 1
+mlock = "all"
+threads = 32
+
+[multisingle]
+#threads = 16
+threads_per_core = 2
+# cores="0,2,4-7"
 
 # [spool.0]
 # backend = "diablo"

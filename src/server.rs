@@ -40,32 +40,49 @@ impl Server {
     }
 
     /// Run the server on a bunch of current_thread executors.
-    pub fn run_current_thread(self, listener: TcpListener) -> io::Result<()> {
+    pub fn run_multisingle(self, listener: TcpListener) -> io::Result<()> {
 
         trace!("main server running on thread {:?}", thread::current().id());
         let config = config::get_config();
 
         // Now start a bunch of threads to serve the requests.
-        let num_threads = config.server.threads.unwrap_or(num_cpus::get());
         let mut threads = Vec::new();
+        let (num_threads, mut core_ids) = match config.multisingle.core_ids {
+            Some(ref c) => (c.len(), c.to_vec()),
+            None => (num_cpus::get(), Vec::new()),
+        };
 
+        // create one listener per thread, in a seperate setuid-root scope.
         let addr = listener.local_addr().unwrap();
-        let mut first = Some(listener);
-
-        for _ in 0..num_threads {
-
-            // The first listener is passed in, after that we need to
-            // create extra listeners here.
-            let listener = if first.is_some() {
-                first.take().unwrap()
-            } else {
-                bind_socket(&addr).map_err(|e| {
-                    eprintln!("nntp-rs: server: fatal: {}", e);
-                    exit(1);
-                }).unwrap()
+        let mut listeners = Vec::new();
+        {
+            // try to switch to root. if we fail, that's ok. either the socket
+            // will bind, or not, and if not, we error on that.
+            let egid = users::get_effective_gid();
+            let _guard = match users::switch::switch_user_group(0, egid) {
+                Ok(g) => Some(g),
+                Err(_) => None,
             };
 
+            listeners.push(listener);
+            for _ in 1..num_threads {
+                 let l = bind_socket(&addr).map_err(|e| {
+                        eprintln!("nntp-rs: server: fatal: {}", e);
+                        exit(1);
+                    }).unwrap();
+                listeners.push(l);
+            }
+        }
+
+
+        for listener in listeners.into_iter() {
+
             let server = self.clone();
+            let core_id = if core_ids.len() > 0 {
+                Some(core_ids.remove(0))
+            } else {
+                None
+            };
 
             let tid = thread::spawn(move || {
 
@@ -77,6 +94,10 @@ impl Server {
 
                 let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
                     .expect("cannot convert from net2 listener to tokio listener");
+
+                if let Some(id) = core_id {
+                    core_affinity::set_for_current(id);
+                }
 
                 runtime.block_on(server.run(listener));
             });

@@ -1,9 +1,14 @@
+///
+/// Configuration file reader and checker.
+///
 use std::sync::Arc;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io;
+use std::ops::Range;
 
 use chrono::{self,Datelike};
+use core_affinity::{CoreId, get_core_ids};
 use parking_lot::RwLock;
 use regex::{Captures,Regex};
 use users::switch::{set_effective_gid, set_effective_uid};
@@ -32,6 +37,8 @@ pub struct Config {
     pub config:     CfgFiles,
     #[serde(default)]
     pub logging:    Logging,
+    #[serde(default)]
+    pub multisingle:    MultiSingle,
     #[serde(skip)]
     pub timestamp:  u64,
     #[serde(skip)]
@@ -44,16 +51,10 @@ pub struct Server {
     #[serde(default)]
     pub hostname:       String,
     pub listen:         Option<String>,
-    pub threads:        Option<usize>,
-    #[serde(default)]
-    pub executor:       Option<String>,
-    #[serde(default)]
+    pub runtime:        Option<String>,
     pub user:           Option<String>,
-    #[serde(default)]
     pub group:          Option<String>,
-    #[serde(skip)]
     pub uid:            Option<users::uid_t>,
-    #[serde(skip)]
     pub gid:            Option<users::gid_t>,
     #[serde(default)]
     pub log_panics:     bool,
@@ -92,6 +93,23 @@ pub struct HistFile {
     pub threads:    Option<usize>,
 }
 
+/// Multiple single-threaded executors.
+#[derive(Default,Deserialize)]
+pub struct MultiSingle {
+    pub threads:            Option<usize>,
+    pub cores:              Option<String>,
+    pub threads_per_core:   Option<usize>,
+    #[serde(skip)]
+    pub(crate) core_ids:    Option<Vec<CoreId>>,
+}
+
+impl std::fmt::Debug for MultiSingle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MultiSingle {{ threads: {:?}, cores: {:?}, threads_per_core: {:?} }}",
+		    self.threads, self.cores, self.threads_per_core)
+    }
+}
+
 /// Read the configuration.
 pub fn read_config(name: &str) -> io::Result<Config> {
     let mut f = File::open(name)?;
@@ -113,6 +131,10 @@ pub fn read_config(name: &str) -> io::Result<Config> {
 
     // If user or group was set
     resolve_user_group(&mut cfg)?;
+
+    // Check the [multisingle] config
+    check_multisingle(&mut cfg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
+                                            format!("multisingle: {}", e)))?;
 
     let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
     if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
@@ -230,5 +252,111 @@ pub fn get_config() -> Arc<Config> {
 /// Get a reference-counted reference to the current newsfeeds.
 pub fn get_newsfeeds() -> Arc<NewsFeeds> {
     Arc::clone(NEWSFEEDS.read().as_ref().unwrap())
+}
+
+fn err_invalid(e: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, e.to_string())
+}
+
+fn err_invalid2(s: &str, e: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{}: {}", s, e.into()))
+}
+
+// parse a string of *inclusive* ranges into a Vec<Range<usize>>.
+fn parse_ranges(s: &str) -> io::Result<Vec<Range<usize>>> {
+
+    let mut res = Vec::new();
+
+    // split string at comma.
+    for r in s.split(',').map(|s| s.trim()) {
+
+        // then split at '-'
+        let mut x = r.splitn(2, '-');
+
+        // parse the first number.
+        let num = x.next().unwrap();
+        let b = num.parse::<usize>().map_err(|_| err_invalid("parse error"))?;
+
+        // if there is a second number, parse it as well.
+        let e = match x.next() {
+            None => b,
+            Some(num) => num.parse::<usize>().map_err(|_| err_invalid("parse error"))?,
+        };
+
+        // another sanity check.
+        if e < b {
+            return Err(err_invalid("invalid range"));
+        }
+
+        res.push(Range{ start: b, end: e + 1 });
+    }
+    Ok(res)
+}
+
+fn parse_cores(s: &str) -> io::Result<Vec<CoreId>> {
+
+    // first put all cores into a vector of Option<CoreId>.
+    let mut cores = match get_core_ids() {
+        Some(c) => c.into_iter().map(|c| Some(c)).collect::<Vec<_>>(),
+        None => return Err(err_invalid("cannot get core ids from kernel")),
+    };
+    let ranges = if s.eq_ignore_ascii_case("all") {
+        vec![Range{ start: 0usize, end: cores.len() - 1 }]
+    } else {
+        parse_ranges(s).map_err(|e| err_invalid2(s, e.to_string()))?
+    };
+    let mut res = Vec::new();
+
+    for range in ranges.into_iter() {
+        if range.end > cores.len() {
+            return Err(err_invalid2(s, format!("id out of range [0..{})", cores.len() - 1)));
+        }
+        for i in range {
+            // move from the cores vec into the result vec.
+            let mut core = None;
+            std::mem::swap(&mut cores[i], &mut core);
+            match core {
+                Some(c) => res.push(c),
+                None => return Err(err_invalid2(s, "overlapping ranges")),
+            }
+        }
+    }
+    Ok(res)
+}
+
+fn check_multisingle(cfg: &mut Config) -> io::Result<()> {
+    // "threads_per_core" might be set, but then "cores" must be set as well.
+    let tpc = match cfg.multisingle.threads_per_core {
+        Some(tpc) => {
+            if cfg.multisingle.cores.is_none() {
+                return Err(err_invalid("threads_per_core: \"cores\" must be set first"));
+            }
+            tpc
+        },
+        None => 1,
+    };
+    // parse "cores" if set.
+    if let Some(cores) = cfg.multisingle.cores.as_ref() {
+        let mut res = Vec::new();
+        for c in &parse_cores(cores.as_str()).map_err(|e| err_invalid2("cores", e.to_string()))? {
+            for _ in 0..tpc {
+                res.push(c.clone());
+            }
+        }
+        cfg.multisingle.core_ids = Some(res);
+    }
+    // if "threads" is set, the numbers must match up.
+    if let Some(threads) = cfg.multisingle.threads {
+        if let Some(core_ids) = cfg.multisingle.core_ids.as_ref() {
+            if core_ids.len() != threads {
+                if tpc == 1 {
+                    return Err(err_invalid("threads: must match cores"));
+                } else {
+                    return Err(err_invalid("threads: must match cores * threads_per_core"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 

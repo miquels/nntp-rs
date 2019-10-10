@@ -125,11 +125,11 @@ fn main() -> io::Result<()> {
 
     // and start server.
     let mut server = server::Server::new(hist, spool);
-    match config.server.executor.as_ref().map(|s| s.as_str()) {
+    match config.server.runtime.as_ref().map(|s| s.as_str()) {
         None|Some("threadpool") => server.run_threadpool(listener),
-        Some("current_thread") => server.run_current_thread(listener),
+        Some("multisingle") => server.run_multisingle(listener),
         Some(e) => {
-            eprintln!("nntp-rs: unknown executor {}", e);
+            eprintln!("nntp-rs: unknown runtime {}", e);
             exit(1);
         }
     }
