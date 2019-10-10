@@ -14,6 +14,7 @@ use libc;
 use parking_lot::Mutex;
 
 use crate::util::unixtime;
+use crate::util::byteorder::*;
 use super::{ArtLoc,ArtPart,Backend,MetaSpool,SpoolBackend,SpoolDef};
 
 const MAX_SPOOLFILE_SIZE : u64 = 1_000_000_000;
@@ -87,10 +88,10 @@ struct DArtLocation {
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
     DArtLocation{
-        file:   u16_read_le_bytes(&t[0..2]),
-        pos:    u32_read_le_bytes(&t[2..6]),
-        size:   u32_read_le_bytes(&t[6..10]),
-        dir:    u32_read_le_bytes(&t[10..14]),
+        file:   u16_from_le_bytes(&t[0..2]),
+        pos:    u32_from_le_bytes(&t[2..6]),
+        size:   u32_from_le_bytes(&t[6..10]),
+        dir:    u32_from_le_bytes(&t[10..14]),
     }
 }
 
