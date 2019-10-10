@@ -9,7 +9,6 @@ use std::path::{Path,PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use byteorder::{ByteOrder,LE};
 use bytes::{BufMut,BytesMut};
 use libc;
 use parking_lot::Mutex;
@@ -88,19 +87,19 @@ struct DArtLocation {
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
     DArtLocation{
-        file:   LE::read_u16(&t[0..2]),
-        pos:    LE::read_u32(&t[2..6]),
-        size:   LE::read_u32(&t[6..10]),
-        dir:    LE::read_u32(&t[10..14]),
+        file:   u16_read_le_bytes(&t[0..2]),
+        pos:    u32_read_le_bytes(&t[2..6]),
+        size:   u32_read_le_bytes(&t[6..10]),
+        dir:    u32_read_le_bytes(&t[10..14]),
     }
 }
 
 fn from_location(loc: DArtLocation) -> Vec<u8> {
     let mut t = [0u8; 14];
-    LE::write_u16(&mut t[0..2], loc.file);
-    LE::write_u32(&mut t[2..6], loc.pos);
-    LE::write_u32(&mut t[6..10], loc.size);
-    LE::write_u32(&mut t[10..14], loc.dir);
+    u16_write_le_bytes(&mut t[0..2], loc.file);
+    u32_write_le_bytes(&mut t[2..6], loc.pos);
+    u32_write_le_bytes(&mut t[6..10], loc.size);
+    u32_write_le_bytes(&mut t[10..14], loc.dir);
     t.to_vec()
 }
 
