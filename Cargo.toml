@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["Miquel van Smoorenburg <mikevs@xs4all.net>"]
 edition = "2018"
 
+[profile.release]
+debug = true
+
 [dependencies]
 bytes = "0.4.12"
 chrono = "0.4.9"
