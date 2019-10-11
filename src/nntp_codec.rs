@@ -99,6 +99,7 @@ pub struct NntpCodecControl {
 impl NntpCodec {
     /// Returns a new NntpCodec.
     pub fn new(socket: TcpStream) -> NntpCodec {
+        let _ = socket.set_nodelay(true);
         NntpCodec {
 			socket:	            socket,
 			rd:		            BytesMut::new(),
@@ -300,7 +301,6 @@ impl NntpCodec {
             };
 
             if n == 0 {
-                let _ = self.socket.set_nodelay(true);
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
                                           write buffer to socket")));
             }
@@ -309,23 +309,21 @@ impl NntpCodec {
         }
 
         // Try flushing the underlying IO
+        // Note: poll_flush for a TcpStream is a noop.
+        /*
         let socket = Pin::new(&mut self.socket);
         match socket.poll_flush(cx) {
             Poll::Ready(Ok(_)) => {},
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Pending => return Poll::Pending,
         };
-
-        // Flushed, and done, so immediately send packet(s).
-        // XXX FIXME for Linux use TCP_CORK
-        let _ = self.socket.set_nodelay(true);
-
         trace!("buffer flushed");
+        */
+
         Poll::Ready(Ok(()))
 	}
 
 	fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
-        let _ = self.socket.set_nodelay(false);
         self.wr = item;
         Ok(())
     }
