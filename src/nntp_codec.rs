@@ -83,6 +83,7 @@ pub struct NntpCodec {
     rd_overflow:        bool,
     rd_state:           State,
     rd_line_start:      usize,
+    rd_reserve_size:    usize,
     wr:		            Bytes,
     control:            NntpCodecControl,
     arttype_scanner:    ArtTypeScanner,
@@ -106,6 +107,7 @@ impl NntpCodec {
 			wr:		            Bytes::new(),
             rd_pos:             0,
             rd_overflow:        false,
+            rd_reserve_size:    0,
             rd_state:           State::Lf1Seen,
             rd_line_start:      0,
             control:            NntpCodecControl::new(),
@@ -120,24 +122,32 @@ impl NntpCodec {
     // fill the read buffer as much as possible.
     fn fill_read_buf(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         loop {
-            let mut buflen = self.rd.len();
-            if self.rd_overflow && buflen > 32768 {
+            // in a overflow situation, truncate the buffer. 32768 should be enough
+            // to still have the headers available. Maybe we should scan to find the
+            // header/body separator though.
+            if self.rd_overflow && self.rd.len() > 32768 {
                 self.rd.truncate(32768);
-                buflen = 32768;
             }
 
             // Ensure the read buffer has capacity.
-            // FIXME: this could be smarter. But perhaps it's just fine.
-            let size = if buflen <= 1024 { 1024 } else if buflen <= 8192 { 8192 } else { 65536 };
+            // We grow the reserve_size during the session, and never shrink it.
+            if self.rd_reserve_size < 131072 {
+                let buflen = self.rd.len();
+                let size = if buflen <= 1024 { 1024 } else if buflen <= 16384 { 16384 } else { 131072 };
+                self.rd_reserve_size = size;
+            }
+            let size = self.rd_reserve_size;
             self.rd.reserve(size);
 
             // Read data into the buffer if it's available.
-            // This is stupid.
+            // The moving around of the BytesMut things is stupid, but I see no other way
+            // as otherwise the compiler complains about 2 mutable borrows: self.socket
+            // and self.rd.
             let mut rd = BytesMut::new();
             std::mem::swap(&mut self.rd, &mut rd);
             let res = {
-                let mut selfref = self.as_mut();
-                let socket = Pin::new(&mut selfref.socket);
+                let socket = &mut self.socket;
+                pin_utils::pin_mut!(socket);
                 socket.poll_read_buf(cx, &mut rd)
             };
             std::mem::swap(&mut self.rd, &mut rd);
@@ -151,7 +161,6 @@ impl NntpCodec {
         }
     }
 
-    //fn read_line(mut self: Pin<&mut Self>) -> Poll<Option<Result<NntpInput, io::Error>>> {
     fn read_line(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         // resume where we left off.
         let bufpos = self.rd_pos;
@@ -171,7 +180,6 @@ impl NntpCodec {
         Poll::Ready(Some(Ok(NntpInput::Line(buf))))
     }
 
-    //fn read_block(mut self: Pin<&mut Self>, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
     fn read_block(&mut self, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
 
         // resume where we left off.
@@ -266,7 +274,6 @@ impl NntpCodec {
 
     // read_article is a small wrapper around read_block that returns
     // an Article struct with the BytesMut and some article metadata.
-    //fn read_article(self: Pin<&mut Self>) -> Poll<Option<Result<NntpInput, io::Error>>> {
     fn read_article(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         match self.read_block(true) {
             Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
