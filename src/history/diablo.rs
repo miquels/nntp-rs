@@ -7,17 +7,20 @@ use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 
 use crate::history::{HistBackend,HistEnt,HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
+use crate::util::MmapAtomicU32;
 
 /// Diablo compatible history file.
 #[derive(Debug)]
 pub struct DHistory {
     path:           PathBuf,
-    file:           RwLock<fs::File>,
+    rfile:          fs::File,
+    wfile:          Mutex<fs::File>,
+    hash_buckets:   MmapAtomicU32,
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
@@ -85,6 +88,7 @@ impl DHistory {
 
         // open file and read first 16 bytes into a DHistHead.
         let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let w = f.try_clone()?;
         let meta = f.metadata()?;
         let dhh = read_dhisthead_at(&f, 0)?;
         debug!("{:?} - dhisthead: {:?}", path, &dhh);
@@ -109,9 +113,15 @@ impl DHistory {
                                       format!("{:?}: data misaligned", path)));
         }
 
+        // mmap the hash table index.
+        let buckets = MmapAtomicU32::new(&f, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
+            .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
+
         Ok(DHistory{
             path:           path.to_owned(),
-            file:           RwLock::new(f),
+            rfile:          f,
+            wfile:          Mutex::new(w),
+            hash_buckets:   buckets,
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
@@ -212,23 +222,6 @@ fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
                                   format!("read_dhisthead_at({}): short read ({})", pos, n)))
     }
     Ok(unsafe { mem::transmute(buf) })
-}
-
-// helper
-fn read_u32_at(file: &fs::File, pos: u64, msgid: &[u8]) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    let n = file.read_at(&mut buf, pos)?;
-    if n != 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("read_u32_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)));
-    }
-    Ok(unsafe { mem::transmute(buf) })
-}
-
-// helper
-fn write_u32_at<N: Debug>(_path: N, file: &fs::File, pos: u64, val: u32) -> io::Result<(usize)> {
-    let buf : [u8; 4] = unsafe { mem::transmute(val) };
-    file.write_at(&buf, pos)
 }
 
 // helper
@@ -361,18 +354,16 @@ impl HistBackend for DHistory {
 
         let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^hv.h2) & self.hash_mask) as u64;
-        let pos = DHISTHEAD_SIZE as u64 + bucket * 4;
 
         let mut dhe : DHistEnt = Default::default();
         let mut counter = 0;
         let mut found = false;
 
-        let file = self.file.read();
-        let mut idx = read_u32_at(&*file, pos, msgid)?;
+        let mut idx = self.hash_buckets.load(bucket as usize);
 
         while idx != 0 {
             let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&*file, pos, msgid)?;
+            dhe = read_dhistent_at(&self.rfile, pos, msgid)?;
             if dhe.hv == hv {
                 found = true;
                 break;
@@ -422,16 +413,16 @@ impl HistBackend for DHistory {
     fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
 
         let hv = crc_hash(self.crc_xor_table, msgid);
-        let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as u64;
-        let bpos = DHISTHEAD_SIZE as u64 + bucket * 4;
+        let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as usize;
 
-        let mut file = self.file.write();
+        let mut file = self.wfile.lock();
 
-        let next = read_u32_at(&mut *file, bpos, msgid)?;
+        let next = self.hash_buckets.load(bucket as usize);
         let dhe = DHistEnt::new(he, hv, next);
 
-        // file must be bigger than histhead + hashtable.
+        // get the current file size.
         let mut pos = file.seek(io::SeekFrom::End(0))?;
+        // sanity check.
         if pos < self.data_offset {
             return Err(io::Error::new(io::ErrorKind::InvalidData,
                                       format!("{:?}: corrupt dhistory file", &self.path)));
@@ -443,7 +434,7 @@ impl HistBackend for DHistory {
         let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
 
         write_dhistent_at(&self.path, &mut *file, pos, dhe)?;
-        write_u32_at(&self.path, &mut *file, bpos, idx as u32)?;
+        self.hash_buckets.store(bucket, idx as u32);
 
         Ok(())
     }

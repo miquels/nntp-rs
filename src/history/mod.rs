@@ -139,7 +139,7 @@ impl History {
     pub async fn lookup(&self, msgid: &str) -> Result<Option<HistEnt>, io::Error> {
         let msgid = msgid.to_string().into_bytes();
         let inner = self.inner.clone();
-        self.inner.blocking_pool.spawn_fn(move || {
+        //self.inner.blocking_pool.spawn_fn(move || {
             trace!("history worker on thread {:?}", std::thread::current().id());
             match inner.backend.lookup(&msgid) {
                 Ok(he) => {
@@ -155,7 +155,7 @@ impl History {
                     Ok(None)
                 },
             }
-        }).await
+        //}).await
     }
 
 
