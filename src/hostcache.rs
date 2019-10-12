@@ -207,7 +207,14 @@ impl HostCache {
             debug!("Refreshing host cache for {}", host);
 
             // We are not locked here anymore. Lookup "hostname".
-            let (mut addrs, mut lastupdate) = match dns_lookup::getaddrinfo(Some(&host), None, Some(hints)) {
+            let now = std::time::Instant::now();
+            let res = dns_lookup::getaddrinfo(Some(&host), None, Some(hints));
+            let elapsed = now.elapsed().as_millis();
+            if elapsed >= 1500 {
+                let elapsed = (elapsed / 100) as f64 / 10f64;
+                warn!("resolver: lookup {}: took {} seconds", host, elapsed);
+            }
+            let (mut addrs, mut lastupdate) = match res {
                 Ok(a) => {
                     let addrs = a.filter(|a| a.is_ok())
                         .map(|a| a.unwrap().sockaddr.ip())
