@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io;
+use std::net::{SocketAddr, AddrParseError};
 use std::ops::Range;
+use std::str::FromStr;
 
 use chrono::{self,Datelike};
 use core_affinity::{CoreId, get_core_ids};
@@ -50,7 +52,7 @@ pub struct Config {
 pub struct Server {
     #[serde(default)]
     pub hostname:       String,
-    pub listen:         Option<String>,
+    pub listen:         Option<StringOrVec>,
     pub runtime:        Option<String>,
     pub user:           Option<String>,
     pub group:          Option<String>,
@@ -358,5 +360,42 @@ fn check_multisingle(cfg: &mut Config) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    String(String),
+    Vec(Vec<String>),
+}
+
+pub fn parse_listener(s: impl Into<String>) -> Result<SocketAddr, AddrParseError> {
+    SocketAddr::from_str(&s.into())
+}
+
+pub fn parse_listeners(l: &Option<StringOrVec>) -> io::Result<Vec<SocketAddr>> {
+    let v = match l.as_ref() {
+        Some(&StringOrVec::String(ref s)) => vec![ s.to_string() ],
+        Some(&StringOrVec::Vec(ref v)) => v.to_vec(),
+        None => vec![ ":119".to_string() ],
+    };
+    let mut res = Vec::new();
+    for l in v.iter().map(|s| s.as_str()) {
+        if l.starts_with(":") {
+            let p = (&l[1..]).parse::<u16>()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}: {}", l, e)))?;
+            res.push(parse_listener(format!("0.0.0.0:{}", p)).unwrap());
+            res.push(parse_listener(format!("[::]:{}", p)).unwrap());
+        } else if l.starts_with("*:") {
+            let a = parse_listener(format!("0.0.0.0:{}", &l[2..]))
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}: {}", l, e)))?;
+            res.push(a);
+        } else {
+            let a = parse_listener(l)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}: {}", l, e)))?;
+            res.push(a);
+        }
+    }
+    Ok(res)
 }
 

@@ -1,5 +1,5 @@
 [server]
-listen = "[::]:1119"
+listen = ":1119"
 user = "news"
 group = "news"
 runtime = "multisingle"
@@ -30,9 +30,9 @@ mlock = "all"
 threads = 32
 
 [multisingle]
-#threads = 16
-threads_per_core = 2
-# cores="0,2,4-7"
+#threads = 12
+#threads_per_core = 2
+#cores="0,2,4-7"
 
 # [spool.0]
 # backend = "diablo"

@@ -65,17 +65,24 @@ fn main() -> io::Result<()> {
         },
     };
 
-    // start listening on a socket.
-    let cfg_listen = config.server.listen.as_ref().map(|s| s.as_str());
-    let listen = matches.value_of("LISTEN").unwrap_or(cfg_listen.unwrap_or("[::]:119"));
-    let addr = listen.parse().map_err(|e| {
-        eprintln!("nntp-rs: listen address {}: {}", listen, e);
-        exit(1);
-    }).unwrap();
-    let listener = bind_socket(&addr).map_err(|e| {
+    let mut listenaddrs = &config.server.listen;
+    let cmd_listenaddrs;
+    if let Some(l) = matches.value_of("LISTEN") {
+        cmd_listenaddrs = Some(config::StringOrVec::String(l.to_string()));
+        listenaddrs = &cmd_listenaddrs;
+    }
+    let addrs = config::parse_listeners(listenaddrs).map_err(|e| {
         eprintln!("nntp-rs: {}", e);
         exit(1);
     }).unwrap();
+    let mut listeners = Vec::new();
+    for addr in &addrs {
+        let listener = bind_socket(&addr).map_err(|e| {
+            eprintln!("nntp-rs: listen socket: bind to {}: {}", addr, e);
+            exit(1);
+        }).unwrap();
+        listeners.push(listener);
+    }
 
     // switch uids after binding the socket.
     if let Err(e) = config::switch_uids(&config) {
@@ -120,7 +127,7 @@ fn main() -> io::Result<()> {
          exit(1);
     }).unwrap();
 
-    info!("Listening on port {}", addr.port());
+    info!("Listening on {:?}", addrs);
 
     // install custom panic logger.
     if config.server.log_panics {
@@ -130,8 +137,8 @@ fn main() -> io::Result<()> {
     // and start server.
     let mut server = server::Server::new(hist, spool);
     match config.server.runtime.as_ref().map(|s| s.as_str()) {
-        None|Some("threadpool") => server.run_threadpool(listener),
-        Some("multisingle") => server.run_multisingle(listener),
+        None|Some("threadpool") => server.run_threadpool(listeners),
+        Some("multisingle") => server.run_multisingle(listeners),
         Some(e) => {
             eprintln!("nntp-rs: unknown runtime {}", e);
             exit(1);
@@ -143,9 +150,20 @@ fn main() -> io::Result<()> {
 /// and start listening for connections.
 pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
 
-    let builder = net2::TcpBuilder::new_v6().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e))
-    })?;
+    let builder = if addr.is_ipv6() {
+        let b = net2::TcpBuilder::new_v6().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e))
+        })?;
+        if let Err(e) = b.only_v6(true) {
+            Err(io::Error::new(io::ErrorKind::Other, format!("setting socket to only_v6: {}", e)))
+        } else {
+            Ok(b)
+        }
+    } else {
+        net2::TcpBuilder::new_v4().map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, format!("creating IPv4 socket: {}", e))
+        })
+    }?;
     let builder = builder.reuse_port(true).map_err(|e| {
         io::Error::new(io::ErrorKind::Other, format!("setting SO_REUSEPORT on socket: {}", e))
     })?;

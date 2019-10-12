@@ -40,21 +40,25 @@ impl Server {
     }
 
     /// Run the server on a bunch of current_thread executors.
-    pub fn run_multisingle(self, listener: TcpListener) -> io::Result<()> {
+    pub fn run_multisingle(self, listeners: Vec<TcpListener>) -> io::Result<()> {
 
         trace!("main server running on thread {:?}", thread::current().id());
         let config = config::get_config();
 
-        // Now start a bunch of threads to serve the requests.
+        // See how many threads we want to start and on what cores.
         let mut threads = Vec::new();
         let (num_threads, mut core_ids) = match config.multisingle.core_ids {
             Some(ref c) => (c.len(), c.to_vec()),
             None => (num_cpus::get(), Vec::new()),
         };
 
-        // create one listener per thread, in a seperate setuid-root scope.
-        let addr = listener.local_addr().unwrap();
-        let mut listeners = Vec::new();
+        // copy addresses of the listening sockets, then push the first
+        // listener-set on to the listener_sets vector.
+        let addrs = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
+        let mut listener_sets = Vec::new();
+        listener_sets.push(listeners);
+
+        // create one listener-set per thread, in a seperate setuid-root scope.
         {
             // try to switch to root. if we fail, that's ok. either the socket
             // will bind, or not, and if not, we error on that.
@@ -64,18 +68,21 @@ impl Server {
                 Err(_) => None,
             };
 
-            listeners.push(listener);
+            // create a listener-set per thread.
             for _ in 1..num_threads {
-                 let l = bind_socket(&addr).map_err(|e| {
-                        eprintln!("nntp-rs: server: fatal: {}", e);
-                        exit(1);
-                    }).unwrap();
-                listeners.push(l);
+                let mut v = Vec::new();
+                for addr in &addrs {
+                    let l = bind_socket(&addr).map_err(|e| {
+                            eprintln!("nntp-rs: server: fatal: {}", e);
+                            exit(1);
+                        }).unwrap();
+                    v.push(l);
+                }
+                listener_sets.push(v);
             }
         }
 
-
-        for listener in listeners.into_iter() {
+        for listener_set in listener_sets.into_iter() {
 
             let server = self.clone();
             let core_id = if core_ids.len() > 0 {
@@ -92,14 +99,17 @@ impl Server {
                 trace!("current_thread::runtime on {:?}", thread::current().id());
                 let reactor_handle = tokio_net::driver::Handle::default();
 
-                let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
-                    .expect("cannot convert from net2 listener to tokio listener");
-
                 if let Some(id) = core_id {
                     core_affinity::set_for_current(id);
                 }
 
-                runtime.block_on(server.run(listener));
+                for listener in listener_set.into_iter() {
+                    let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                        .expect("cannot convert from net2 listener to tokio listener");
+                    runtime.spawn(server.clone().run(listener));
+                }
+
+                let _ = runtime.run();
             });
 
             threads.push(tid);
@@ -113,20 +123,23 @@ impl Server {
     }
 
     // run the server on the default threadpool executor.
-    pub fn run_threadpool(&mut self, listener: TcpListener) -> io::Result<()> {
+    pub fn run_threadpool(&mut self, listeners: Vec<TcpListener>) -> io::Result<()> {
 
         let reactor_handle = tokio_net::driver::Handle::default();
         let runtime = tokio::runtime::Runtime::new()?;
-        let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
-            .expect("cannot convert from net2 listener to tokio listener");
 
-        // And spawn it on the default (threadpool) runtime.
-        runtime.block_on(self.run(listener));
+        for listener in listeners.into_iter() {
+            let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                .expect("cannot convert from net2 listener to tokio listener");
+            runtime.spawn(self.clone().run(listener));
+        }
+
+        runtime.shutdown_on_idle();
 
         Ok(())
     }
 
-    async fn run(&self, listener: tokio::net::TcpListener)
+    async fn run(self, listener: tokio::net::TcpListener)
     {
         // Pull out a stream of sockets for incoming connections
         let mut incoming = listener.incoming();
