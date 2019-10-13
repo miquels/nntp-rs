@@ -151,6 +151,7 @@ fn main() -> io::Result<()> {
 pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
 
     let builder = if addr.is_ipv6() {
+        // create IPv6 socket and make it v6-only.
         let b = net2::TcpBuilder::new_v6().map_err(|e| {
             io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e))
         })?;
@@ -164,6 +165,11 @@ pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
             io::Error::new(io::ErrorKind::Other, format!("creating IPv4 socket: {}", e))
         })
     }?;
+    // reuse_addr to make sure we can restart quickly.
+    let builder = builder.reuse_address(true).map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, format!("setting SO_REUSEPORT on socket: {}", e))
+    })?;
+    // reuse_port to be able to have multiple sockets listening on the same port.
     let builder = builder.reuse_port(true).map_err(|e| {
         io::Error::new(io::ErrorKind::Other, format!("setting SO_REUSEPORT on socket: {}", e))
     })?;
