@@ -12,7 +12,7 @@ pub(crate) struct BlockingPool {
 
 #[derive(Debug)]
 pub(crate) struct InnerBlockingPool {
-    use_pool:           AtomicUsize,
+    use_ownpool:        AtomicUsize,
     sem:                Semaphore,
 }
 
@@ -45,10 +45,11 @@ impl BlockingPool {
             Some(BlockingType::Check) | None => BlockingType::Check,
         };
 
+	println!("XXX building new pool blocking_type: {:?}, max_threads: {}", bt, max_threads);
         BlockingPool {
             inner:  Arc::new(
                 InnerBlockingPool {
-                    use_pool:   AtomicUsize::new(bt as usize),
+                    use_ownpool:   AtomicUsize::new(bt as usize),
                     sem:        Semaphore::new(max_t),
                 }
             )
@@ -60,21 +61,21 @@ impl BlockingPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let use_pool = match self.inner.use_pool.load(Ordering::Relaxed)  {
-            OwnPool => false,
-            SeparatePool => true,
+        let use_ownpool = match self.inner.use_ownpool.load(Ordering::Relaxed)  {
+            OwnPool => true,
+            SeparatePool => false,
             Check | _ => {
                 match threadpool::blocking(|| { 42 }) {
                     std::task::Poll::Ready(Err(_)) => {
                         // cannot use tokio_executor::threadpool::blocking (which does NOT
                         // run the closure on a threadpool), so use tokio_executor::blocking::run
                         // which DOES run it on a threadpool.
-                        self.inner.use_pool.store(1, Ordering::SeqCst);
-                        true
+                        self.inner.use_ownpool.store(SeparatePool, Ordering::SeqCst);
+                        false
                     },
                     _ => {
-                        self.inner.use_pool.store(0, Ordering::SeqCst);
-                        false
+                        self.inner.use_ownpool.store(OwnPool, Ordering::SeqCst);
+                        true
                     },
                 }
             }
@@ -85,7 +86,7 @@ impl BlockingPool {
             panic!("BlockingPool::spawn_fn: poll_acquire() returned error (cannot happen)");
         }
 
-        let res = if use_pool {
+        let res = if !use_ownpool {
             tokio_executor::blocking::run(move || func()).await
         } else {
             let mut func = Some(func);
