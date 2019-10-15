@@ -16,6 +16,7 @@ use regex::{Captures,Regex};
 use users::switch::{set_effective_gid, set_effective_uid};
 use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
+use crate::blocking::BlockingType;
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
@@ -41,6 +42,8 @@ pub struct Config {
     pub logging:    Logging,
     #[serde(default)]
     pub multisingle:    MultiSingle,
+    #[serde(default)]
+    pub threadpool: ThreadPool,
     #[serde(skip)]
     pub timestamp:  u64,
     #[serde(skip)]
@@ -105,6 +108,15 @@ pub struct MultiSingle {
     pub(crate) core_ids:    Option<Vec<CoreId>>,
 }
 
+/// The (default) threadpool executor.
+#[derive(Default,Deserialize,Debug)]
+pub struct ThreadPool {
+    // can be "own_pool" or "separate_pool"
+    pub blocking_on:        Option<String>,
+    #[serde(skip)]
+    pub blocking_type:      Option<BlockingType>,
+}
+
 impl std::fmt::Debug for MultiSingle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MultiSingle {{ threads: {:?}, cores: {:?}, threads_per_core: {:?} }}",
@@ -129,6 +141,19 @@ pub fn read_config(name: &str) -> io::Result<Config> {
             Some(h) => h,
             None => "unconfigured".to_string(),
         }
+    }
+
+    match cfg.server.runtime.as_ref().map(|s| s.as_str()) {
+        Some("threadpool") | None => {
+            match cfg.threadpool.blocking_on.as_ref().map(|s| s.as_str()) {
+                Some("own_pool") => cfg.threadpool.blocking_type = Some(BlockingType::OwnPool),
+                Some("separate_pool") => cfg.threadpool.blocking_type = Some(BlockingType::SeparatePool),
+                Some(b) => return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                            format!("unknown blocking_on type: {}", b))),
+                None => {},
+            }
+        },
+        _ => {},
     }
 
     // If user or group was set

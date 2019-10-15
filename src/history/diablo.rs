@@ -1,14 +1,18 @@
 use std;
 use std::io;
+use std::fmt::Debug;
 use std::fs;
+use std::future::Future;
 use std::mem;
 use std::io::{Seek,Write};
-use std::path::{Path, PathBuf};
-use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use crate::blocking::{BlockingPool, BlockingType, try_read_at};
 use crate::history::{HistBackend,HistEnt,HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
@@ -17,6 +21,11 @@ use crate::util::MmapAtomicU32;
 /// Diablo compatible history file.
 #[derive(Debug)]
 pub struct DHistory {
+    inner:          Arc<DHistoryInner>,
+}
+
+#[derive(Debug)]
+pub struct DHistoryInner {
     path:           PathBuf,
     rfile:          fs::File,
     wfile:          Mutex<fs::File>,
@@ -25,6 +34,7 @@ pub struct DHistory {
     hash_mask:      u32,
     data_offset:    u64,
     crc_xor_table:  &'static Vec<DHash>,
+    blocking_pool:  BlockingPool,
 }
 
 #[derive(Debug)]
@@ -43,7 +53,7 @@ const DHISTHEAD_VERSION2 : u16 = 2;
 #[allow(dead_code)]
 const DHISTHEAD_DEADMAGIC : u32 = 0xDEADF5E6;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 #[repr(C)]
 struct DHash {
     h1:     u32,
@@ -84,7 +94,7 @@ lazy_static! {
 impl DHistory {
 
     /// open existing history database
-    pub fn open(path: &Path) -> io::Result<DHistory> {
+    pub fn open(path: &Path, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<DHistory> {
 
         // open file and read first 16 bytes into a DHistHead.
         let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
@@ -117,7 +127,7 @@ impl DHistory {
         let buckets = MmapAtomicU32::new(&f, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
             .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
 
-        Ok(DHistory{
+        let inner = DHistoryInner{
             path:           path.to_owned(),
             rfile:          f,
             wfile:          Mutex::new(w),
@@ -126,7 +136,9 @@ impl DHistory {
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
             crc_xor_table:  &*CRC_XOR_TABLE,
-        })
+            blocking_pool:  BlockingPool::new(bt, threads.unwrap_or(16)),
+        };
+        Ok(DHistory{ inner: Arc::new(inner) })
     }
 
     /// create a new history database, only if it doesn't exist yet.
@@ -162,55 +174,156 @@ impl DHistory {
 
         Ok(())
     }
-}
 
-const CRC_POLY1 : u32 = 0x00600340;
-const CRC_POLY2 : u32 = 0x00F0D50B;
-const CRC_HINIT1 : u32 = 0xFAC432B1;
-const CRC_HINIT2 : u32 = 0x0CD5E44A;
+    // History lookup.
+    async fn do_lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
 
-fn crc_init() -> Vec<DHash> {
-    let mut table = Vec::with_capacity(256);
-    for i in 0..256 {
-        let mut v = i as u32;
-        let mut hv = DHash{h1: 0, h2: 0};
+        let inner = &self.inner;
 
-        for _ in 0..8 {
-            if (v & 0x80) != 0 {
-                hv.h1 ^= CRC_POLY1;
-                hv.h2 ^= CRC_POLY2;
-            }
-            hv.h2 = hv.h2 << 1;
-            if (hv.h1 & 0x80000000) != 0 {
-                hv.h2 |= 1;
-            }
-            hv.h1 <<= 1;
-            v <<= 1;
+        // Find first element of the chain.
+        let hv = crc_hash(inner.crc_xor_table, msgid);
+        let bucket = ((hv.h1 ^hv.h2) & inner.hash_mask) as u64;
+        let idx = inner.hash_buckets.load(bucket as usize);
+
+        // First, we try walking the chain using non-blocking reads. If one
+        // of the reads fails with EWOULDBLOCK we pass the whole thing off to
+        // the threadpool.
+        let res = match inner.walk_chain(idx, hv.clone(), msgid, try_read_dhistent_at) {
+            Ok(Err(idx)) => {
+                // failed at 'idx' with EWOULDBLOCK, continue with threadpool.
+                let inner2 = inner.clone();
+                let msgid = msgid.to_vec();
+                inner.blocking_pool.spawn_fn(move || {
+                    inner2.walk_chain(idx, hv, msgid, read_dhistent_at)
+                }).await
+            },
+            other => other,
+        };
+
+        // Unpack the result.
+        let dhe = match res {
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    return Ok(HistEnt{
+                        time:       0,
+                        status:     HistStatus::NotFound,
+                        head_only:  false,
+                        location:   None,
+                    });
+                } else {
+                    return Err(e);
+                }
+            },
+            Ok(Ok(he)) => he,
+            _ => unreachable!(),
+        };
+
+        // see if entry is valid. if it is not, we just return Rejected
+        // instead of logging an error. debatable.
+        let spool = (dhe.exp & 0xff) as u8;
+        let status = dhe.status();
+        if status == HistStatus::Present && (idx == 0 || spool < 100 || spool > 199) {
+            return Ok(HistEnt{
+                time:       0,
+                status:     HistStatus::Rejected,
+                head_only:  (dhe.exp & 0x8000) > 0,
+                location:   None,
+            });
         }
-        table.push(hv);
+
+        let location = match status {
+            HistStatus::Present => Some(dhe.to_location()),
+            _ => None,
+        };
+        Ok(HistEnt{
+            time:       (dhe.gmt as u64) * 60,
+            status:     status,
+            head_only:  (dhe.exp & 0x8000) > 0,
+            location:   location,
+        })
     }
-    table
+
+    async fn do_store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+
+        let inner = self.inner.clone();
+        let he = he.clone();
+
+        let hv = crc_hash(inner.crc_xor_table, msgid);
+        let bucket = ((hv.h1 ^ hv.h2) & inner.hash_mask) as usize;
+
+        self.inner.blocking_pool.spawn_fn(move || {
+            let mut file = inner.wfile.lock();
+
+            let next = inner.hash_buckets.load(bucket as usize);
+            let dhe = DHistEnt::new(&he, hv, next);
+
+            // get the current file size.
+            let mut pos = file.seek(io::SeekFrom::End(0))?;
+            // sanity check.
+            if pos < inner.data_offset {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt dhistory file"));
+            }
+
+            // calculate hashtable index and write pos.
+            pos -= inner.data_offset;
+            let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
+            let pos = idx * DHISTENT_SIZE as u64 + inner.data_offset;
+
+            write_dhistent_at(&inner.path, &mut *file, pos, dhe)?;
+            inner.hash_buckets.store(bucket, idx as u32);
+
+            Ok(())
+        }).await
+    }
 }
 
-fn crc_hash(crc_xor_table: &Vec<DHash>, msgid: &[u8]) -> DHash {
-	let mut hv = DHash{ h1: CRC_HINIT1, h2: CRC_HINIT2 };
-    for b in msgid {
-        let i = ((hv.h1 >> 24) & 0xff) as usize;
-        hv.h1 = (hv.h1 << 8) ^ (hv.h2 >> 24) ^ crc_xor_table[i].h1;
-        hv.h2 = (hv.h2 << 8) ^ (*b as u32) ^ crc_xor_table[i].h2;
+impl HistBackend for DHistory {
+
+    /// lookup an article in the DHistory database
+    fn lookup<'a>(&'a self, msgid: &'a[u8]) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>> {
+        Box::pin(self.do_lookup(msgid))
     }
-    // Note from the author of the diablo implementation lib/hash.c :
-    // Fold the generated CRC.  Note, this is buggy but it is too late
-    // for me to change it now.  I should have XOR'd the 1 in, not OR'd
-    // it when folding the bits.
-    if (hv.h1 & 0x80000000) != 0 {
-        hv.h1 = (hv.h1 & 0x7FFFFFFF) | 1;
+
+    /// store an article in the DHistry database
+    fn store<'a>(&'a self, msgid: &'a [u8], he: &'a HistEnt) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        Box::pin(self.do_store(msgid, he))
     }
-    if (hv.h2 & 0x80000000) != 0 {
-        hv.h2 = (hv.h2 & 0x7FFFFFFF) | 1;
+}
+
+impl DHistoryInner {
+
+    fn walk_chain<F>(&self, mut idx: u32, hv: DHash, msgid: impl AsRef<[u8]>, mut read_dhistent_at: F) -> io::Result<Result<DHistEnt, u32>>
+        where F: FnMut(&fs::File, u64, &[u8]) -> io::Result<DHistEnt>
+    {
+        let mut counter = 0;
+        let mut found = false;
+        let mut dhe : DHistEnt = Default::default();
+
+        while idx != 0 {
+            let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
+            dhe = match read_dhistent_at(&self.rfile, pos, msgid.as_ref()) {
+                Ok(dhe) => dhe,
+                Err(e) => if e.kind() == io::ErrorKind::WouldBlock {
+                    return Ok(Err(idx));
+                } else {
+                    return Err(e);
+                }
+            };
+            if dhe.hv == hv {
+                found = true;
+                break;
+            }
+            idx = dhe.next;
+            counter += 1;
+            if counter > 5000 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "database loop"));
+            }
+        }
+        if !found {
+            Err(io::ErrorKind::NotFound)?;
+        }
+        Ok(Ok(dhe))
     }
-    hv.h1 |= 0x80000000;
-    hv
 }
 
 // helper
@@ -235,6 +348,20 @@ fn read_dhistent_at(file: &fs::File, pos: u64, msgid: &[u8]) -> io::Result<DHist
     Ok(unsafe { mem::transmute(buf) })
 }
 
+// helper
+#[cfg(target_os = "linux")]
+fn try_read_dhistent_at(file: &fs::File, pos: u64, msgid: &[u8]) -> io::Result<DHistEnt> {
+    let mut buf = [0u8; DHISTENT_SIZE];
+    let n = try_read_at(file, &mut buf, pos)?;
+    if n != DHISTENT_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                  format!("read_dhistent_at({}) for {:?}: short read ({})",
+                                            pos, std::str::from_utf8(msgid), n)));
+    }
+    Ok(unsafe { mem::transmute(buf) })
+}
+
+// helper
 // helper
 fn write_dhistent_at<N: Debug>(_path: N, file: &fs::File, pos: u64, dhe: DHistEnt) -> io::Result<(usize)> {
     let buf : [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
@@ -345,97 +472,55 @@ impl DHistEnt {
         }
         HistStatus::Present
     }
+
 }
 
-impl HistBackend for DHistory {
+const CRC_POLY1 : u32 = 0x00600340;
+const CRC_POLY2 : u32 = 0x00F0D50B;
+const CRC_HINIT1 : u32 = 0xFAC432B1;
+const CRC_HINIT2 : u32 = 0x0CD5E44A;
 
-    /// lookup an article in the DHistory database
-    fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
+fn crc_init() -> Vec<DHash> {
+    let mut table = Vec::with_capacity(256);
+    for i in 0..256 {
+        let mut v = i as u32;
+        let mut hv = DHash{h1: 0, h2: 0};
 
-        let hv = crc_hash(self.crc_xor_table, msgid);
-        let bucket = ((hv.h1 ^hv.h2) & self.hash_mask) as u64;
-
-        let mut dhe : DHistEnt = Default::default();
-        let mut counter = 0;
-        let mut found = false;
-
-        let mut idx = self.hash_buckets.load(bucket as usize);
-
-        while idx != 0 {
-            let pos = self.data_offset + (idx as u64) * (DHISTENT_SIZE as u64);
-            dhe = read_dhistent_at(&self.rfile, pos, msgid)?;
-            if dhe.hv == hv {
-                found = true;
-                break;
+        for _ in 0..8 {
+            if (v & 0x80) != 0 {
+                hv.h1 ^= CRC_POLY1;
+                hv.h2 ^= CRC_POLY2;
             }
-            idx = dhe.next;
-            counter += 1;
-            if counter > 5000 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "database loop"));
+            hv.h2 = hv.h2 << 1;
+            if (hv.h1 & 0x80000000) != 0 {
+                hv.h2 |= 1;
             }
+            hv.h1 <<= 1;
+            v <<= 1;
         }
-
-        if !found {
-            return Ok(HistEnt{
-                time:       0,
-                status:     HistStatus::NotFound,
-                head_only:  false,
-                location:   None,
-            });
-        }
-
-        // see if entry is valid. if it is not, we just return Rejected
-        // instead of logging an error. debatable.
-        let spool = (dhe.exp & 0xff) as u8;
-        let status = dhe.status();
-        if status == HistStatus::Present && (idx == 0 || spool < 100 || spool > 199) {
-            return Ok(HistEnt{
-                time:       0,
-                status:     HistStatus::Rejected,
-                head_only:  (dhe.exp & 0x8000) > 0,
-                location:   None,
-            });
-        }
-
-        let location = match status {
-            HistStatus::Present => Some(dhe.to_location()),
-            _ => None,
-        };
-        Ok(HistEnt{
-            time:       (dhe.gmt as u64) * 60,
-            status:     status,
-            head_only:  (dhe.exp & 0x8000) > 0,
-            location:   location,
-        })
+        table.push(hv);
     }
-
-    /// store an article in the DHistry database
-    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
-
-        let hv = crc_hash(self.crc_xor_table, msgid);
-        let bucket = ((hv.h1 ^ hv.h2) & self.hash_mask) as usize;
-
-        let mut file = self.wfile.lock();
-
-        let next = self.hash_buckets.load(bucket as usize);
-        let dhe = DHistEnt::new(he, hv, next);
-
-        // get the current file size.
-        let mut pos = file.seek(io::SeekFrom::End(0))?;
-        // sanity check.
-        if pos < self.data_offset {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                      format!("{:?}: corrupt dhistory file", &self.path)));
-        }
-
-        // calculate hashtable index and write pos.
-        pos -= self.data_offset;
-        let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
-        let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
-
-        write_dhistent_at(&self.path, &mut *file, pos, dhe)?;
-        self.hash_buckets.store(bucket, idx as u32);
-
-        Ok(())
-    }
+    table
 }
+
+fn crc_hash(crc_xor_table: &Vec<DHash>, msgid: &[u8]) -> DHash {
+	let mut hv = DHash{ h1: CRC_HINIT1, h2: CRC_HINIT2 };
+    for b in msgid {
+        let i = ((hv.h1 >> 24) & 0xff) as usize;
+        hv.h1 = (hv.h1 << 8) ^ (hv.h2 >> 24) ^ crc_xor_table[i].h1;
+        hv.h2 = (hv.h2 << 8) ^ (*b as u32) ^ crc_xor_table[i].h2;
+    }
+    // Note from the author of the diablo implementation lib/hash.c :
+    // Fold the generated CRC.  Note, this is buggy but it is too late
+    // for me to change it now.  I should have XOR'd the 1 in, not OR'd
+    // it when folding the bits.
+    if (hv.h1 & 0x80000000) != 0 {
+        hv.h1 = (hv.h1 & 0x7FFFFFFF) | 1;
+    }
+    if (hv.h2 & 0x80000000) != 0 {
+        hv.h2 = (hv.h2 & 0x7FFFFFFF) | 1;
+    }
+    hv.h1 |= 0x80000000;
+    hv
+}
+

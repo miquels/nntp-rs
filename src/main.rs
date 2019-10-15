@@ -115,14 +115,18 @@ fn main() -> io::Result<()> {
         },
     }
 
+    let bt = config.threadpool.blocking_type.clone();
+
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
     let hpath = config::expand_path(&config.paths, &config.history.file);
-    let hist = History::open(&config.history.backend, hpath.clone(), config.history.threads).map_err(|e| {
+    let hist = History::open(&config.history.backend, hpath.clone(), config.history.threads, bt.clone()).map_err(|e| {
          eprintln!("nntp-rs: history {}: {}", hpath, e);
          exit(1);
     }).unwrap();
-    let spool = Spool::new(&config.spool).map_err(|e| {
+
+    // open spool. ditto.
+    let spool = Spool::new(&config.spool, None, bt).map_err(|e| {
          eprintln!("nntp-rs: initializing spool: {}", e);
          exit(1);
     }).unwrap();

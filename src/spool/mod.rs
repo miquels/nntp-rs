@@ -15,7 +15,7 @@ mod diablo;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
-use crate::blocking::BlockingPool;
+use crate::blocking::{BlockingPool, BlockingType};
 use crate::config;
 use crate::util::{self, MatchResult, HashFeed};
 
@@ -214,7 +214,7 @@ struct SpoolInner {
 
 impl Spool {
     /// initialize all storage backends.
-    pub fn new(spoolcfg: &SpoolCfg) -> io::Result<Spool> {
+    pub fn new(spoolcfg: &SpoolCfg, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<Spool> {
 
         let mainconfig = config::get_config();
 
@@ -326,7 +326,7 @@ impl Spool {
                 metaspool:  spoolgroup,
                 groupmap:   groupmap,
             }),
-            pool:   BlockingPool::new(64),
+            pool:   BlockingPool::new(bt, threads.unwrap_or(64)),
         })
     }
 

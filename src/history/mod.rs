@@ -5,17 +5,19 @@
 //!   - memdb
 //!
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 mod cache;
 pub mod diablo;
 pub mod memdb;
 
+use std::future::Future;
 use std::io;
 use std::path::Path;
 
 use crate::spool;
-use crate::blocking::BlockingPool;
+use crate::blocking::BlockingType;
 use self::cache::HCache;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
@@ -24,9 +26,9 @@ const PRESTORE_MAX_AGE: u32 = 60;
 /// Functionality a backend history database needs to make available.
 pub trait HistBackend: Send + Sync {
     /// Look an entry up in the history database.
-    fn lookup(&self, msgid: &[u8]) -> io::Result<HistEnt>;
+    fn lookup<'a>(&'a self, msgid: &'a [u8]) -> Pin<Box<dyn Future<Output=io::Result<HistEnt>> + Send + 'a>>;
     /// Store an entry (an existing entry will be updated).
-    fn store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()>;
+    fn store<'a>(&'a self, msgid: &'a [u8], he: &'a HistEnt) -> Pin<Box<dyn Future<Output=io::Result<()>> + Send + 'a>>;
 }
 
 /// History database functionality.
@@ -38,7 +40,6 @@ pub struct History {
 struct HistoryInner {
     cache:          HCache,
     backend:        Box<dyn HistBackend>,
-    blocking_pool:  BlockingPool,
 }
 
 /// One history entry.
@@ -81,10 +82,10 @@ pub enum HistError {
 impl History {
 
     /// Open history database.
-    pub fn open(tp: &str, path: impl AsRef<Path>, threads: Option<usize>) -> io::Result<History> {
+    pub fn open(tp: &str, path: impl AsRef<Path>, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<History> {
         let h : Box<dyn HistBackend> = match tp {
             "diablo" => {
-                Box::new(diablo::DHistory::open(path.as_ref())?)
+                Box::new(diablo::DHistory::open(path.as_ref(), threads, bt)?)
             },
             "memdb" => {
                 Box::new(memdb::MemDb::new())
@@ -98,7 +99,6 @@ impl History {
             inner:  Arc::new(HistoryInner{
                 cache:          HCache::new(),
                 backend:        h,
-                blocking_pool:  BlockingPool::new(threads.unwrap_or(32)),
             })
         })
     }
@@ -137,27 +137,21 @@ impl History {
     /// Find an entry in the history database. This lookup ignores the
     /// write-cache, it goes straight to the backend.
     pub async fn lookup(&self, msgid: &str) -> Result<Option<HistEnt>, io::Error> {
-        let msgid = msgid.to_string().into_bytes();
-        let inner = self.inner.clone();
-        //self.inner.blocking_pool.spawn_fn(move || {
-            trace!("history worker on thread {:?}", std::thread::current().id());
-            match inner.backend.lookup(&msgid) {
-                Ok(he) => {
-                    if he.status == HistStatus::NotFound {
-                        Ok(None)
-                    } else {
-                        Ok(Some(he))
-                    }
-                },
-                Err(e) => {
-                    // we simply log an error and return not found.
-                    warn!("backend_lookup: {}", e);
+        match self.inner.backend.lookup(msgid.as_bytes()).await {
+            Ok(he) => {
+                if he.status == HistStatus::NotFound {
                     Ok(None)
-                },
-            }
-        //}).await
+                } else {
+                    Ok(Some(he))
+                }
+            },
+            Err(e) => {
+                // we simply log an error and return not found.
+                warn!("backend_lookup: {}", e);
+                Ok(None)
+            },
+        }
     }
-
 
     /// The CHECK command.
     ///
@@ -249,11 +243,7 @@ impl History {
                 warn!("cache store_commit {} failed (fallen out of cache)", msgid);
             }
         }
-        let inner = self.inner.clone();
-        let msgid = msgid.to_string().into_bytes();
-        self.inner.blocking_pool.spawn_fn(move || {
-            inner.backend.store(&msgid, &he)
-        }).await
+        self.inner.backend.store(msgid.as_bytes(), &he).await
     }
 
     /// Something went wrong writing to the spool. Cancel the reservation
