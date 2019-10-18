@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
@@ -13,8 +14,13 @@ use bytes::{Bytes, BytesMut};
 use futures::{Stream, Sink};
 use memchr::memchr;
 use parking_lot::Mutex;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::prelude::*;
 use tokio::net::TcpStream;
+use tokio::timer::{self, Delay};
+
+const INITIAL_TIMEOUT: u64 = 60;
+const READ_TIMEOUT: u64 = 630;
+const WRITE_TIMEOUT: u64 = 120;
 
 // Reading state (multiline)
 #[derive(Debug,PartialEq,Eq)]
@@ -41,8 +47,6 @@ pub enum CodecMode {
     ReadArticle = 4,
     /// at next read, return quit.
     Quit        = 5,
-    /// report write error.
-    WriteError  = 6,
 }
 
 impl From<usize> for CodecMode {
@@ -53,7 +57,6 @@ impl From<usize> for CodecMode {
             3 => CodecMode::ReadBlock,
             4 => CodecMode::ReadArticle,
             5 => CodecMode::Quit,
-            6 => CodecMode::WriteError,
             _ => unimplemented!(),
         }
     }
@@ -64,7 +67,6 @@ impl From<usize> for CodecMode {
 pub enum NntpInput {
     Connect,
     Eof,
-    WriteError(io::Error),
     Line(BytesMut),
     Block(BytesMut),
     Article(Article),
@@ -87,13 +89,14 @@ pub struct NntpCodec {
     wr:		            Bytes,
     control:            NntpCodecControl,
     arttype_scanner:    ArtTypeScanner,
+    wr_timeout:         Delay,
+    rd_timeout:         Delay,
 }
 
 /// Changes the behaviour of the codec.
 #[derive(Clone)]
 pub struct NntpCodecControl {
     rd_mode:        Arc<AtomicUsize>,
-    error:          Arc<Mutex<Option<io::Error>>>,
     msgid:          Arc<Mutex<Option<String>>>,
 }
 
@@ -112,6 +115,8 @@ impl NntpCodec {
             rd_line_start:      0,
             control:            NntpCodecControl::new(),
             arttype_scanner:    ArtTypeScanner::new(),
+            rd_timeout:         timer::delay_for(Duration::new(INITIAL_TIMEOUT, 0)),
+            wr_timeout:         timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
         }
     }
 
@@ -120,7 +125,7 @@ impl NntpCodec {
     }
 
     // fill the read buffer as much as possible.
-    fn fill_read_buf(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         loop {
             // in a overflow situation, truncate the buffer. 32768 should be enough
             // to still have the headers available. Maybe we should scan to find the
@@ -140,19 +145,9 @@ impl NntpCodec {
             self.rd.reserve(size);
 
             // Read data into the buffer if it's available.
-            // The moving around of the BytesMut things is stupid, but I see no other way
-            // as otherwise the compiler complains about 2 mutable borrows: self.socket
-            // and self.rd.
-            let mut rd = BytesMut::new();
-            std::mem::swap(&mut self.rd, &mut rd);
-            let res = {
-                let socket = &mut self.socket;
-                pin_utils::pin_mut!(socket);
-                socket.poll_read_buf(cx, &mut rd)
-            };
-            std::mem::swap(&mut self.rd, &mut rd);
-
-            match res {
+            let socket = &mut self.socket;
+            pin_utils::pin_mut!(socket);
+            match socket.poll_read_buf(cx, &mut self.rd) {
                 Poll::Ready(Ok(n)) if n == 0 => return Poll::Ready(Ok(())),
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
@@ -294,40 +289,57 @@ impl NntpCodec {
         }
     }
 
-	fn nntp_sink_poll_ready(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+	fn nntp_sink_poll_ready(&mut self, cx: &mut Context, mut flush: bool) -> Poll<Result<(), io::Error>> {
         trace!("flushing buffer");
 
         while !self.wr.is_empty() {
             trace!("writing; remaining={}", self.wr.len());
 
             let socket = Pin::new(&mut self.socket);
-            let n = match socket.poll_write(cx, &self.wr) {
-                Poll::Ready(Ok(n)) => n,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            };
-
-            if n == 0 {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
+            match socket.poll_write(cx, &self.wr) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
                                           write buffer to socket")));
+                },
+                Poll::Ready(Ok(n)) => {
+                    let _ = self.wr.split_to(n);
+                    break;
+                },
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => {
+                    flush = false;
+                    break;
+                },
             }
-
-            let _ = self.wr.split_to(n);
         }
 
-        // Try flushing the underlying IO
-        // Note: poll_flush for a TcpStream is a noop.
-        /*
-        let socket = Pin::new(&mut self.socket);
-        match socket.poll_flush(cx) {
-            Poll::Ready(Ok(_)) => {},
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        };
-        trace!("buffer flushed");
-        */
+        // Flush if needed.
+        if flush {
+            let socket = &mut self.socket;
+            pin_utils::pin_mut!(socket);
+            match socket.poll_flush(cx) {
+                Poll::Ready(Ok(_)) => {
+                    self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
+                    return Poll::Ready(Ok(()));
+                },
+                Poll::Ready(Err(e)) => {
+                    self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
+                    return Poll::Ready(Err(e));
+                },
+                Poll::Pending => {},
+            }
+        }
 
-        Poll::Ready(Ok(()))
+        // check the timer.
+        let timeout = &mut self.wr_timeout;
+        pin_utils::pin_mut!(timeout);
+        match timeout.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
+                Poll::Ready(err)
+            },
+        }
 	}
 
 	fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
@@ -336,7 +348,7 @@ impl NntpCodec {
     }
 
 	fn nntp_sink_poll_close(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        match self.nntp_sink_poll_ready(cx) {
+        match self.nntp_sink_poll_ready(cx, true) {
             Poll::Ready(Ok(())) => {},
             other => return other,
         }
@@ -350,7 +362,6 @@ impl NntpCodecControl {
     pub fn new() -> NntpCodecControl {
         NntpCodecControl {
             rd_mode:    Arc::new(AtomicUsize::new(CodecMode::Connect as usize)),
-            error:      Arc::new(Mutex::new(None)),
             msgid:      Arc::new(Mutex::new(None)),
         }
     }
@@ -374,18 +385,12 @@ impl NntpCodecControl {
     pub fn quit(&self) {
         self.rd_mode.store(CodecMode::Quit as usize, Ordering::SeqCst);
     }
-
-    pub fn write_error(&self, e: io::Error) {
-        *self.error.lock() = Some(e);
-        self.rd_mode.store(CodecMode::WriteError as usize, Ordering::SeqCst);
-    }
 }
 
 /// This is the reading part, we return a stream of NntpInputs. Those can be:
 ///
 /// - NntpInput::Connect:               returned once at the start
 /// - NntpInput::Eof:                   end-of-file seen.
-/// - NntpInput::WriteError(io::Error): the output writing routines reported an error.
 /// - NntpInput::Line(BytesMut):        single command line
 /// - NntpInput::Block(BytesMut):       multiline block
 ///
@@ -394,66 +399,57 @@ impl Stream for NntpCodec {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
 
-        let self2 = &mut self.as_mut();
-
-        let rd_mode = self2.control.get_mode();
+        let rd_mode = self.control.get_mode();
         match rd_mode {
             CodecMode::Connect => {
-                self2.control.set_mode(CodecMode::ReadLine);
+                self.control.set_mode(CodecMode::ReadLine);
                 return Poll::Ready(Some(Ok(NntpInput::Connect)));
-            },
-            CodecMode::WriteError => {
-                let e = match self2.control.error.lock().take() {
-                    Some(e) => e,
-                    None => {
-                        error!("nntp_codec::poll: CodecMode::WriteError but no error available");
-                        io::Error::new(io::ErrorKind::Other, "write error")
-                    },
-                };
-                self2.control.quit();
-                return Poll::Ready(Some(Ok(NntpInput::WriteError(e))));
             },
             CodecMode::Quit => return Poll::Ready(None),
             _ => {},
         }
 
+
         // read as much data as we can.
-        let sock_closed = match self2.as_mut().fill_read_buf(cx) {
+        let sock_closed = match self.fill_read_buf(cx) {
             Poll::Ready(Ok(())) => true,
             Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
             Poll::Pending => false,
         };
 
         // Then process the data.
-        if self2.rd.len() > 0 {
+        if self.rd.len() > 0 {
             let res = match rd_mode {
-                CodecMode::ReadLine => self2.read_line(),
-                CodecMode::ReadBlock => self2.read_block(false),
-                CodecMode::ReadArticle => self2.read_article(),
+                CodecMode::ReadLine => self.read_line(),
+                CodecMode::ReadBlock => self.read_block(false),
+                CodecMode::ReadArticle => self.read_article(),
                 _ => unreachable!(),
             };
             match res {
                 Poll::Pending => {},
-                res => return res,
+                res => {
+                    self.rd_timeout.reset(calc_delay(READ_TIMEOUT));
+                    return res;
+                },
             }
         }
 
         // see if the other side closed the socket.
         if sock_closed {
-            if self2.rd_state != State::Eof {
+            if self.rd_state != State::Eof {
 
                 // we were still processing data .. this was unexpected!
-                if self2.rd.len() > 0 {
+                if self.rd.len() > 0 {
                     // We were still reading a line, or a block, and hit EOF
                     // before the end. That's unexpected.
-                    self2.rd_state = State::Eof;
+                    self.rd_state = State::Eof;
                     let err = Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
                     return Poll::Ready(Some(err));
                 }
 
                 // return an end-of-file indication once, the next poll will
                 // return end-of-stream.
-                self2.rd_state = State::Eof;
+                self.rd_state = State::Eof;
                 return Poll::Ready(Some(Ok(NntpInput::Eof)));
             }
 
@@ -461,7 +457,17 @@ impl Stream for NntpCodec {
             return Poll::Ready(None);
         }
 
-        Poll::Pending
+        // check the timer.
+        let timeout = &mut self.rd_timeout;
+        pin_utils::pin_mut!(timeout);
+        match timeout.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
+                self.control.quit();
+                Poll::Ready(Some(err))
+            },
+        }
     }
 }
 
@@ -472,7 +478,7 @@ impl Sink<Bytes> for NntpCodec {
     type Error = io::Error;
 
 	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        self.as_mut().nntp_sink_poll_ready(cx)
+        self.nntp_sink_poll_ready(cx, false)
     }
 
 	fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
@@ -480,11 +486,17 @@ impl Sink<Bytes> for NntpCodec {
     }
 
 	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        self.as_mut().nntp_sink_poll_ready(cx)
+        self.nntp_sink_poll_ready(cx, true)
     }
 
 	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        self.as_mut().nntp_sink_poll_close(cx)
+        self.nntp_sink_poll_close(cx)
     }
 }
+
+// helper
+fn calc_delay(secs: u64) -> Instant {
+    Instant::now().checked_add(Duration::new(secs, 0)). unwrap()
+}
+
 

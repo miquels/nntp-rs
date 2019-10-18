@@ -17,6 +17,7 @@ use crate::bind_socket;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::nntp_codec::{NntpCodec,NntpInput};
+use crate::nntp_session::NntpResult;
 use crate::history::History;
 use crate::spool::Spool;
 use crate::nntp_session::NntpSession;
@@ -174,18 +175,28 @@ impl Server {
             let task = async move {
                 while let Some(result) = reader.next().await {
                     let response = match result {
-                        Err(e) => session.on_read_error(e).await,
+                        Err(e) => {
+                            control.quit();
+                            session.on_read_error(e).await
+                        },
                         Ok(input) => match input {
                             NntpInput::Connect => session.on_connect().await,
-                            NntpInput::WriteError(e) => session.on_write_error(e).await,
                             NntpInput::Eof => session.on_eof().await,
                             buf @ NntpInput::Line(_)|
                             buf @ NntpInput::Block(_)|
-                            buf @ NntpInput::Article(_) => session.on_input(buf).await,
+                            buf @ NntpInput::Article(_) => {
+                                match session.on_input(buf).await {
+                                    Ok(res) => res,
+                                    Err(e) => {
+                                        control.quit();
+                                        NntpResult::text(format!("400 {}", e))
+                                    }
+                                }
+                            }
                         }
-                    }.unwrap();
+                    };
                     if let Err(e) = writer.send(response.data).await {
-                        control.write_error(e);
+                        session.on_write_error(e).await;
                         break;
                     }
                 }

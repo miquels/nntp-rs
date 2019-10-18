@@ -47,7 +47,8 @@ pub struct NntpResult {
 }
 
 impl NntpResult {
-    fn text(s: &str) -> NntpResult {
+    pub fn text(s: impl AsRef<str>) -> NntpResult {
+        let s = s.as_ref();
         let mut b = Bytes::with_capacity(s.len() + 2);
         b.extend_from_slice(s.as_bytes());
         b.extend_from_slice(&b"\r\n"[..]);
@@ -56,13 +57,13 @@ impl NntpResult {
         }
     }
 
-    fn bytes(b: Bytes) -> NntpResult {
+    pub fn bytes(b: Bytes) -> NntpResult {
         NntpResult{
             data:       b,
         }
     }
 
-    fn empty() -> NntpResult {
+    pub fn empty() -> NntpResult {
         NntpResult::bytes(Bytes::new())
     }
 }
@@ -107,14 +108,14 @@ impl NntpSession {
 
     /// Initial connect. Here we decide if we want to accept this
     /// connection, or refuse it.
-    pub async fn on_connect(&mut self) -> io::Result<NntpResult> {
+    pub async fn on_connect(&mut self) -> NntpResult {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
                 self.codec_control.quit();
                 info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
                 let msg = format!("502 permission denied to {}", remote); 
-                return Ok(NntpResult::text(&msg));
+                return NntpResult::text(&msg);
             },
             Some(x) => x,
         };
@@ -127,7 +128,7 @@ impl NntpSession {
             info!("Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
                   peer.label, remote, count, peer.maxconnect);
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
-            return Ok(NntpResult::text(&msg))
+            return NntpResult::text(&msg);
         }
 
         self.stats.on_connect(remote.to_string(), peer.label.clone()).await;
@@ -143,25 +144,27 @@ impl NntpSession {
             self.parser.add_cap(Capb::ModeHeadfeed);
         }
         let msg = format!("{} {} hello {}", code, self.config.server.hostname, peer.label);
-        Ok(NntpResult::text(&msg))
+        NntpResult::text(&msg)
     }
 
     /// Called when we got an error writing to the socket.
     /// Log an error, clean up, and exit.
-    pub async fn on_write_error(&self, err: io::Error) -> io::Result<NntpResult> {
+    pub async fn on_write_error(&self, err: io::Error) {
         let stats = &self.stats;
         info!("Write error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
         stats.on_disconnect();
-        Ok(NntpResult::empty())
     }
 
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
-    pub async fn on_read_error(&self, err: io::Error) -> io::Result<NntpResult> {
+    pub async fn on_read_error(&self, err: io::Error) -> NntpResult {
         let stats = &self.stats;
         info!("Read error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
         stats.on_disconnect();
-        Ok(NntpResult::empty())
+        match err.kind() {
+            io::ErrorKind::TimedOut => NntpResult::text("400 Timeout - closing connection"),
+            _ => NntpResult::empty()
+        }
     }
 
     /// Called when QUIT is received
@@ -170,9 +173,9 @@ impl NntpSession {
     }
 
     /// Called on end-of-file.
-    pub async fn on_eof(&self) -> io::Result<NntpResult> {
+    pub async fn on_eof(&self) -> NntpResult {
         self.stats.on_disconnect();
-        Ok(NntpResult::empty())
+        NntpResult::empty()
     }
 
     /// Called when a line or block has been received.
@@ -192,8 +195,7 @@ impl NntpSession {
                     NntpState::Cmd => self.cmd(line).await,
                     _ => {
                         error!("got NntpInput::Line while in state {:?}", state);
-                        self.codec_control.set_mode(CodecMode::Quit);
-                        return Ok(NntpResult::text("400 internal state out of sync"));
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
                     }
                 }
             },
@@ -206,15 +208,14 @@ impl NntpSession {
                     NntpState::TakeThis => self.takethis_body(art).await,
                     NntpState::Cmd => {
                         error!("got NntpInput::Article while in state {:?}", self.state);
-                        self.codec_control.set_mode(CodecMode::Quit);
-                        return Ok(NntpResult::text("400 internal state out of sync"));
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
                     },
                 }
             },
             NntpInput::Block(_buf) => {
                 error!("got NntpInput::Block while in state {:?}", self.state);
                 self.codec_control.set_mode(CodecMode::Quit);
-                return Ok(NntpResult::text("400 internal state out of sync"))
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
             },
             _ => unreachable!(),
         }
