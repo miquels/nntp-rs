@@ -8,6 +8,7 @@ edition = "2018"
 debug = true
 
 [dependencies]
+arc-swap = "0.4.3"
 bytes = "0.4.12"
 chrono = "0.4.9"
 clap = "2.33.0"

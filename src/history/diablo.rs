@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 
 use crate::blocking::{BlockingPool, BlockingType, try_read_at};
@@ -21,7 +22,7 @@ use crate::util::MmapAtomicU32;
 /// Diablo compatible history file.
 #[derive(Debug)]
 pub struct DHistory {
-    inner:          Arc<DHistoryInner>,
+    inner:          ArcSwap<DHistoryInner>,
 }
 
 #[derive(Debug)]
@@ -35,6 +36,7 @@ pub struct DHistoryInner {
     data_offset:    u64,
     crc_xor_table:  &'static Vec<DHash>,
     blocking_pool:  BlockingPool,
+    invalidated:    bool,
 }
 
 #[derive(Debug)]
@@ -137,8 +139,9 @@ impl DHistory {
             data_offset:    data_offset,
             crc_xor_table:  &*CRC_XOR_TABLE,
             blocking_pool:  BlockingPool::new(bt, threads.unwrap_or(16)),
+            invalidated:    false,
         };
-        Ok(DHistory{ inner: Arc::new(inner) })
+        Ok(DHistory{ inner: ArcSwap::from(Arc::new(inner)) })
     }
 
     /// create a new history database, only if it doesn't exist yet.
@@ -178,7 +181,7 @@ impl DHistory {
     // History lookup.
     async fn do_lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
 
-        let inner = &self.inner;
+        let inner = self.inner.load();
 
         // Find first element of the chain.
         let hv = crc_hash(inner.crc_xor_table, msgid);
@@ -244,33 +247,56 @@ impl DHistory {
     }
 
     async fn do_store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+        // Call try_store in a loop. Normally it will succeed right  away, but it
+        // will return "NotConnected" if the history file got changed beneath us
+        // and then we try again.
+        for _ in 0 .. 1000 {
+            match self.try_store(msgid, he).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::NotConnected {
+                        return Err(e);
+                    }
+                },
+            }
+        }
+        // should never happen
+        Err(io::Error::new(io::ErrorKind::InvalidData, "history.store: failed to reload history file"))
+    }
 
-        let inner = self.inner.clone();
+    async fn try_store(&self, msgid: &[u8], he: &HistEnt) -> io::Result<()> {
+
+        let inner = self.inner.load();
+        let inner2 = inner.clone();
         let he = he.clone();
 
         let hv = crc_hash(inner.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^ hv.h2) & inner.hash_mask) as usize;
 
-        self.inner.blocking_pool.spawn_fn(move || {
-            let mut file = inner.wfile.lock();
+        inner.blocking_pool.spawn_fn(move || {
 
-            let next = inner.hash_buckets.load(bucket as usize);
+            let mut file = inner2.wfile.lock();
+            if inner2.invalidated {
+                Err(io::ErrorKind::NotConnected)?;
+            }
+
+            let next = inner2.hash_buckets.load(bucket as usize);
             let dhe = DHistEnt::new(&he, hv, next);
 
             // get the current file size.
             let mut pos = file.seek(io::SeekFrom::End(0))?;
             // sanity check.
-            if pos < inner.data_offset {
+            if pos < inner2.data_offset {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt dhistory file"));
             }
 
             // calculate hashtable index and write pos.
-            pos -= inner.data_offset;
+            pos -= inner2.data_offset;
             let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
-            let pos = idx * DHISTENT_SIZE as u64 + inner.data_offset;
+            let pos = idx * DHISTENT_SIZE as u64 + inner2.data_offset;
 
-            write_dhistent_at(&inner.path, &mut *file, pos, dhe)?;
-            inner.hash_buckets.store(bucket, idx as u32);
+            write_dhistent_at(&inner2.path, &mut *file, pos, dhe)?;
+            inner2.hash_buckets.store(bucket, idx as u32);
 
             Ok(())
         }).await
