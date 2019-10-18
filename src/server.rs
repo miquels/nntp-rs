@@ -157,8 +157,6 @@ impl Server {
             let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
             let fdno = socket.as_raw_fd() as u32;
             let codec = NntpCodec::new(socket);
-            let control = codec.control();
-            let (mut writer, mut reader) = codec.split();
 
             let stats = SessionStats{
                 hostname:   peer.to_string(),
@@ -169,10 +167,10 @@ impl Server {
             };
 
             // build an nntp session.
-            let mut session = NntpSession::new(peer, control.clone(), self.clone(), stats);
+            let mut session = NntpSession::new(peer, codec, self.clone(), stats);
 
             let task = async move {
-                while let Some(result) = reader.next().await {
+                while let Some(result) = session.codec.next().await {
                     let response = match result {
                         Err(e) => session.on_read_error(e).await,
                         Ok(input) => match input {
@@ -188,7 +186,7 @@ impl Server {
                             }
                         }
                     };
-                    if let Err(e) = writer.send(response.data).await {
+                    if let Err(e) = session.codec.send(response.data).await {
                         session.on_write_error(e).await;
                         break;
                     }

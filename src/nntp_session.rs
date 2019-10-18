@@ -14,7 +14,7 @@ use crate::diag::{SessionStats, Stats};
 use crate::errors::*;
 use crate::logger::{self, Logger};
 use crate::newsfeeds::{NewsFeeds,NewsPeer};
-use crate::nntp_codec::{CodecMode, NntpCodecControl,NntpInput};
+use crate::nntp_codec::{NntpCodec, CodecMode, NntpInput};
 use crate::history::{HistEnt,HistError,HistStatus};
 use crate::spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
 use crate::util::{self,HashFeed,MatchList,MatchResult};
@@ -30,7 +30,7 @@ pub enum NntpState {
 
 pub struct NntpSession {
     state:          NntpState,
-    codec_control:  NntpCodecControl,
+    pub codec:      NntpCodec,
     parser:         CmdParser,
     server:         Server,
     remote:         SocketAddr,
@@ -79,13 +79,13 @@ enum ArtAccept {
 }
 
 impl NntpSession {
-    pub fn new(peer: SocketAddr, control: NntpCodecControl, server: Server, stats: SessionStats) -> NntpSession {
+    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: SessionStats) -> NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let logger = logger::get_incoming_logger();
         NntpSession {
             state:          NntpState::Cmd,
-            codec_control:  control,
+            codec:          codec,
             parser:         CmdParser::new(),
             server:         server,
             remote:         peer,
@@ -112,7 +112,7 @@ impl NntpSession {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
-                self.codec_control.quit();
+                self.codec.quit();
                 info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
                 let msg = format!("502 permission denied to {}", remote); 
                 return NntpResult::text(&msg);
@@ -124,7 +124,7 @@ impl NntpSession {
         let count = self.server.add_connection(&peer.label);
         self.active = true;
         if count > peer.maxconnect as usize && peer.maxconnect > 0 {
-            self.codec_control.quit();
+            self.codec.quit();
             info!("Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
                   peer.label, remote, count, peer.maxconnect);
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
@@ -157,8 +157,8 @@ impl NntpSession {
 
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
-    pub async fn on_read_error(&self, err: io::Error) -> NntpResult {
-        self.codec_control.quit();
+    pub async fn on_read_error(&mut self, err: io::Error) -> NntpResult {
+        self.codec.quit();
         let stats = &self.stats;
         info!("Read error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
         stats.on_disconnect();
@@ -170,8 +170,8 @@ impl NntpSession {
 
     /// Called when we got an error handling the command. Could be anything-
     /// failure writing an article, history db corrupt, etc.
-    pub async fn on_generic_error(&self, err: io::Error) -> NntpResult {
-        self.codec_control.quit();
+    pub async fn on_generic_error(&mut self, err: io::Error) -> NntpResult {
+        self.codec.quit();
         let stats = &self.stats;
         info!("Error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
         stats.on_disconnect();
@@ -211,7 +211,7 @@ impl NntpSession {
                 }
             },
             NntpInput::Article(art) => {
-                self.codec_control.set_mode(CodecMode::ReadLine);
+                self.codec.set_mode(CodecMode::ReadLine);
                 let state = mem::replace(&mut self.state, NntpState::Cmd);
                 match state {
                     NntpState::Post => self.post_body(art).await,
@@ -225,7 +225,7 @@ impl NntpSession {
             },
             NntpInput::Block(_buf) => {
                 error!("got NntpInput::Block while in state {:?}", self.state);
-                self.codec_control.set_mode(CodecMode::Quit);
+                self.codec.set_mode(CodecMode::Quit);
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
             },
             _ => unreachable!(),
@@ -346,8 +346,8 @@ impl NntpSession {
                     },
                 };
                 if r == ok {
-                    self.codec_control.set_msgid(args[0]);
-                    self.codec_control.set_mode(CodecMode::ReadArticle);
+                    self.codec.set_msgid(args[0]);
+                    self.codec.set_mode(CodecMode::ReadArticle);
                 }
                 return Ok(NntpResult::text(r));
             },
@@ -377,7 +377,7 @@ impl NntpSession {
                 return Ok(NntpResult::text("500 Not implemented"));
             },
             Cmd::Quit => {
-                self.codec_control.quit();
+                self.codec.quit();
                 self.on_quit();
                 return Ok(NntpResult::text("205 Bye"));
             },
@@ -388,8 +388,8 @@ impl NntpSession {
                     self.stats.inc(Stats::RefBadMsgId);
                     return Ok(NntpResult::text(&format!("439 {} Bad Message-ID", args[0])));
                 }
-                self.codec_control.set_mode(CodecMode::ReadArticle);
-                self.codec_control.set_msgid(args[0]);
+                self.codec.set_mode(CodecMode::ReadArticle);
+                self.codec.set_msgid(args[0]);
                 self.state = NntpState::TakeThis;
                 return Ok(NntpResult::empty());
             },

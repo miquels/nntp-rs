@@ -1,8 +1,6 @@
 use std::io;
 use std::net::Shutdown;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -13,7 +11,6 @@ use crate::util::HashFeed;
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, Sink};
 use memchr::memchr;
-use parking_lot::Mutex;
 use tokio::prelude::*;
 use tokio::net::TcpStream;
 use tokio::timer::{self, Delay};
@@ -35,33 +32,19 @@ enum State {
 }
 
 /// Reading mode.
-#[derive(Debug,PartialEq,Eq)]
+#[derive(Debug,PartialEq,Eq,Clone)]
 pub enum CodecMode {
     /// Initial mode
-    Connect     = 1,
+    Connect,
     /// in "read line" mode.
-    ReadLine    = 2,
+    ReadLine,
     /// in "read multiline block" mode
-    ReadBlock   = 3,
+    ReadBlock,
     /// in "read article" mode
-    ReadArticle = 4,
+    ReadArticle,
     /// at next read, return quit.
-    Quit        = 5,
+    Quit,
 }
-
-impl From<usize> for CodecMode {
-    fn from(value: usize) -> Self {
-        match value {
-            1 => CodecMode::Connect,
-            2 => CodecMode::ReadLine,
-            3 => CodecMode::ReadBlock,
-            4 => CodecMode::ReadArticle,
-            5 => CodecMode::Quit,
-            _ => unimplemented!(),
-        }
-    }
-}
-
 
 /// Stream object.
 pub enum NntpInput {
@@ -87,17 +70,11 @@ pub struct NntpCodec {
     rd_line_start:      usize,
     rd_reserve_size:    usize,
     wr:		            Bytes,
-    control:            NntpCodecControl,
     arttype_scanner:    ArtTypeScanner,
     wr_timeout:         Delay,
     rd_timeout:         Delay,
-}
-
-/// Changes the behaviour of the codec.
-#[derive(Clone)]
-pub struct NntpCodecControl {
-    rd_mode:        Arc<AtomicUsize>,
-    msgid:          Arc<Mutex<Option<String>>>,
+    rd_mode:            CodecMode,
+    msgid:              Option<String>,
 }
 
 impl NntpCodec {
@@ -113,15 +90,12 @@ impl NntpCodec {
             rd_reserve_size:    0,
             rd_state:           State::Lf1Seen,
             rd_line_start:      0,
-            control:            NntpCodecControl::new(),
             arttype_scanner:    ArtTypeScanner::new(),
             rd_timeout:         timer::delay_for(Duration::new(INITIAL_TIMEOUT, 0)),
             wr_timeout:         timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
+            rd_mode:            CodecMode::Connect,
+            msgid:              None,
         }
-    }
-
-    pub fn control(&self) -> NntpCodecControl {
-        self.control.clone()
     }
 
     // fill the read buffer as much as possible.
@@ -272,7 +246,7 @@ impl NntpCodec {
     fn read_article(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
         match self.read_block(true) {
             Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
-                let msgid = self.control.get_msgid();
+                let msgid = self.get_msgid();
                 let article = Article{
                     hash:       HashFeed::hash_str(&msgid),
                     msgid:      msgid,
@@ -355,35 +329,25 @@ impl NntpCodec {
         self.socket.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
 	}
-}
 
-impl NntpCodecControl {
-
-    pub fn new() -> NntpCodecControl {
-        NntpCodecControl {
-            rd_mode:    Arc::new(AtomicUsize::new(CodecMode::Connect as usize)),
-            msgid:      Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub fn set_mode(&self, mode: CodecMode) {
-        self.rd_mode.store(mode as usize, Ordering::SeqCst);
+    pub fn set_mode(&mut self, mode: CodecMode) {
+        self.rd_mode = mode.clone();
     }
 
     pub fn get_mode(&self) -> CodecMode {
-        CodecMode::from(self.rd_mode.load(Ordering::SeqCst))
+        self.rd_mode.clone()
     }
 
-    pub fn set_msgid(&self, msgid: &str) {
-        *self.msgid.lock() = Some(msgid.to_string())
+    pub fn set_msgid(&mut self, msgid: impl Into<String>) {
+        self.msgid = Some(msgid.into());
     }
 
-    pub fn get_msgid(&self) -> String {
-        self.msgid.lock().take().unwrap_or("".to_string())
+    pub fn get_msgid(&mut self) -> String {
+        self.msgid.take().unwrap_or("".to_string())
     }
 
-    pub fn quit(&self) {
-        self.rd_mode.store(CodecMode::Quit as usize, Ordering::SeqCst);
+    pub fn quit(&mut self) {
+        self.rd_mode = CodecMode::Quit;
     }
 }
 
@@ -399,10 +363,10 @@ impl Stream for NntpCodec {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
 
-        let rd_mode = self.control.get_mode();
+        let rd_mode = self.get_mode();
         match rd_mode {
             CodecMode::Connect => {
-                self.control.set_mode(CodecMode::ReadLine);
+                self.set_mode(CodecMode::ReadLine);
                 return Poll::Ready(Some(Ok(NntpInput::Connect)));
             },
             CodecMode::Quit => return Poll::Ready(None),
@@ -464,7 +428,7 @@ impl Stream for NntpCodec {
             Poll::Pending => Poll::Pending,
             Poll::Ready(()) => {
                 let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
-                self.control.quit();
+                self.quit();
                 Poll::Ready(Some(err))
             },
         }
