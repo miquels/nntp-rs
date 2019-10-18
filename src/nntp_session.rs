@@ -158,6 +158,7 @@ impl NntpSession {
     /// Called when we got an error reading from the socket.
     /// Log an error, clean up, and exit.
     pub async fn on_read_error(&self, err: io::Error) -> NntpResult {
+        self.codec_control.quit();
         let stats = &self.stats;
         info!("Read error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
         stats.on_disconnect();
@@ -165,6 +166,16 @@ impl NntpSession {
             io::ErrorKind::TimedOut => NntpResult::text("400 Timeout - closing connection"),
             _ => NntpResult::empty()
         }
+    }
+
+    /// Called when we got an error handling the command. Could be anything-
+    /// failure writing an article, history db corrupt, etc.
+    pub async fn on_generic_error(&self, err: io::Error) -> NntpResult {
+        self.codec_control.quit();
+        let stats = &self.stats;
+        info!("Error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        stats.on_disconnect();
+        NntpResult::text(format!("400 {}", err))
     }
 
     /// Called when QUIT is received
@@ -550,13 +561,10 @@ impl NntpSession {
                 };
                 match history.store_commit(msgid, he).await {
                     Err(e) => {
-                        // XXX FIXME do not map I/O errors to reject; the
-                        // caller of this future must do that. It should
-                        // probably return a 400 error and close the connection.
                         error!("received_article {}: write: {}", msgid, e);
                         self.stats.art_error(&art, &ArtError::IOError);
                         history.store_rollback(msgid);
-                        Ok(ArtAccept::Reject)
+                        Err(e)
                     },
                     Ok(_) => {
                         let peers = &self.newsfeeds.peers;
