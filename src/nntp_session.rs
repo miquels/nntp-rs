@@ -573,6 +573,12 @@ impl NntpSession {
     // Note: modifies/updates the Path: header.
     fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers,BytesMut,Vec<u32>)> {
 
+        // Check that the article has a minimum size. Sometimes a peer is offering
+        // you empty articles because they no longer exist on their spool.
+        if art.data.len() < 80 {
+            return Err(ArtError::TooSmall);
+        }
+
         let mut parser = HeadersParser::new();
         let buffer = mem::replace(&mut art.data, BytesMut::new());
         match parser.parse(&buffer, false, true) {
