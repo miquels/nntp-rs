@@ -23,6 +23,8 @@ use crate::util::MmapAtomicU32;
 #[derive(Debug)]
 pub struct DHistory {
     inner:          ArcSwap<DHistoryInner>,
+    crc_xor_table:  &'static Vec<DHash>,
+    blocking_pool:  BlockingPool,
 }
 
 #[derive(Debug)]
@@ -34,8 +36,6 @@ pub struct DHistoryInner {
     hash_size:      u32,
     hash_mask:      u32,
     data_offset:    u64,
-    crc_xor_table:  &'static Vec<DHash>,
-    blocking_pool:  BlockingPool,
     invalidated:    bool,
 }
 
@@ -137,11 +137,13 @@ impl DHistory {
             hash_size:      dhh.hash_size,
             hash_mask:      dhh.hash_size - 1,
             data_offset:    data_offset,
-            crc_xor_table:  &*CRC_XOR_TABLE,
-            blocking_pool:  BlockingPool::new(bt, threads.unwrap_or(16)),
             invalidated:    false,
         };
-        Ok(DHistory{ inner: ArcSwap::from(Arc::new(inner)) })
+        Ok(DHistory{
+            inner:          ArcSwap::from(Arc::new(inner)),
+            blocking_pool:  BlockingPool::new(bt, threads.unwrap_or(16)),
+            crc_xor_table:  &*CRC_XOR_TABLE,
+        })
     }
 
     /// create a new history database, only if it doesn't exist yet.
@@ -184,7 +186,7 @@ impl DHistory {
         let inner = self.inner.load();
 
         // Find first element of the chain.
-        let hv = crc_hash(inner.crc_xor_table, msgid);
+        let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^hv.h2) & inner.hash_mask) as u64;
         let idx = inner.hash_buckets.load(bucket as usize);
 
@@ -196,7 +198,7 @@ impl DHistory {
                 // failed at 'idx' with EWOULDBLOCK, continue with threadpool.
                 let inner2 = inner.clone();
                 let msgid = msgid.to_vec();
-                inner.blocking_pool.spawn_fn(move || {
+                self.blocking_pool.spawn_fn(move || {
                     inner2.walk_chain(idx, hv, msgid, read_dhistent_at)
                 }).await
             },
@@ -270,10 +272,10 @@ impl DHistory {
         let inner2 = inner.clone();
         let he = he.clone();
 
-        let hv = crc_hash(inner.crc_xor_table, msgid);
+        let hv = crc_hash(self.crc_xor_table, msgid);
         let bucket = ((hv.h1 ^ hv.h2) & inner.hash_mask) as usize;
 
-        inner.blocking_pool.spawn_fn(move || {
+        self.blocking_pool.spawn_fn(move || {
 
             let mut file = inner2.wfile.lock();
             if inner2.invalidated {
