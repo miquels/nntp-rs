@@ -216,14 +216,15 @@ impl SessionStats {
             &ArtError::BareCR             => Stats::RejBareCR,
         };
         self.inc(rej);
-        self.inc(Stats::Received);
         self.add(Stats::RejectedBytes, art.len as u64);
+        self.inc(Stats::Received);
+        self.add(Stats::ReceivedBytes, art.len as u64);
     }
 
     pub fn art_accepted(&mut self, art: &Article) {
-        self.inc(Stats::Received);
         self.inc(Stats::Accepted);
         self.add(Stats::AcceptedBytes, art.len as u64);
+        self.inc(Stats::Received);
         self.add(Stats::ReceivedBytes, art.len as u64);
     }
 }
