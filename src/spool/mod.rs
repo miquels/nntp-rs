@@ -330,6 +330,11 @@ impl Spool {
         })
     }
 
+    pub fn get_oldest(&self) -> HashMap<u8, u64> {
+        // XXX FIXME implement!
+        HashMap::new()
+    }
+
     pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> Result<BytesMut, io::Error> {
         let inner = self.inner.clone();
         self.pool.spawn_fn(move || {
