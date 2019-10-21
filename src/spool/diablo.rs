@@ -7,7 +7,7 @@ use std::mem;
 use std::path::{Path,PathBuf};
 
 use std::fmt::Debug;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
 use bytes::{BufMut,BytesMut};
 use libc;
@@ -450,6 +450,40 @@ impl DSpool {
             token:          t,
         })
     }
+
+    // Get a list of D.xxxxxxxx directories, and sort them. Then find the oldest
+    // non-empty directory, and return the xxxxxxxx part as a timestamp.
+    fn do_get_oldest(&self) -> io::Result<Option<u64>> {
+        let d = match fs::read_dir(&self.path) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("get_oldest({:?}): {}", self.path, e);
+                return Err(e);
+            },
+        };
+        let d = d
+            .filter_map(|r| r.ok())
+            .filter_map(|r| r.file_name().into_string().ok())
+            .filter(|f| f.starts_with("D.") && f.len() == 10);
+        let mut files : Vec<_> = d.collect();
+        files.sort();
+        for file in &files {
+            let when = match u64::from_str_radix(&file[2..], 16) {
+                Ok(w) => w * 60,
+                Err(_) => continue,
+            };
+            let mut path = self.path.clone();
+            path.push(file);
+            if let Ok(meta) = fs::metadata(&path) {
+                // skip if directory is emtpy.
+                if meta.nlink() != 2 {
+                    return Ok(Some(when));
+                }
+            }
+        }
+        warn!("get_oldest({:?}): no spooldirs - skipping history expire", self.path);
+        Ok(None)
+    }
 }
 
 impl SpoolBackend for DSpool {
@@ -468,6 +502,10 @@ impl SpoolBackend for DSpool {
 
     fn get_maxsize(&self) -> u64 {
         self.maxsize
+    }
+
+    fn get_oldest(&self) -> io::Result<Option<u64>> {
+        self.do_get_oldest()
     }
 }
 

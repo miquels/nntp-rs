@@ -45,6 +45,9 @@ pub trait SpoolBackend: Send + Sync {
 
     /// Get the maximum size of this spool.
     fn get_maxsize(&self) -> u64;
+
+    /// Get the timestamp of the oldest article.
+    fn get_oldest(&self) -> io::Result<Option<u64>>;
 }
 
 /// Backend storage, e.g. Backend::Diablo, or Backend::Cyclic.
@@ -331,8 +334,13 @@ impl Spool {
     }
 
     pub fn get_oldest(&self) -> HashMap<u8, u64> {
-        // XXX FIXME implement!
-        HashMap::new()
+        let mut res = HashMap::new();
+        for (s, b) in &self.inner.spool {
+            if let Ok(Some(oldest)) = b.backend.get_oldest() {
+                res.insert(*s, oldest);
+            }
+        }
+        res
     }
 
     pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, mut buf: BytesMut) -> Result<BytesMut, io::Error> {
