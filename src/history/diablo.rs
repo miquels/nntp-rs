@@ -19,12 +19,12 @@ use crate::history::{HistBackend,HistEnt,HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
 use crate::util::{self, MmapAtomicU32};
+use crate::util::DHash;
 
 /// Diablo compatible history file.
 #[derive(Debug)]
 pub struct DHistory {
     inner:          ArcSwap<DHistoryInner>,
-    crc_xor_table:  &'static Vec<DHash>,
     blocking_pool:  BlockingPool,
     blocking_type:  Option<BlockingType>,
     num_threads:    Option<usize>,
@@ -63,13 +63,6 @@ const DHISTHEAD_VERSION2 : u16 = 2;
 #[allow(dead_code)]
 const DHISTHEAD_DEADMAGIC : u32 = 0xDEADF5E6;
 
-#[derive(Debug, Default, PartialEq, Clone)]
-#[repr(C)]
-struct DHash {
-    h1:     u32,
-    h2:     u32,
-}
-
 // NOTE: "exp" is encoded as:
 // - lower 8 bits: spool + 100
 // - bits 9-12: storage type (0x0 == diablo)
@@ -97,10 +90,6 @@ struct DHistEnt {
 }
 const DHISTENT_SIZE : usize = 28;
 
-lazy_static! {
-        static ref CRC_XOR_TABLE: Vec<DHash> = crc_init();
-}
-
 impl DHistory {
 
     /// open existing history database
@@ -110,7 +99,6 @@ impl DHistory {
         let inner = DHistoryInner::open(path)?;
         Ok(DHistory{
             inner:          ArcSwap::from(Arc::new(inner)),
-            crc_xor_table:  &*CRC_XOR_TABLE,
             blocking_type:  bt.clone(),
             num_threads:    threads.clone(),
             blocking_pool:  BlockingPool::new(bt, threads.unwrap_or(16)),
@@ -172,7 +160,7 @@ impl DHistory {
         let inner = self.inner.load();
 
         // Find first element of the chain.
-        let hv = crc_hash(self.crc_xor_table, msgid);
+        let hv = DHash::hash(msgid);
         let bucket = ((hv.h1 ^hv.h2) & inner.hash_mask) as u64;
         let idx = inner.hash_buckets.load(bucket as usize);
 
@@ -241,7 +229,7 @@ impl DHistory {
 
         let inner = self.inner.load().clone();
 
-        let hv = crc_hash(self.crc_xor_table, msgid);
+        let hv = DHash::hash(msgid);
         let dhe = DHistEnt::new(he, hv, 0);
 
         self.blocking_pool.spawn_fn(move || {
@@ -767,54 +755,5 @@ impl DHistEnt {
             None
         }
     }
-}
-
-const CRC_POLY1 : u32 = 0x00600340;
-const CRC_POLY2 : u32 = 0x00F0D50B;
-const CRC_HINIT1 : u32 = 0xFAC432B1;
-const CRC_HINIT2 : u32 = 0x0CD5E44A;
-
-fn crc_init() -> Vec<DHash> {
-    let mut table = Vec::with_capacity(256);
-    for i in 0..256 {
-        let mut v = i as u32;
-        let mut hv = DHash{h1: 0, h2: 0};
-
-        for _ in 0..8 {
-            if (v & 0x80) != 0 {
-                hv.h1 ^= CRC_POLY1;
-                hv.h2 ^= CRC_POLY2;
-            }
-            hv.h2 = hv.h2 << 1;
-            if (hv.h1 & 0x80000000) != 0 {
-                hv.h2 |= 1;
-            }
-            hv.h1 <<= 1;
-            v <<= 1;
-        }
-        table.push(hv);
-    }
-    table
-}
-
-fn crc_hash(crc_xor_table: &Vec<DHash>, msgid: &[u8]) -> DHash {
-	let mut hv = DHash{ h1: CRC_HINIT1, h2: CRC_HINIT2 };
-    for b in msgid {
-        let i = ((hv.h1 >> 24) & 0xff) as usize;
-        hv.h1 = (hv.h1 << 8) ^ (hv.h2 >> 24) ^ crc_xor_table[i].h1;
-        hv.h2 = (hv.h2 << 8) ^ (*b as u32) ^ crc_xor_table[i].h2;
-    }
-    // Note from the author of the diablo implementation lib/hash.c :
-    // Fold the generated CRC.  Note, this is buggy but it is too late
-    // for me to change it now.  I should have XOR'd the 1 in, not OR'd
-    // it when folding the bits.
-    if (hv.h1 & 0x80000000) != 0 {
-        hv.h1 = (hv.h1 & 0x7FFFFFFF) | 1;
-    }
-    if (hv.h2 & 0x80000000) != 0 {
-        hv.h2 = (hv.h2 & 0x7FFFFFFF) | 1;
-    }
-    hv.h1 |= 0x80000000;
-    hv
 }
 
