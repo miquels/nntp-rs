@@ -269,19 +269,18 @@ impl NntpCodec {
         }
     }
 
-    fn nntp_sink_poll_ready(&mut self, cx: &mut Context, mut flush: bool) -> Poll<Result<(), io::Error>> {
-        trace!("flushing buffer");
+    fn nntp_sink_poll_ready(&mut self, cx: &mut Context, flush: bool) -> Poll<Result<(), io::Error>> {
 
         while !self.wr.is_empty() {
             trace!("writing; remaining={}", self.wr.len());
 
-            let socket = Pin::new(&mut self.socket);
+            let socket = &mut self.socket;
+            pin_utils::pin_mut!(socket);
             match socket.poll_write(cx, &self.wr) {
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
-                        "failed to
-                                          write buffer to socket",
+                        "failed to write buffer to socket",
                     )));
                 },
                 Poll::Ready(Ok(n)) => {
@@ -290,26 +289,28 @@ impl NntpCodec {
                 },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
-                    flush = false;
                     break;
                 },
             }
         }
 
-        // Flush if needed.
-        if flush {
-            let socket = &mut self.socket;
-            pin_utils::pin_mut!(socket);
-            match socket.poll_flush(cx) {
-                Poll::Ready(Ok(_)) => {
-                    self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
-                    return Poll::Ready(Ok(()));
-                },
-                Poll::Ready(Err(e)) => {
-                    self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
-                    return Poll::Ready(Err(e));
-                },
-                Poll::Pending => {},
+        if self.wr.is_empty() {
+            if flush {
+                let socket = &mut self.socket;
+                pin_utils::pin_mut!(socket);
+                match socket.poll_flush(cx) {
+                    Poll::Ready(Ok(_)) => {
+                        self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
+                        return Poll::Ready(Ok(()));
+                    },
+                    Poll::Ready(Err(e)) => {
+                        self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
+                        return Poll::Ready(Err(e));
+                    },
+                    Poll::Pending => {},
+                }
+            } else {
+                return Poll::Ready(Ok(()));
             }
         }
 
@@ -448,18 +449,22 @@ impl Sink<Bytes> for NntpCodec {
     type Error = io::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        trace!("sink: poll_ready");
         self.nntp_sink_poll_ready(cx, false)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
+        trace!("sink: start_send");
         self.nntp_sink_start_send(item)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        trace!("sink: poll_flush");
         self.nntp_sink_poll_ready(cx, true)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+        trace!("sink: poll_close");
         self.nntp_sink_poll_close(cx)
     }
 }
