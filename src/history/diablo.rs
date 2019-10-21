@@ -30,6 +30,8 @@ pub struct DHistory {
     num_threads:    Option<usize>,
 }
 
+// Most of the (synchronous) work is done by methods of DHistoryInner.
+// The async methods of DHistory call them using a threadpool.
 #[derive(Debug)]
 struct DHistoryInner {
     path:           PathBuf,
@@ -41,12 +43,15 @@ struct DHistoryInner {
     data_offset:    u64,
 }
 
+// Internal file writer status.
 #[derive(Debug)]
 struct WFile {
+    wpos:           u64,
     file:           fs::File,
     invalidated:    bool,
 }
 
+// Header of the history file.
 #[derive(Debug)]
 #[repr(C)]
 struct DHistHead {
@@ -62,33 +67,6 @@ const DHISTHEAD_MAGIC : u32 = 0xA1B2C3D4;
 const DHISTHEAD_VERSION2 : u16 = 2;
 #[allow(dead_code)]
 const DHISTHEAD_DEADMAGIC : u32 = 0xDEADF5E6;
-
-// NOTE: "exp" is encoded as:
-// - lower 8 bits: spool + 100
-// - bits 9-12: storage type (0x0 == diablo)
-// - bits 12-15:
-//      BIT         NON-DIABLO  DIABLO
-//      0x1000      1           0
-//      0x2000      rejected    -
-//      0x4000      expired     iter == 0xffff ? rejected : expired
-//      0x8000      head-only   head-only
-//
-// If this is a diablo-spool entry, the fields are exactly what they say.
-// For other spool types, iter, boffset, bsize are just 10 bytes that
-// can be used for any encoding whatsoever.
-//
-#[derive(Debug, Default)]
-#[repr(C)]
-struct DHistEnt {
-    next:       u32,        // link to next entry
-    gmt:        u32,        // unixtime / 60
-    hv:         DHash,      // hash
-    iter:       u16,        // filename (B.04x)
-    exp:        u16,        // see above
-    boffset:    u32,        // article offset
-    bsize:      u32,        // article size
-}
-const DHISTENT_SIZE : usize = 28;
 
 impl DHistory {
 
@@ -240,7 +218,7 @@ impl DHistory {
             }
 
             // write it
-            inner.write_dhistent(&mut wfile.file, dhe)
+            inner.write_dhistent(&mut wfile, dhe)
 
         }).await
     }
@@ -307,6 +285,7 @@ impl DHistoryInner {
             path:           path.to_owned(),
             rfile:          f,
             wfile:          Mutex::new(WFile{
+                wpos:           meta.len(),
                 file:           w,
                 invalidated:    false,
             }),
@@ -352,27 +331,23 @@ impl DHistoryInner {
     }
 
     // add a DHistEnt to the history database.
-    fn write_dhistent(&self, file: &mut fs::File, mut dhe: DHistEnt) -> io::Result<()> {
+    fn write_dhistent(&self, wfile: &mut WFile, mut dhe: DHistEnt) -> io::Result<()> {
+        // calculate bucket.
         let bucket = ((dhe.hv.h1 ^ dhe.hv.h2) & self.hash_mask) as usize;
         dhe.next = self.hash_buckets.load(bucket as usize);
-
-        // get the current file size.
-        let mut pos = file.seek(io::SeekFrom::End(0))?;
-        // sanity check.
-        if pos < self.data_offset {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "corrupt dhistory file"));
-        }
 
         // Calculate hashtable index and write pos.
         // Align it at a multiple of DHISTENT_SIZE after data_offset.
         // Kind of paranoid, really.
+        let mut pos = wfile.wpos;
         pos -= self.data_offset;
         let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
         let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
 
-        // write at the end of the file.
+        // append to file.
         let buf : [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
-        file.write_at(&buf, pos)?;
+        wfile.file.write_at(&buf, pos)?;
+        wfile.wpos = pos + DHISTENT_SIZE as u64;
 
         // update hash index
         self.hash_buckets.store(bucket, idx as u32);
@@ -514,64 +489,32 @@ impl DHistoryInner {
     }
 }
 
-// helper
-fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
-    let mut buf = [0u8; DHISTHEAD_SIZE];
-    let n = file.read_at(&mut buf, pos)?;
-    if n != DHISTHEAD_SIZE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("read_dhisthead_at({}): short read ({})", pos, n)))
-    }
-    Ok(unsafe { mem::transmute(buf) })
+// NOTE: "exp" is encoded as:
+// - lower 8 bits: spool + 100
+// - bits 9-12: storage type (0x0 == diablo)
+// - bits 12-15:
+//      BIT         NON-DIABLO  DIABLO
+//      0x1000      1           0
+//      0x2000      rejected    -
+//      0x4000      expired     iter == 0xffff ? rejected : expired
+//      0x8000      head-only   head-only
+//
+// If this is a diablo-spool entry, the fields are exactly what they say.
+// For other spool types, iter, boffset, bsize are just 10 bytes that
+// can be used for any encoding whatsoever.
+//
+#[derive(Debug, Default)]
+#[repr(C)]
+struct DHistEnt {
+    next:       u32,        // link to next entry
+    gmt:        u32,        // unixtime / 60
+    hv:         DHash,      // hash
+    iter:       u16,        // filename (B.04x)
+    exp:        u16,        // see above
+    boffset:    u32,        // article offset
+    bsize:      u32,        // article size
 }
-
-// helper
-fn read_dhistent<F>(file: &mut F) -> io::Result<Option<DHistEnt>>
-    where
-        F: Read,
-{
-    let mut buf = [0u8; DHISTENT_SIZE];
-    let n = file.read(&mut buf)?;
-    if n == 0 {
-        return Ok(None);
-    }
-    if n != DHISTENT_SIZE {
-        return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                  format!("read_dhistent: short read: {} bytes", n)));
-    }
-    Ok(Some(unsafe { mem::transmute(buf) }))
-}
-
-// helper
-fn read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Result<DHistEnt> {
-    let mut buf = [0u8; DHISTENT_SIZE];
-    let n = file.read_at(&mut buf, pos)?;
-    if n != DHISTENT_SIZE {
-        let msg = if let Some(msgid) = msgid {
-            format!("read_dhistent_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)
-        } else {
-            format!("read_dhistent_at({}): short read ({})", pos, n)
-        };
-        return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
-    }
-    Ok(unsafe { mem::transmute(buf) })
-}
-
-// helper
-#[cfg(target_os = "linux")]
-fn try_read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Result<DHistEnt> {
-    let mut buf = [0u8; DHISTENT_SIZE];
-    let n = try_read_at(file, &mut buf, pos)?;
-    if n != DHISTENT_SIZE {
-        let msg = if let Some(msgid) = msgid {
-            format!("read_dhistent_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)
-        } else {
-            format!("read_dhistent_at({}): short read ({})", pos, n)
-        };
-        return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
-    }
-    Ok(unsafe { mem::transmute(buf) })
-}
+const DHISTENT_SIZE : usize = 28;
 
 impl DHistEnt {
 
@@ -755,5 +698,64 @@ impl DHistEnt {
             None
         }
     }
+}
+
+// helper
+fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
+    let mut buf = [0u8; DHISTHEAD_SIZE];
+    let n = file.read_at(&mut buf, pos)?;
+    if n != DHISTHEAD_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                  format!("read_dhisthead_at({}): short read ({})", pos, n)))
+    }
+    Ok(unsafe { mem::transmute(buf) })
+}
+
+// helper
+fn read_dhistent<F>(file: &mut F) -> io::Result<Option<DHistEnt>>
+    where
+        F: Read,
+{
+    let mut buf = [0u8; DHISTENT_SIZE];
+    let n = file.read(&mut buf)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if n != DHISTENT_SIZE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                                  format!("read_dhistent: short read: {} bytes", n)));
+    }
+    Ok(Some(unsafe { mem::transmute(buf) }))
+}
+
+// helper
+fn read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Result<DHistEnt> {
+    let mut buf = [0u8; DHISTENT_SIZE];
+    let n = file.read_at(&mut buf, pos)?;
+    if n != DHISTENT_SIZE {
+        let msg = if let Some(msgid) = msgid {
+            format!("read_dhistent_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)
+        } else {
+            format!("read_dhistent_at({}): short read ({})", pos, n)
+        };
+        return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
+    }
+    Ok(unsafe { mem::transmute(buf) })
+}
+
+// helper
+#[cfg(target_os = "linux")]
+fn try_read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Result<DHistEnt> {
+    let mut buf = [0u8; DHISTENT_SIZE];
+    let n = try_read_at(file, &mut buf, pos)?;
+    if n != DHISTENT_SIZE {
+        let msg = if let Some(msgid) = msgid {
+            format!("read_dhistent_at({}) for {:?}: short read ({})", pos, std::str::from_utf8(msgid), n)
+        } else {
+            format!("read_dhistent_at({}): short read ({})", pos, n)
+        };
+        return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
+    }
+    Ok(unsafe { mem::transmute(buf) })
 }
 
