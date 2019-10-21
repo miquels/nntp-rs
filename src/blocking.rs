@@ -43,10 +43,6 @@ impl BlockingPool {
             Some(BlockingType::Check) | None => BlockingType::Check,
         };
 
-        println!(
-            "XXX building new pool blocking_type: {:?}, max_threads: {}",
-            bt, max_threads
-        );
         BlockingPool {
             inner: Arc::new(InnerBlockingPool {
                 use_ownpool: AtomicUsize::new(bt as usize),
