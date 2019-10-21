@@ -1,5 +1,5 @@
+use libc::{self, gethostname};
 use std::ffi::CStr;
-use libc::{self,gethostname};
 
 /// Rust interface to the libc gethostname function.
 pub fn hostname() -> Option<String> {
@@ -14,4 +14,3 @@ pub fn hostname() -> Option<String> {
         Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
 }
-

@@ -1,6 +1,6 @@
+use serde::{self, Deserialize, Deserializer};
 use std::io;
 use std::time::Duration;
-use serde::{self,Deserialize, Deserializer};
 
 /// Parse size in B, K, KB, KiB, M, MB, MiB, G, GB, GiB.
 pub fn parse_size(s: &str) -> io::Result<u64> {
@@ -13,9 +13,13 @@ pub fn parse_size(s: &str) -> io::Result<u64> {
     let num = match num.parse::<u64>() {
         Ok(n) => n,
         Err(_) => {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("cannot parse {}", s)));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("cannot parse {}", s),
+            ));
         },
     };
+    #[rustfmt::skip]
     let r = match mul {
         "b" => num,
         "k" |
@@ -47,14 +51,24 @@ pub fn parse_duration(s: &str) -> io::Result<Duration> {
     };
     let num = match num.parse::<u64>() {
         Ok(n) => n,
-        Err(_) => return Err(io::Error::new(io::ErrorKind::Other, format!("cannot parse {}", s))),
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("cannot parse {}", s),
+            ))
+        },
     };
     let r = match mul {
         "s" => num,
         "m" => num * 60,
         "h" => num * 3600,
         "d" => num * 86400,
-        _ => return Err(io::Error::new(io::ErrorKind::Other, format!("cannot parse {}", s))),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("cannot parse {}", s),
+            ))
+        },
     };
     Ok(Duration::new(r, 0))
 }
@@ -67,7 +81,10 @@ pub fn parse_bool(s: &str) -> io::Result<bool> {
         "y" | "yes" | "t" | "true" | "1" => true,
         "n" | "no" | "f" | "false" | "0" => false,
         _ => {
-            return Err(io::Error::new(io::ErrorKind::Other, format!("cannot parse {}", s)));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("cannot parse {}", s),
+            ));
         },
     };
     Ok(r)
@@ -76,31 +93,27 @@ pub fn parse_bool(s: &str) -> io::Result<bool> {
 
 /// Serde helper, calls parse_size().
 pub fn deserialize_size<'de, D>(deserializer: D) -> Result<u64, D::Error>
-	where D: Deserializer<'de> {
-
+where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     parse_size(&s).map_err(serde::de::Error::custom)
 }
 
 /// Serde helper, calls parse_size().
 pub fn option_deserialize_size<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-	where D: Deserializer<'de> {
+where D: Deserializer<'de> {
     deserialize_size(deserializer).map(|s| Some(s))
 }
 
 /// Serde helper, calls parse_duration().
 pub fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-	where D: Deserializer<'de> {
-
+where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     parse_duration(&s).map_err(serde::de::Error::custom)
 }
 
 /// Serde helper, calls parse_bool().
 pub fn deserialize_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
-	where D: Deserializer<'de> {
-
+where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     parse_bool(&s).map_err(serde::de::Error::custom)
 }
-

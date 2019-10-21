@@ -16,9 +16,9 @@ use std::future::Future;
 use std::io;
 use std::path::Path;
 
-use crate::spool;
-use crate::blocking::BlockingType;
 use self::cache::HCache;
+use crate::blocking::BlockingType;
+use crate::spool;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
 const PRESTORE_MAX_AGE: u32 = 60;
@@ -26,34 +26,45 @@ const PRESTORE_MAX_AGE: u32 = 60;
 /// Functionality a backend history database needs to make available.
 pub trait HistBackend: Send + Sync {
     /// Look an entry up in the history database.
-    fn lookup<'a>(&'a self, msgid: &'a [u8]) -> Pin<Box<dyn Future<Output=io::Result<HistEnt>> + Send + 'a>>;
+    fn lookup<'a>(
+        &'a self,
+        msgid: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>>;
     /// Store an entry (an existing entry will be updated).
-    fn store<'a>(&'a self, msgid: &'a [u8], he: &'a HistEnt) -> Pin<Box<dyn Future<Output=io::Result<()>> + Send + 'a>>;
-    fn expire<'a>(&'a self, spool: &'a spool::Spool, remember: u64) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+    fn store<'a>(
+        &'a self,
+        msgid: &'a [u8],
+        he: &'a HistEnt,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+    fn expire<'a>(
+        &'a self,
+        spool: &'a spool::Spool,
+        remember: u64,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
 /// History database functionality.
 #[derive(Clone)]
 pub struct History {
-    inner:      Arc<HistoryInner>,
+    inner: Arc<HistoryInner>,
 }
 
 struct HistoryInner {
-    cache:          HCache,
-    backend:        Box<dyn HistBackend>,
+    cache:   HCache,
+    backend: Box<dyn HistBackend>,
 }
 
 /// One history entry.
 #[derive(Debug, Clone)]
 pub struct HistEnt {
     /// Present, Expired, etc.
-    pub status:     HistStatus,
+    pub status: HistStatus,
     /// Unixtime when article was received.
-    pub time:       u64,
+    pub time: u64,
     /// Whether this article was received via MODE HEADFEED.
-    pub head_only:  bool,
+    pub head_only: bool,
     /// Location in the article spool.
-    pub location:   Option<spool::ArtLoc>,
+    pub location: Option<spool::ArtLoc>,
 }
 
 /// Status of a history entry.
@@ -81,26 +92,25 @@ pub enum HistError {
 }
 
 impl History {
-
     /// Open history database.
-    pub fn open(tp: &str, path: impl AsRef<Path>, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<History> {
-        let h : Box<dyn HistBackend> = match tp {
-            "diablo" => {
-                Box::new(diablo::DHistory::open(path.as_ref(), threads, bt)?)
-            },
-            "memdb" => {
-                Box::new(memdb::MemDb::new())
-            },
-            s => {
-                Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))?
-            },
+    pub fn open(
+        tp: &str,
+        path: impl AsRef<Path>,
+        threads: Option<usize>,
+        bt: Option<BlockingType>,
+    ) -> io::Result<History>
+    {
+        let h: Box<dyn HistBackend> = match tp {
+            "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), threads, bt)?),
+            "memdb" => Box::new(memdb::MemDb::new()),
+            s => Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))?,
         };
 
-        Ok(History{
-            inner:  Arc::new(HistoryInner{
-                cache:          HCache::new(),
-                backend:        h,
-            })
+        Ok(History {
+            inner: Arc::new(HistoryInner {
+                cache:   HCache::new(),
+                backend: h,
+            }),
         })
     }
 
@@ -114,8 +124,10 @@ impl History {
                     if age > PRESTORE_MAX_AGE {
                         // This should never happen, but if it does, log it,
                         // and invalidate the entry.
-                        error!("cache_lookup: entry for {} in state HistStatus::Writing too old: {}s",
-                               msgid, age);
+                        error!(
+                            "cache_lookup: entry for {} in state HistStatus::Writing too old: {}s",
+                            msgid, age
+                        );
                         h.status = HistStatus::NotFound;
                     }
                     Some(h.status)
@@ -178,17 +190,17 @@ impl History {
     pub async fn store_begin(&self, msgid: &str) -> Result<(), HistError> {
         match self.do_check(msgid, HistStatus::Writing).await {
             Err(e) => Err(HistError::IoError(e)),
-            Ok(h) => match h {
-                None|
-                Some(HistStatus::NotFound) => Ok(()),
-                Some(s) => Err(HistError::Status(s)),
+            Ok(h) => {
+                match h {
+                    None | Some(HistStatus::NotFound) => Ok(()),
+                    Some(s) => Err(HistError::Status(s)),
+                }
             },
         }
     }
 
     // Function that does the actual work for check / store_begin.
     async fn do_check(&self, msgid: &str, what: HistStatus) -> Result<Option<HistStatus>, io::Error> {
-
         // First check the cache. HistStatus::NotFound means it WAS found in
         // the cache as negative entry, so we do not need to go check
         // the actual history db!
@@ -217,8 +229,7 @@ impl History {
                 // Not present. Try to put a tentative entry in the cache.
                 let mut partition = self.inner.cache.lock_partition(msgid);
                 match self.cache_lookup(&mut partition, msgid) {
-                    None|
-                    Some(HistStatus::NotFound) => {
+                    None | Some(HistStatus::NotFound) => {
                         partition.store_tentative(what);
                         None
                     },
@@ -233,7 +244,6 @@ impl History {
         };
         Ok(res)
     }
-
 
     /// Done writing to the spool. Update the cache-entry and write-through
     /// to the actual history database backend.
@@ -262,14 +272,14 @@ pub(crate) mod tests {
     //      RUST_LOG=nntp_rs_history=debug cargo test -- --nocapture
     //
     //  to enable debug logging.
+    use super::*;
+    use env_logger;
     use std::sync::Once;
     use std::time::SystemTime;
-    use env_logger;
-    use super::*;
 
     static START: Once = Once::new();
     pub(crate) fn logger_init() {
-        START.call_once(|| env_logger::init() );
+        START.call_once(|| env_logger::init());
     }
 
     #[test]
@@ -279,11 +289,14 @@ pub(crate) mod tests {
 
     async fn test_simple_async() -> Result<Option<HistEnt>, io::Error> {
         let h = History::open("memdb", "[memdb]", None).unwrap();
-        let he = HistEnt{
-            status:     HistStatus::Tentative,
-            time:       SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
-            head_only:  false,
-            location:   None,
+        let he = HistEnt {
+            status:    HistStatus::Tentative,
+            time:      SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            head_only: false,
+            location:  None,
         };
         let msgid = "<12345@abcde>";
         let res = h.store_begin(msgid).await;
@@ -309,5 +322,5 @@ pub(crate) mod tests {
         use futures::executor::block_on;
         logger_init();
         block_on(test_simple_async()).expect("future returned error");
-	}
+    }
 }

@@ -1,18 +1,18 @@
+use std::fs::File;
+use std::io;
+use std::io::prelude::*;
+use std::net::{AddrParseError, SocketAddr};
+use std::ops::Range;
+use std::str::FromStr;
 ///
 /// Configuration file reader and checker.
 ///
 use std::sync::Arc;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io;
-use std::net::{SocketAddr, AddrParseError};
-use std::ops::Range;
-use std::str::FromStr;
 
-use chrono::{self,Datelike};
-use core_affinity::{CoreId, get_core_ids};
+use chrono::{self, Datelike};
+use core_affinity::{get_core_ids, CoreId};
 use parking_lot::RwLock;
-use regex::{Captures,Regex};
+use regex::{Captures, Regex};
 use users::switch::{set_effective_gid, set_effective_uid};
 use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
@@ -31,6 +31,7 @@ lazy_static! {
 
 /// Toml config.
 #[derive(Deserialize, Debug)]
+#[rustfmt::skip]
 pub struct Config {
     pub server:     Server,
     #[serde(default,flatten)]
@@ -52,6 +53,7 @@ pub struct Config {
 
 /// Server config table in Toml config file.
 #[derive(Deserialize, Debug, Default)]
+#[rustfmt::skip]
 pub struct Server {
     #[serde(default)]
     pub hostname:       String,
@@ -67,6 +69,7 @@ pub struct Server {
 
 /// Paths.
 #[derive(Deserialize, Debug, Default)]
+#[rustfmt::skip]
 pub struct Paths {
     pub config:         String,
     pub spool:          String,
@@ -77,6 +80,7 @@ pub struct Paths {
 
 /// Config files.
 #[derive(Deserialize, Debug, Default)]
+#[rustfmt::skip]
 pub struct CfgFiles {
     pub dnewsfeeds:     String,
     pub dspool_ctl:     Option<String>,
@@ -85,6 +89,7 @@ pub struct CfgFiles {
 
 /// Logging.
 #[derive(Deserialize, Debug, Default)]
+#[rustfmt::skip]
 pub struct Logging {
     pub general:        Option<String>,
     pub incoming:       Option<String>,
@@ -92,6 +97,7 @@ pub struct Logging {
 
 /// Histfile config table in Toml config file.
 #[derive(Default,Deserialize, Debug)]
+#[rustfmt::skip]
 pub struct HistFile {
     pub file:       String,
     pub backend:    String,
@@ -100,6 +106,7 @@ pub struct HistFile {
 
 /// Multiple single-threaded executors.
 #[derive(Default,Deserialize)]
+#[rustfmt::skip]
 pub struct MultiSingle {
     pub threads:            Option<usize>,
     pub cores:              Option<String>,
@@ -110,6 +117,7 @@ pub struct MultiSingle {
 
 /// The (default) threadpool executor.
 #[derive(Default,Deserialize,Debug)]
+#[rustfmt::skip]
 pub struct ThreadPool {
     // can be "own_pool" or "separate_pool"
     pub blocking_on:        Option<String>,
@@ -119,8 +127,11 @@ pub struct ThreadPool {
 
 impl std::fmt::Debug for MultiSingle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MultiSingle {{ threads: {:?}, cores: {:?}, threads_per_core: {:?} }}",
-		    self.threads, self.cores, self.threads_per_core)
+        write!(
+            f,
+            "MultiSingle {{ threads: {:?}, cores: {:?}, threads_per_core: {:?} }}",
+            self.threads, self.cores, self.threads_per_core
+        )
     }
 }
 
@@ -132,8 +143,12 @@ pub fn read_config(name: &str) -> io::Result<Config> {
 
     let mut cfg: Config = match toml::from_str(&buffer) {
         Ok(v) => v,
-        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                            format!("{}: {}", name, e))),
+        Err(e) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {}", name, e),
+            ))
+        },
     };
 
     if cfg.server.hostname == "" {
@@ -148,8 +163,12 @@ pub fn read_config(name: &str) -> io::Result<Config> {
             match cfg.threadpool.blocking_on.as_ref().map(|s| s.as_str()) {
                 Some("own_pool") => cfg.threadpool.blocking_type = Some(BlockingType::OwnPool),
                 Some("separate_pool") => cfg.threadpool.blocking_type = Some(BlockingType::SeparatePool),
-                Some(b) => return Err(io::Error::new(io::ErrorKind::InvalidData,
-                                            format!("unknown blocking_on type: {}", b))),
+                Some(b) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unknown blocking_on type: {}", b),
+                    ))
+                },
                 None => {},
             }
         },
@@ -160,8 +179,8 @@ pub fn read_config(name: &str) -> io::Result<Config> {
     resolve_user_group(&mut cfg)?;
 
     // Check the [multisingle] config
-    check_multisingle(&mut cfg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData,
-                                            format!("multisingle: {}", e)))?;
+    check_multisingle(&mut cfg)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("multisingle: {}", e)))?;
 
     let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
     if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
@@ -176,7 +195,6 @@ pub fn read_config(name: &str) -> io::Result<Config> {
 }
 
 pub fn set_config(mut cfg: Config) -> Arc<Config> {
-
     if let Some(mut feeds) = cfg.newsfeeds.take() {
         // replace the NEWSFEEDS config.
         feeds.init_hostcache();
@@ -197,9 +215,10 @@ fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
     // lookup username and group.
     let (uid, ugid) = match user {
         Some(u) => {
-            let user = get_user_by_name(u).ok_or(
-                io::Error::new(io::ErrorKind::NotFound, format!("user {}: not found", u))
-            )?;
+            let user = get_user_by_name(u).ok_or(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("user {}: not found", u),
+            ))?;
             (Some(user.uid()), Some(user.primary_group_id()))
         },
         None => (None, None),
@@ -207,9 +226,10 @@ fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
     // lookup group if specified separately.
     let gid = match group {
         Some(g) => {
-            let group = get_group_by_name(g).ok_or(
-                io::Error::new(io::ErrorKind::NotFound, format!("group {}: not found", g))
-            )?;
+            let group = get_group_by_name(g).ok_or(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("group {}: not found", g),
+            ))?;
             Some(group.gid())
         },
         None => ugid,
@@ -236,7 +256,10 @@ pub fn switch_uids(cfg: &Config) -> io::Result<()> {
     }
     // switch to root.
     if let Err(e) = set_effective_uid(0) {
-        return Err(io::Error::new(e.kind(), "change user/group: insufficient priviliges"));
+        return Err(io::Error::new(
+            e.kind(),
+            "change user/group: insufficient priviliges",
+        ));
     }
     // this will panic on fail, but that's what we want.
     set_effective_gid(gid.unwrap_or(egid)).unwrap();
@@ -251,17 +274,18 @@ pub fn expand_path(paths: &Paths, path: &str) -> String {
     re.replace_all(path, |caps: &Captures| {
         match &caps[1] {
             "${config}" => paths.config.clone(),
-            "${spool}"  => paths.spool.clone(),
-            "${log}"    => paths.log.clone(),
-            "${db}"     => paths.db.clone(),
-            "${run}"    => paths.run.clone(),
-            "${date}"   => {
+            "${spool}" => paths.spool.clone(),
+            "${log}" => paths.log.clone(),
+            "${db}" => paths.db.clone(),
+            "${run}" => paths.run.clone(),
+            "${date}" => {
                 let now = chrono::offset::Local::now();
                 format!("{:04}{:02}{:02}", now.year(), now.month(), now.day())
             },
-            p           => p.to_string(),
+            p => p.to_string(),
         }
-    }).to_string()
+    })
+    .to_string()
 }
 
 pub fn expand_path_opt(paths: &Paths, path: &Option<String>) -> Option<String> {
@@ -291,12 +315,10 @@ fn err_invalid2(s: &str, e: impl Into<String>) -> io::Error {
 
 // parse a string of *inclusive* ranges into a Vec<Range<usize>>.
 fn parse_ranges(s: &str) -> io::Result<Vec<Range<usize>>> {
-
     let mut res = Vec::new();
 
     // split string at comma.
     for r in s.split(',').map(|s| s.trim()) {
-
         // then split at '-'
         let mut x = r.splitn(2, '-');
 
@@ -315,20 +337,25 @@ fn parse_ranges(s: &str) -> io::Result<Vec<Range<usize>>> {
             return Err(err_invalid("invalid range"));
         }
 
-        res.push(Range{ start: b, end: e + 1 });
+        res.push(Range {
+            start: b,
+            end:   e + 1,
+        });
     }
     Ok(res)
 }
 
 fn parse_cores(s: &str) -> io::Result<Vec<CoreId>> {
-
     // first put all cores into a vector of Option<CoreId>.
     let mut cores = match get_core_ids() {
         Some(c) => c.into_iter().map(|c| Some(c)).collect::<Vec<_>>(),
         None => return Err(err_invalid("cannot get core ids from kernel")),
     };
     let ranges = if s.eq_ignore_ascii_case("all") {
-        vec![Range{ start: 0usize, end: cores.len() - 1 }]
+        vec![Range {
+            start: 0usize,
+            end:   cores.len() - 1,
+        }]
     } else {
         parse_ranges(s).map_err(|e| err_invalid2(s, e.to_string()))?
     };
@@ -336,7 +363,10 @@ fn parse_cores(s: &str) -> io::Result<Vec<CoreId>> {
 
     for range in ranges.into_iter() {
         if range.end > cores.len() {
-            return Err(err_invalid2(s, format!("id out of range [0..{})", cores.len() - 1)));
+            return Err(err_invalid2(
+                s,
+                format!("id out of range [0..{})", cores.len() - 1),
+            ));
         }
         for i in range {
             // move from the cores vec into the result vec.
@@ -400,14 +430,15 @@ pub fn parse_listener(s: impl Into<String>) -> Result<SocketAddr, AddrParseError
 
 pub fn parse_listeners(l: &Option<StringOrVec>) -> io::Result<Vec<SocketAddr>> {
     let v = match l.as_ref() {
-        Some(&StringOrVec::String(ref s)) => vec![ s.to_string() ],
+        Some(&StringOrVec::String(ref s)) => vec![s.to_string()],
         Some(&StringOrVec::Vec(ref v)) => v.to_vec(),
-        None => vec![ ":119".to_string() ],
+        None => vec![":119".to_string()],
     };
     let mut res = Vec::new();
     for l in v.iter().map(|s| s.as_str()) {
         if l.starts_with(":") {
-            let p = (&l[1..]).parse::<u16>()
+            let p = (&l[1..])
+                .parse::<u16>()
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}: {}", l, e)))?;
             res.push(parse_listener(format!("0.0.0.0:{}", p)).unwrap());
             res.push(parse_listener(format!("[::]:{}", p)).unwrap());
@@ -423,4 +454,3 @@ pub fn parse_listeners(l: &Option<StringOrVec>) -> io::Result<Vec<SocketAddr>> {
     }
     Ok(res)
 }
-

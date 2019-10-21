@@ -5,36 +5,36 @@ use std::default::Default;
 use std::fmt;
 use std::io;
 use std::net::IpAddr;
-use std::sync::{Arc,mpsc};
-use std::time::Duration;
+use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Duration;
 
-use dns_lookup::{self,AddrInfoHints,SockType,LookupErrorKind};
 use crate::util;
+use dns_lookup::{self, AddrInfoHints, LookupErrorKind, SockType};
 use parking_lot::Mutex;
 
 use crate::newsfeeds::NewsFeeds;
 
-const DNS_REFRESH_SECS : u64 = 3600;
-const DNS_MAX_TEMPERROR_SECS : u64 = 86400;
+const DNS_REFRESH_SECS: u64 = 3600;
+const DNS_MAX_TEMPERROR_SECS: u64 = 86400;
 
 lazy_static! {
     static ref HOST_CACHE: HostCache = HostCache::new();
 }
 
-#[derive(Clone,Default,Debug)]
+#[derive(Clone, Default, Debug)]
 struct HostEntry {
     label:      String,
     hostname:   String,
     addrs:      Vec<IpAddr>,
-    lastupdate:  u64,
+    lastupdate: u64,
     valid:      bool,
 }
 
 // Host cache.
 #[derive(Clone)]
 pub struct HostCache {
-    inner:      Arc<Mutex<HostCacheInner>>,
+    inner: Arc<Mutex<HostCacheInner>>,
 }
 
 #[derive(Debug)]
@@ -54,14 +54,14 @@ impl HostCache {
     // Initialize a new HostCache instance.
     fn new() -> HostCache {
         let (tx, rx) = mpsc::channel();
-        let inner = HostCacheInner{
+        let inner = HostCacheInner {
             tx:         tx,
             generation: 1,
             entries:    Vec::new(),
             entry_map:  HashMap::new(),
         };
         let hc = HostCache {
-            inner:  Arc::new(Mutex::new(inner))
+            inner: Arc::new(Mutex::new(inner)),
         };
         let hc2 = hc.clone();
         thread::spawn(move || {
@@ -70,14 +70,13 @@ impl HostCache {
         hc
     }
 
-    /// Get an instance of the host cache. This is a reference, 
+    /// Get an instance of the host cache. This is a reference,
     pub fn get() -> HostCache {
         HOST_CACHE.clone()
     }
 
     /// add entries to the cache with data from a (new) NewsFeeds struct.
     pub fn update(&self, feeds: &NewsFeeds) {
-
         let mut inner = self.inner.lock();
         let first = inner.entries.is_empty();
 
@@ -88,29 +87,27 @@ impl HostCache {
 
         // walk over all peers.
         for p in &feeds.peers {
-
             // and all hostnames
             for h in &p.inhost {
-
                 // Update or add entry.
                 let idx = inner.entry_map.get(h).map(|x| *x);
                 match idx {
                     Some(idx) => inner.entries[idx].valid = true,
                     None => {
-                        inner.entries.push(HostEntry{
+                        inner.entries.push(HostEntry {
                             label:      p.label.clone(),
                             hostname:   h.clone(),
                             addrs:      Vec::new(),
                             lastupdate: 0,
                             valid:      true,
                         });
-                    }
+                    },
                 }
             }
         }
 
         // Build new entry list.
-        let entries : Vec<HostEntry> = inner.entries.iter().cloned().filter(|e| e.valid).collect();
+        let entries: Vec<HostEntry> = inner.entries.iter().cloned().filter(|e| e.valid).collect();
         inner.entry_map.clear();
         for (idx, e) in entries.iter().enumerate() {
             inner.entry_map.insert(e.hostname.clone(), idx);
@@ -141,7 +138,6 @@ impl HostCache {
 
     // This is the resolver. It runs in a seperate thread,
     fn resolver_thread(&self, rx: mpsc::Receiver<Message>) {
-
         loop {
             // wait for a message, or a timeout (every minute).
             match rx.recv_timeout(Duration::from_secs(60)) {
@@ -161,10 +157,9 @@ impl HostCache {
     // Walk over all hostentries that we have, and see if any of them
     // need refreshing. Ignores transient errors.
     fn resolve(&self) {
-
-        let hints = AddrInfoHints{
-            socktype:   SockType::Stream.into(),
-            .. AddrInfoHints::default()
+        let hints = AddrInfoHints {
+            socktype: SockType::Stream.into(),
+            ..AddrInfoHints::default()
         };
 
         let mut generation = 0;
@@ -173,10 +168,8 @@ impl HostCache {
 
         // check all entries.
         loop {
-
             // Critical section.
             let (host, o_addrs, lastupdate) = {
-
                 let inner = self.inner.lock();
 
                 // retry if changed.
@@ -216,7 +209,8 @@ impl HostCache {
             }
             let (mut addrs, mut lastupdate) = match res {
                 Ok(a) => {
-                    let addrs = a.filter(|a| a.is_ok())
+                    let addrs = a
+                        .filter(|a| a.is_ok())
                         .map(|a| a.unwrap().sockaddr.ip())
                         .collect::<Vec<_>>();
                     if addrs.len() == 0 {
@@ -230,19 +224,18 @@ impl HostCache {
                 Err(e) => {
                     match e.kind() {
                         // NXDOMAIN or NODATA - normal retry time.
-                        LookupErrorKind::NoName|
-                        LookupErrorKind::NoData => {
+                        LookupErrorKind::NoName | LookupErrorKind::NoData => {
                             warn!("resolver: lookup {}: host not found", host);
                             (Vec::new(), util::unixtime())
                         },
                         // Transient error, retry soon.
                         _ => {
-                            let err : io::Error = e.into();
+                            let err: io::Error = e.into();
                             warn!("resolver: lookup {}: {}", host, err);
                             (o_addrs, 0)
                         },
                     }
-                }
+                },
             };
 
             let now = util::unixtime();

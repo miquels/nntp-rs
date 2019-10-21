@@ -7,6 +7,7 @@ use crate::article::Article;
 use crate::errors::ArtError;
 
 #[repr(usize)]
+#[rustfmt::skip]
 pub enum Stats {
     Offered,            // offered (ihave/check)
     Accepted,           // accepted
@@ -53,6 +54,7 @@ pub enum Stats {
     NumSlots,
 }
 
+#[rustfmt::skip]
 pub struct SessionStats {
     // identification.
     pub hostname:   String,
@@ -67,18 +69,17 @@ pub struct SessionStats {
 impl Default for SessionStats {
     fn default() -> SessionStats {
         SessionStats {
-            hostname:   String::new(),
-            ipaddr:     String::new(),
-            label:      String::new(),
-            fdno:       0,
-            instant:    Instant::now(),
-            stats:      [0u64; Stats::NumSlots as usize],
+            hostname: String::new(),
+            ipaddr:   String::new(),
+            label:    String::new(),
+            fdno:     0,
+            instant:  Instant::now(),
+            stats:    [0u64; Stats::NumSlots as usize],
         }
     }
 }
 
 impl SessionStats {
-
     pub fn add(&mut self, field: Stats, count: u64) {
         let n = field as usize;
         if n >= Stats::RefHistory as usize && n <= Stats::RefIfiltHash as usize {
@@ -99,15 +100,22 @@ impl SessionStats {
         let host = tokio_executor::blocking::run(move || {
             let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
             dns_lookup::lookup_addr(&ipaddr).unwrap_or(ipaddr_str)
-        }).await;
+        })
+        .await;
         self.hostname = host;
         self.label = label;
-        info!("Connection {} from {} {} [{}]", self.fdno, self.hostname, self.ipaddr, self.label);
+        info!(
+            "Connection {} from {} {} [{}]",
+            self.fdno, self.hostname, self.ipaddr, self.label
+        );
     }
 
     pub fn on_disconnect(&self) {
         let elapsed = self.instant.elapsed().as_secs();
-        info!("Disconnect {} from {} {} ({} elapsed)", self.fdno, self.hostname, self.ipaddr, elapsed);
+        info!(
+            "Disconnect {} from {} {} ({} elapsed)",
+            self.fdno, self.hostname, self.ipaddr, elapsed
+        );
         self.log_stats();
         if self.stats[Stats::Rejected as usize] > 0 {
             self.log_rejstats();
@@ -115,10 +123,9 @@ impl SessionStats {
     }
 
     pub fn log_stats(&self) {
-
         // This calculation comes straight from diablo, not sure
         // why it is done this way.
-	    let mut nuse = self.stats[Stats::Check as usize] + self.stats[Stats::Ihave as usize];
+        let mut nuse = self.stats[Stats::Check as usize] + self.stats[Stats::Ihave as usize];
         if nuse < self.stats[Stats::Received as usize] {
             nuse = self.stats[Stats::Received as usize];
         }
@@ -126,7 +133,7 @@ impl SessionStats {
         let elapsed = self.instant.elapsed().as_secs();
         let dt = std::cmp::max(1, elapsed);
 
-    	info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
+        info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
 			self.hostname,
 			self.instant.elapsed().as_secs(),
 			self.stats[Stats::Ihave as usize],
@@ -184,6 +191,7 @@ impl SessionStats {
     }
 
     pub fn art_error(&mut self, art: &Article, e: &ArtError) {
+        #[rustfmt::skip]
         let rej = match e {
             &ArtError::PostDuplicate      => Stats::RejPosDup,
             &ArtError::ArtIncomplete      => Stats::RejArtIncompl,
@@ -228,4 +236,3 @@ impl SessionStats {
         self.add(Stats::ReceivedBytes, art.len as u64);
     }
 }
-

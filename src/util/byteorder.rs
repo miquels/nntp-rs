@@ -11,12 +11,11 @@ pub fn u32_from_le_bytes(m: &[u8]) -> u32 {
 }
 
 #[inline]
-pub fn u16_write_le_bytes(m: &mut[u8], v: u16) {
+pub fn u16_write_le_bytes(m: &mut [u8], v: u16) {
     m.copy_from_slice(&v.to_le_bytes());
 }
 
 #[inline]
-pub fn u32_write_le_bytes(m: &mut[u8], v: u32) {
+pub fn u32_write_le_bytes(m: &mut [u8], v: u32) {
     m.copy_from_slice(&v.to_le_bytes());
 }
-

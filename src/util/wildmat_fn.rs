@@ -70,18 +70,15 @@
 //  on.
 //
 
-
 // Match 'text' and 'pat'. Returns Some(true), Some(false), or None.
 // None is what in the original code is called ABORT.
 fn do_match(text: &str, pat: &str) -> Option<bool> {
-
     //println!("do_match({:?}, {:?}", text, pat);
 
     let mut text_iter = text.chars();
     let mut pat_iter = pat.chars();
 
     loop {
-
         let p = match pat_iter.next() {
             None => break,
             Some(p) => p,
@@ -214,4 +211,3 @@ mod tests {
         assert!(wildmat("vier € is 3 $", "* [xy€z] is 3 $"));
     }
 }
-

@@ -7,7 +7,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use regex::Regex;
 
 /// Capabilities.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capb {
     Never           = 0x00000,
     Always          = 0x00001,
@@ -79,7 +79,7 @@ macro_rules! cmd {
 }
 
 // And here it is actually generated.
-cmd!{
+cmd! {
     ( "article",            Article,            0, 1, Capb::Always,          "[%M]" ),
     ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
     ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
@@ -151,7 +151,7 @@ pub struct CmdParser {
 impl CmdParser {
     /// Return a fresh Cmd.
     pub fn new() -> CmdParser {
-        CmdParser{
+        CmdParser {
             caps:       Capb::Always as usize,
             cmd_map:    &*CMD_MAP,
             keyword_re: Regex::new("^[A-Za-z][A-Za-z0-9.-]{2,}$").unwrap(),
@@ -175,8 +175,7 @@ impl CmdParser {
 
     /// Command parsing and checking.
     pub fn parse<'a>(&self, data: &'a str) -> Result<(Cmd, Vec<&'a str>), &'static str> {
-
-        let mut args : Vec<_> = data.split_whitespace().collect();
+        let mut args: Vec<_> = data.split_whitespace().collect();
         if args.len() == 0 {
             return Err("501 Syntax error");
         }
@@ -237,7 +236,7 @@ impl CmdParser {
         let mut out = BytesMut::with_capacity(1024);
         out.put("100 Legal commands\r\n");
 
-        let mut cmds : Vec<&CmdDef> = self.cmd_map.values().collect();
+        let mut cmds: Vec<&CmdDef> = self.cmd_map.values().collect();
         cmds.sort_unstable_by(|a, b| a.name.cmp(b.name));
 
         for cmd in cmds {
@@ -353,7 +352,7 @@ pub enum ArtRange<'a> {
 
 /// Parse article range.
 pub fn parse_artrange(m: &str) -> Option<ArtRange> {
-    let r : Vec<_> = m.split('-').collect();
+    let r: Vec<_> = m.split('-').collect();
     let b = r[0].parse::<u64>().ok()?;
     match r.len() {
         1 => Some(ArtRange::ArtNo(b)),
@@ -371,4 +370,3 @@ pub fn parse_artrange_msgid(m: &str) -> Option<ArtRange> {
         parse_artrange(m)
     }
 }
-

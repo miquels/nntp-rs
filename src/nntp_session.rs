@@ -7,20 +7,20 @@ use std::sync::Arc;
 use bytes::{BufMut, Bytes, BytesMut};
 use time;
 
-use crate::article::{Article,Headers,HeaderName,HeadersParser};
+use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands::{self, Capb, Cmd, CmdParser};
-use crate::config::{self,Config};
+use crate::config::{self, Config};
 use crate::diag::{SessionStats, Stats};
 use crate::errors::*;
+use crate::history::{HistEnt, HistError, HistStatus};
 use crate::logger::{self, Logger};
-use crate::newsfeeds::{NewsFeeds,NewsPeer};
-use crate::nntp_codec::{NntpCodec, CodecMode, NntpInput};
-use crate::history::{HistEnt,HistError,HistStatus};
-use crate::spool::{SPOOL_DONTSTORE,SPOOL_REJECTARTS,ArtPart};
-use crate::util::{self,HashFeed,MatchList,MatchResult};
+use crate::newsfeeds::{NewsFeeds, NewsPeer};
+use crate::nntp_codec::{CodecMode, NntpCodec, NntpInput};
 use crate::server::Server;
+use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
+use crate::util::{self, HashFeed, MatchList, MatchResult};
 
-#[derive(Debug,PartialEq,Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NntpState {
     Cmd,
     Post,
@@ -29,21 +29,21 @@ pub enum NntpState {
 }
 
 pub struct NntpSession {
-    state:          NntpState,
-    pub codec:      NntpCodec,
-    parser:         CmdParser,
-    server:         Server,
-    remote:         SocketAddr,
-    newsfeeds:      Arc<NewsFeeds>,
-    config:         Arc<Config>,
-    logger:         Logger,
-    peer_idx:       usize,
-    active:         bool,
-    stats:          SessionStats,
+    state:     NntpState,
+    pub codec: NntpCodec,
+    parser:    CmdParser,
+    server:    Server,
+    remote:    SocketAddr,
+    newsfeeds: Arc<NewsFeeds>,
+    config:    Arc<Config>,
+    logger:    Logger,
+    peer_idx:  usize,
+    active:    bool,
+    stats:     SessionStats,
 }
 
 pub struct NntpResult {
-    pub data:       Bytes,
+    pub data: Bytes,
 }
 
 impl NntpResult {
@@ -52,15 +52,11 @@ impl NntpResult {
         let mut b = Bytes::with_capacity(s.len() + 2);
         b.extend_from_slice(s.as_bytes());
         b.extend_from_slice(&b"\r\n"[..]);
-        NntpResult{
-            data:       b,
-        }
+        NntpResult { data: b }
     }
 
     pub fn bytes(b: Bytes) -> NntpResult {
-        NntpResult{
-            data:       b,
-        }
+        NntpResult { data: b }
     }
 
     pub fn empty() -> NntpResult {
@@ -84,17 +80,17 @@ impl NntpSession {
         let config = config::get_config();
         let logger = logger::get_incoming_logger();
         NntpSession {
-            state:          NntpState::Cmd,
-            codec:          codec,
-            parser:         CmdParser::new(),
-            server:         server,
-            remote:         peer,
-            newsfeeds:      newsfeeds,
-            config:         config,
-            logger:         logger,
-            peer_idx:       0,
-            active:         false,
-            stats:          stats,
+            state:     NntpState::Cmd,
+            codec:     codec,
+            parser:    CmdParser::new(),
+            server:    server,
+            remote:    peer,
+            newsfeeds: newsfeeds,
+            config:    config,
+            logger:    logger,
+            peer_idx:  0,
+            active:    false,
+            stats:     stats,
         }
     }
 
@@ -114,7 +110,7 @@ impl NntpSession {
             None => {
                 self.codec.quit();
                 info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
-                let msg = format!("502 permission denied to {}", remote); 
+                let msg = format!("502 permission denied to {}", remote);
                 return NntpResult::text(&msg);
             },
             Some(x) => x,
@@ -125,13 +121,17 @@ impl NntpSession {
         self.active = true;
         if count > peer.maxconnect as usize && peer.maxconnect > 0 {
             self.codec.quit();
-            info!("Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
-                  peer.label, remote, count, peer.maxconnect);
+            info!(
+                "Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
+                peer.label, remote, count, peer.maxconnect
+            );
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
             return NntpResult::text(&msg);
         }
 
-        self.stats.on_connect(remote.to_string(), peer.label.clone()).await;
+        self.stats
+            .on_connect(remote.to_string(), peer.label.clone())
+            .await;
 
         let code = if peer.readonly {
             201
@@ -151,7 +151,10 @@ impl NntpSession {
     /// Log an error, clean up, and exit.
     pub async fn on_write_error(&self, err: io::Error) {
         let stats = &self.stats;
-        info!("Write error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        info!(
+            "Write error on {} from {} {}: {}",
+            stats.fdno, stats.hostname, stats.ipaddr, err
+        );
         stats.on_disconnect();
     }
 
@@ -160,11 +163,14 @@ impl NntpSession {
     pub async fn on_read_error(&mut self, err: io::Error) -> NntpResult {
         self.codec.quit();
         let stats = &self.stats;
-        info!("Read error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        info!(
+            "Read error on {} from {} {}: {}",
+            stats.fdno, stats.hostname, stats.ipaddr, err
+        );
         stats.on_disconnect();
         match err.kind() {
             io::ErrorKind::TimedOut => NntpResult::text("400 Timeout - closing connection"),
-            _ => NntpResult::empty()
+            _ => NntpResult::empty(),
         }
     }
 
@@ -173,7 +179,10 @@ impl NntpSession {
     pub async fn on_generic_error(&mut self, err: io::Error) -> NntpResult {
         self.codec.quit();
         let stats = &self.stats;
-        info!("Error on {} from {} {}: {}", stats.fdno, stats.hostname, stats.ipaddr, err);
+        info!(
+            "Error on {} from {} {}: {}",
+            stats.fdno, stats.hostname, stats.ipaddr, err
+        );
         stats.on_disconnect();
         NntpResult::text(format!("400 {}", err))
     }
@@ -193,11 +202,9 @@ impl NntpSession {
     pub async fn on_input(&mut self, input: NntpInput) -> io::Result<NntpResult> {
         match input {
             NntpInput::Line(line) => {
-
                 // Bit of a hack, but doing this correctly is too much
                 // trouble for now.
-                if self.state == NntpState::Ihave ||
-                    self.state == NntpState::Post {
+                if self.state == NntpState::Ihave || self.state == NntpState::Post {
                     self.state = NntpState::Cmd;
                 }
 
@@ -206,8 +213,11 @@ impl NntpSession {
                     NntpState::Cmd => self.cmd(line).await,
                     _ => {
                         error!("got NntpInput::Line while in state {:?}", state);
-                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
-                    }
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "internal state out of sync",
+                        ));
+                    },
                 }
             },
             NntpInput::Article(art) => {
@@ -219,14 +229,20 @@ impl NntpSession {
                     NntpState::TakeThis => self.takethis_body(art).await,
                     NntpState::Cmd => {
                         error!("got NntpInput::Article while in state {:?}", self.state);
-                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "internal state out of sync",
+                        ));
                     },
                 }
             },
             NntpInput::Block(_buf) => {
                 error!("got NntpInput::Block while in state {:?}", self.state);
                 self.codec.set_mode(CodecMode::Quit);
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "internal state out of sync"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "internal state out of sync",
+                ));
             },
             _ => unreachable!(),
         }
@@ -234,7 +250,6 @@ impl NntpSession {
 
     /// Process NNTP command
     async fn cmd(&mut self, input: BytesMut) -> io::Result<NntpResult> {
-
         let line = match std::str::from_utf8(&input[..]) {
             Ok(l) => {
                 if !l.ends_with("\r\n") {
@@ -246,7 +261,7 @@ impl NntpSession {
                     }
                     l
                 } else {
-                    &l[0..l.len()-2]
+                    &l[0..l.len() - 2]
                 }
             },
             Err(_) => return Ok(NntpResult::text("500 Invalid UTF-8")),
@@ -299,17 +314,19 @@ impl NntpSession {
                 let he = self.server.history.check(args[0]).await?;
                 let s = match he {
                     None => format!("238 {}", msgid),
-                    Some(status) => match status {
-                        HistStatus::NotFound => format!("238 {}", msgid),
-                        HistStatus::Tentative => {
-                            self.stats.inc(Stats::RefPreCommit);
-                            format!("431 {}", msgid)
-                        },
-                        _ => {
-                            self.stats.inc(Stats::RefHistory);
-                            format!("438 {}", msgid)
-                        },
-                    }
+                    Some(status) => {
+                        match status {
+                            HistStatus::NotFound => format!("238 {}", msgid),
+                            HistStatus::Tentative => {
+                                self.stats.inc(Stats::RefPreCommit);
+                                format!("431 {}", msgid)
+                            },
+                            _ => {
+                                self.stats.inc(Stats::RefHistory);
+                                format!("438 {}", msgid)
+                            },
+                        }
+                    },
                 };
                 return Ok(NntpResult::text(&s));
             },
@@ -335,7 +352,7 @@ impl NntpSession {
                 self.state = NntpState::Ihave;
                 let he = self.server.history.check(args[0]).await?;
                 let r = match he {
-                    Some(HistStatus::NotFound)|None => ok,
+                    Some(HistStatus::NotFound) | None => ok,
                     Some(HistStatus::Tentative) => {
                         self.stats.inc(Stats::RefPreCommit);
                         "436 Retry later"
@@ -366,7 +383,7 @@ impl NntpSession {
             },
             Cmd::Mode_Stream => {
                 return Ok(NntpResult::text("203 Streaming permitted"));
-            }
+            },
             Cmd::NewGroups => {
                 return Ok(NntpResult::text("503 Not maintaining an active file"));
             },
@@ -401,7 +418,7 @@ impl NntpSession {
 
     /// POST body has been received.
     async fn post_body(&self, _input: Article) -> io::Result<NntpResult> {
-         Ok(NntpResult::text("441 Posting failed"))
+        Ok(NntpResult::text("441 Posting failed"))
     }
 
     /// IHAVE body has been received.
@@ -422,18 +439,17 @@ impl NntpSession {
         let status = self.received_article(&mut art, false).await?;
         let code = match status {
             ArtAccept::Accept => 239,
-            ArtAccept::Defer|
-            ArtAccept::Reject => 439,
+            ArtAccept::Defer | ArtAccept::Reject => 439,
         };
         Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
     }
 
     async fn reject_art(&mut self, art: &Article, recv_time: u64, e: ArtError) -> io::Result<ArtAccept> {
-        let he = HistEnt{
-            status:     HistStatus::Rejected,
-            time:       recv_time,
-            head_only:  false,
-            location:   None,
+        let he = HistEnt {
+            status:    HistStatus::Rejected,
+            time:      recv_time,
+            head_only: false,
+            location:  None,
         };
         let res = self.server.history.store_begin(&art.msgid).await;
         match res {
@@ -461,11 +477,11 @@ impl NntpSession {
     }
 
     async fn dontstore_art(&mut self, art: &Article, recv_time: u64) -> io::Result<ArtAccept> {
-        let he = HistEnt{
-            status:     HistStatus::Expired,
-            time:       recv_time,
-            head_only:  false,
-            location:   None,
+        let he = HistEnt {
+            status:    HistStatus::Expired,
+            time:      recv_time,
+            head_only: false,
+            location:  None,
         };
         let res = self.server.history.store_begin(&art.msgid).await;
         match res {
@@ -499,10 +515,10 @@ impl NntpSession {
                 return match e {
                     // article was mangled on the way. do not store the message-id
                     // in the history file, another peer may send a correct version.
-                    ArtError::TooSmall|
-                    ArtError::HdrOnlyNoBytes|
-                    ArtError::NoHdrEnd|
-                    ArtError::MsgIdMismatch|
+                    ArtError::TooSmall |
+                    ArtError::HdrOnlyNoBytes |
+                    ArtError::NoHdrEnd |
+                    ArtError::MsgIdMismatch |
                     ArtError::NoPath => {
                         if can_defer {
                             logger::incoming_defer(&self.logger, &self.thispeer().label, art, e);
@@ -553,11 +569,11 @@ impl NntpSession {
                 let mut buffer = BytesMut::new();
                 headers.header_bytes(&mut buffer);
                 let artloc = spool.write(spool_no, buffer, body).await?;
-                let he = HistEnt{
-                    status:     HistStatus::Present,
-                    time:       recv_time,
-                    head_only:  false,
-                    location:   Some(artloc),
+                let he = HistEnt {
+                    status:    HistStatus::Present,
+                    time:      recv_time,
+                    head_only: false,
+                    location:  Some(artloc),
                 };
                 match history.store_commit(msgid, he).await {
                     Err(e) => {
@@ -579,8 +595,7 @@ impl NntpSession {
 
     // parse the received article headers, then see if we want it.
     // Note: modifies/updates the Path: header.
-    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers,BytesMut,Vec<u32>)> {
-
+    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers, BytesMut, Vec<u32>)> {
         // Check that the article has a minimum size. Sometimes a peer is offering
         // you empty articles because they no longer exist on their spool.
         if art.data.len() < 80 {
@@ -626,7 +641,7 @@ impl NntpSession {
         }
 
         let new_path;
-        let mut mm : Option<String> = None;
+        let mut mm: Option<String> = None;
         let thispeer = self.thispeer();
 
         let newsgroups = headers.newsgroups().ok_or(ArtError::NoNewsgroups)?;
@@ -641,7 +656,13 @@ impl NntpSession {
         // see if the article matches the IFILTER label.
         let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
         if let Some(ref ifilter) = self.newsfeeds.infilter {
-            if ifilter.wants(art, &HashFeed::default(), &[], &mut grouplist, distribution.as_ref()) {
+            if ifilter.wants(
+                art,
+                &HashFeed::default(),
+                &[],
+                &mut grouplist,
+                distribution.as_ref(),
+            ) {
                 return Err(ArtError::IncomingFilter);
             }
         }
@@ -649,9 +670,15 @@ impl NntpSession {
         // Now check which of our peers wants a copy.
         let peers = &self.newsfeeds.peers;
         let mut v = Vec::with_capacity(peers.len());
-        for idx in 0 .. peers.len() {
+        for idx in 0..peers.len() {
             let peer = &peers[idx];
-            if peer.wants(art, &peer.hashfeed, &pathelems, &mut grouplist, distribution.as_ref()) {
+            if peer.wants(
+                art,
+                &peer.hashfeed,
+                &pathelems,
+                &mut grouplist,
+                distribution.as_ref(),
+            ) {
                 v.push(idx as u32);
             }
         }
@@ -660,8 +687,13 @@ impl NntpSession {
         if !thispeer.nomismatch {
             let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
             if !is_match {
-                info!("{} {} Path element fails to match aliases: {} in {}",
-                    thispeer.label, self.remote.ip(), pathelems[0], art.msgid);
+                info!(
+                    "{} {} Path element fails to match aliases: {} in {}",
+                    thispeer.label,
+                    self.remote.ip(),
+                    pathelems[0],
+                    art.msgid
+                );
                 mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
                 pathelems.insert(0, mm.as_ref().unwrap());
             }
@@ -678,7 +710,6 @@ impl NntpSession {
     }
 
     async fn read_article(&self, part: ArtPart, msgid: &str, buf: BytesMut) -> io::Result<NntpResult> {
-
         let result = match self.server.history.lookup(msgid).await {
             Err(_) => return Ok(NntpResult::text("430 Not found")),
             Ok(None) => return Ok(NntpResult::text("430 Not found")),
@@ -713,4 +744,3 @@ impl Drop for NntpSession {
         }
     }
 }
-

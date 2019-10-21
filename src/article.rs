@@ -48,6 +48,7 @@ nntp_headers! {
     ( Other,        "" )
 }
 
+#[rustfmt::skip]
 const MANDATORY_HEADERS: [(HeaderName, bool); 6] = [
     (HeaderName::Date,          true),
     (HeaderName::From,          false),
@@ -65,32 +66,32 @@ lazy_static! {
 
 #[derive(Debug)]
 struct HeaderPos {
-    modified:   bool,
-    header:     Range<usize>,
-    name:       Range<usize>,
-    value:      Range<usize>,
+    modified: bool,
+    header:   Range<usize>,
+    name:     Range<usize>,
+    value:    Range<usize>,
 }
 
 impl HeaderPos {
     fn new() -> HeaderPos {
-        HeaderPos{
-            modified:   false,
-            header:     Range{ start: 0, end: 0 },
-            name:       Range{ start: 0, end: 0 },
-            value:      Range{ start: 0, end: 0 },
+        HeaderPos {
+            modified: false,
+            header:   Range { start: 0, end: 0 },
+            name:     Range { start: 0, end: 0 },
+            value:    Range { start: 0, end: 0 },
         }
     }
 }
 
 /// Headers parser.
-#[derive(Default,Debug)]
+#[derive(Default, Debug)]
 pub struct HeadersParser {
-    buf:            BytesMut,
-    modbuf:         BytesMut,
-    hpos:           Vec<HeaderPos>,
-    hlen:           usize,
-    well_known:     [Option<u32>; HeaderName::Other as usize],
-    ok:             bool,
+    buf:        BytesMut,
+    modbuf:     BytesMut,
+    hpos:       Vec<HeaderPos>,
+    hlen:       usize,
+    well_known: [Option<u32>; HeaderName::Other as usize],
+    ok:         bool,
 }
 
 /// Complete parsed headers.
@@ -98,7 +99,6 @@ pub struct HeadersParser {
 pub struct Headers(HeadersParser);
 
 impl HeadersParser {
-
     /// Return a new HeadersParser.
     pub fn new() -> HeadersParser {
         HeadersParser::default()
@@ -118,10 +118,9 @@ impl HeadersParser {
     /// If there is no empty line after the header, that is an error,
     /// unless no_body_ok == true.
     pub fn parse(&mut self, buf: &[u8], no_body_ok: bool, last: bool) -> Option<ArtResult<u64>> {
-
         // Parse into NL delimited lines.
         let nlines = buf.len() / 30;
-        let mut lines : Vec<Range<usize>> = Vec::with_capacity(nlines);
+        let mut lines: Vec<Range<usize>> = Vec::with_capacity(nlines);
         let mut pos = 0usize;
         loop {
             let nl = match memchr(b'\n', &buf[pos..]) {
@@ -140,7 +139,7 @@ impl HeadersParser {
                         return Some(Err(ArtError::NoHdrEnd));
                     }
                     // Well this was unexpected.
-                    return Some(Err(ArtError::ArtIncomplete))
+                    return Some(Err(ArtError::ArtIncomplete));
                 },
             };
 
@@ -149,7 +148,10 @@ impl HeadersParser {
                 break;
             }
 
-            lines.push(Range{ start: pos, end: pos + nl + 1});
+            lines.push(Range {
+                start: pos,
+                end:   pos + nl + 1,
+            });
             pos += nl + 1;
         }
 
@@ -161,10 +163,9 @@ impl HeadersParser {
         let len = lines.len();
         self.hpos.reserve_exact(len);
         while idx < len {
-
             // might be a multi-line (continued) header.
             let mut header_idx = lines[idx].clone();
-            while idx + 1 < len && is_cont(&buf[lines[idx+1].clone()]) {
+            while idx + 1 < len && is_cont(&buf[lines[idx + 1].clone()]) {
                 idx += 1;
             }
             header_idx.end = lines[idx].end;
@@ -181,7 +182,10 @@ impl HeadersParser {
             if p == 0 || b.len() < 4 {
                 return Some(Err(ArtError::BadHdrName));
             }
-            let hname_idx = Range{ start: header_idx.start, end: header_idx.start + p };
+            let hname_idx = Range {
+                start: header_idx.start,
+                end:   header_idx.start + p,
+            };
             p += 1;
 
             // find start of header value.
@@ -191,7 +195,10 @@ impl HeadersParser {
                 }
                 p += 1;
             }
-            let hvalue_idx = Range{ start: header_idx.start + p, end: header_idx.end };
+            let hvalue_idx = Range {
+                start: header_idx.start + p,
+                end:   header_idx.end,
+            };
 
             // is this a well-known header?
             let mut tmpbuf = [0u8; 32];
@@ -205,11 +212,11 @@ impl HeadersParser {
             }
 
             // add this header to the list.
-            let hpos = HeaderPos{
-                modified:   false,
-                header:     header_idx,
-                name:       hname_idx,
-                value:      hvalue_idx,
+            let hpos = HeaderPos {
+                modified: false,
+                header:   header_idx,
+                name:     hname_idx,
+                value:    hvalue_idx,
             };
             self.hpos.push(hpos);
         }
@@ -255,7 +262,6 @@ impl HeadersParser {
 }
 
 impl Headers {
-
     // where is this header in our self.hpos vector.
     fn get_hpos_idx(&self, name: HeaderName) -> Option<usize> {
         let idx = match name {
@@ -293,11 +299,10 @@ impl Headers {
         Some(match str::from_utf8(hdr) {
             Ok(s) => Cow::from(s.trim()),
             Err(_) => {
-
                 // trim_right()
                 let mut end = hdr.len();
                 while end > 0 {
-                    let b = hdr[end-1];
+                    let b = hdr[end - 1];
                     if b != b' ' && b != b'\t' && b != b'\r' && b != b'\n' {
                         break;
                     }
@@ -313,12 +318,12 @@ impl Headers {
                     start += 1;
                 }
 
-                let mut s = String::with_capacity((end-start)*2);
+                let mut s = String::with_capacity((end - start) * 2);
                 for b in hdr[start..end].iter() {
-                        s.push(*b as char);
+                    s.push(*b as char);
                 }
                 Cow::from(s)
-            }
+            },
         })
     }
 
@@ -334,7 +339,7 @@ impl Headers {
             None => {
                 let h = HeaderPos::new();
                 self.0.hpos.push(h);
-                self.0.hpos.len() -1
+                self.0.hpos.len() - 1
             },
         };
         let name = HEADER_NAMES[&name];
@@ -347,11 +352,17 @@ impl Headers {
         self.0.modbuf.extend_from_slice(value);
         self.0.modbuf.extend_from_slice(&b"\r\n"[..]);
 
-        self.0.hpos[i] = HeaderPos{
-            modified:   true,
-            header:     Range{ start, end },
-            name:       Range{ start: start, end: start + name.len() },
-            value:      Range{ start: start + name.len() + 2, end: end },
+        self.0.hpos[i] = HeaderPos {
+            modified: true,
+            header:   Range { start, end },
+            name:     Range {
+                start: start,
+                end:   start + name.len(),
+            },
+            value:    Range {
+                start: start + name.len() + 2,
+                end:   end,
+            },
         };
     }
 
@@ -388,7 +399,7 @@ impl Headers {
                     buffer[len - 1] = b'\r';
                     buffer.extend_from_slice(&b"\n"[..]);
                 }
-                size  += 1;
+                size += 1;
             }
         }
         size
@@ -426,7 +437,7 @@ impl Headers {
         let msgid = self.get_str(HeaderName::MessageId)?;
         let b = msgid.find('<')?;
         let e = msgid[b..].find('>')?;
-        Some(&msgid[b..b+e+1])
+        Some(&msgid[b..b + e + 1])
     }
 
     /// Newsgroups.
@@ -462,26 +473,26 @@ impl Headers {
 
 /// Article is a thin wrapper around a bytesmut
 pub struct Article {
-    pub arttype:    ArtType,
-    pub data:       BytesMut,
-    pub msgid:      String,
-    pub lines:      u32,
-    pub len:        usize,
-    pub hash:       u128,
-    pub pathhost:   Option<String>,
+    pub arttype:  ArtType,
+    pub data:     BytesMut,
+    pub msgid:    String,
+    pub lines:    u32,
+    pub len:      usize,
+    pub hash:     u128,
+    pub pathhost: Option<String>,
 }
 
 /// Clones everything but self.data.
 impl Clone for Article {
     fn clone(&self) -> Article {
-        Article{
-            arttype:    self.arttype,
-            data:       BytesMut::new(),
-            msgid:      self.msgid.clone(),
-            lines:      self.lines,
-            len:        self.len,
-            hash:       self.hash.clone(),
-            pathhost:   self.pathhost.clone(),
+        Article {
+            arttype:  self.arttype,
+            data:     BytesMut::new(),
+            msgid:    self.msgid.clone(),
+            lines:    self.lines,
+            len:      self.len,
+            hash:     self.hash.clone(),
+            pathhost: self.pathhost.clone(),
         }
     }
 }
@@ -515,4 +526,3 @@ pub fn lowercase<'a>(b: &'a [u8], buf: &'a mut [u8]) -> &'a [u8] {
     }
     &buf[..idx]
 }
-

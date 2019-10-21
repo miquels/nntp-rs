@@ -1,10 +1,10 @@
-use std::io::{self,Write};
 use std::fs;
+use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::thread;
 use std::time::Duration;
 
-use chrono::{Datelike, Timelike, offset::Local, offset::TimeZone};
+use chrono::{offset::Local, offset::TimeZone, Datelike, Timelike};
 use crossbeam_channel as channel;
 use log::{self, Log, Metadata, Record};
 use parking_lot::{Mutex, RwLock};
@@ -17,19 +17,27 @@ use crate::util;
 
 pub fn incoming_reject(logger: &Logger, label: &str, art: &Article, error: ArtError) {
     let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
-    let l = format!("{} - {} {} {} {:?}", pathhost, art.msgid, art.len, art.arttype, error);
+    let l = format!(
+        "{} - {} {} {} {:?}",
+        pathhost, art.msgid, art.len, art.arttype, error
+    );
     logger.log_line(l);
 }
 
 pub fn incoming_defer(logger: &Logger, label: &str, art: &Article, error: ArtError) {
     let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
-    let l = format!("{} d {} {} {} {:?}", pathhost, art.msgid, art.len, art.arttype, error);
+    let l = format!(
+        "{} d {} {} {} {:?}",
+        pathhost, art.msgid, art.len, art.arttype, error
+    );
     logger.log_line(l);
 }
 
 pub fn incoming_accept(logger: &Logger, label: &str, art: &Article, peers: &[NewsPeer], wantpeers: &[u32]) {
     // allocate string with peers in one go.
-    let len = wantpeers.iter().fold(0, |t, i| t + peers[*i as usize].label.len() + 1);
+    let len = wantpeers
+        .iter()
+        .fold(0, |t, i| t + peers[*i as usize].label.len() + 1);
     let mut s = String::with_capacity(len);
 
     // push peers onto string, separated by space.
@@ -53,25 +61,23 @@ pub fn incoming_accept(logger: &Logger, label: &str, art: &Article, peers: &[New
 
 lazy_static! {
     static ref LOGGER_: Mutex<Option<Logger>> = Mutex::new(None);
-    static ref LOGGER: Logger = {
-        LOGGER_.lock().take().unwrap()
-    };
+    static ref LOGGER: Logger = { LOGGER_.lock().take().unwrap() };
     static ref INCOMING_LOG: RwLock<Option<Logger>> = RwLock::new(None);
 }
 
 /// Target destination of the log. First create a LogTarget, then
 /// use it to construct a new Logger, or pass it to Logger.reconfig().
 pub struct LogTarget {
-    dest:   LogDest,
+    dest: LogDest,
 }
 
 // Open logfile.
 struct FileData {
-    file:       io::BufWriter<fs::File>,
-    name:       String,
-    curname:    String,
-    ino:        u64,
-    when:       u64,
+    file:    io::BufWriter<fs::File>,
+    name:    String,
+    curname: String,
+    ino:     u64,
+    when:    u64,
 }
 
 // Type of log.
@@ -95,7 +101,7 @@ enum Message {
 /// Contains a channel over which messages can be sent to the logger thread.
 #[derive(Clone)]
 pub struct Logger {
-    tx:     channel::Sender<Message>,
+    tx: channel::Sender<Message>,
 }
 
 impl Logger {
@@ -134,12 +140,11 @@ impl Logger {
             }
         });
 
-        Logger{ tx }
+        Logger { tx }
     }
 
     /// For use with the 'log' crate.
     fn log_record(&self, record: &Record) {
-
         // strip the program-name prefix from "target". If it is then
         // empty, replace it with "main". If the "target" prefix is NOT
         // program-name, only log Warn and Error messages.
@@ -152,8 +157,7 @@ impl Logger {
             target = "main";
         } else {
             match level {
-                log::Level::Error|
-                log::Level::Warn => {},
+                log::Level::Error | log::Level::Warn => {},
                 _ => return,
             }
         }
@@ -186,8 +190,7 @@ impl Log for Logger {
         }
     }
 
-    fn flush(&self) {
-    }
+    fn flush(&self) {}
 }
 
 impl LogDest {
@@ -217,7 +220,6 @@ impl LogDest {
 
     // Log a simple line to the destination.
     fn log_line(&mut self, is_log: bool, level: log::Level, line: String) {
-
         if let Err(e) = self.check() {
             if !is_log {
                 error!("{}", e);
@@ -227,10 +229,10 @@ impl LogDest {
         match self {
             LogDest::Syslog => {
                 let formatter = syslog::Formatter3164 {
-                    facility:   syslog::Facility::LOG_NEWS,
-                    hostname:   None,
-                    process:    "nntp-rs-server".to_string(),
-                    pid:        unsafe { libc::getpid() },
+                    facility: syslog::Facility::LOG_NEWS,
+                    hostname: None,
+                    process:  "nntp-rs-server".to_string(),
+                    pid:      unsafe { libc::getpid() },
                 };
                 match syslog::unix(formatter) {
                     Err(_) => {},
@@ -242,16 +244,24 @@ impl LogDest {
                             log::Level::Debug => writer.debug(line).ok(),
                             log::Level::Trace => None,
                         };
-                    }
+                    },
                 }
             },
-            LogDest::FileData(FileData{ref mut file, when, ..}) => {
+            LogDest::FileData(FileData {
+                ref mut file, when, ..
+            }) => {
                 let ns = ((*when % 1000) * 1_000_000) as u32;
-                let now = Local.timestamp((*when/1000) as i64, ns);
-                let t = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                                now.year(), now.month(), now.day(),
-                                now.hour(), now.minute(), now.second(),
-                                now.timestamp_subsec_millis());
+                let now = Local.timestamp((*when / 1000) as i64, ns);
+                let t = format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                    now.year(),
+                    now.month(),
+                    now.day(),
+                    now.hour(),
+                    now.minute(),
+                    now.second(),
+                    now.timestamp_subsec_millis()
+                );
                 let _ = write!(file, "{} {}\n", t, line);
             },
             LogDest::Stderr => {
@@ -273,12 +283,22 @@ impl LogDest {
             LogDest::Null => LogDest::Null,
             LogDest::File(name) => {
                 let curname = config::expand_path(&config.paths, &name);
-                let file = fs::OpenOptions::new().write(true).create(true).append(true).open(&curname)
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .append(true)
+                    .open(&curname)
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
                 let ino = file.metadata()?.ino();
                 let file = io::BufWriter::new(file);
                 let when = util::unixtime_ms();
-                LogDest::FileData(FileData{ file, name, curname, ino, when })
+                LogDest::FileData(FileData {
+                    file,
+                    name,
+                    curname,
+                    ino,
+                    when,
+                })
             },
         };
         Ok(d)
@@ -339,7 +359,7 @@ impl LogTarget {
             "syslog" => LogDest::Syslog,
             name => LogDest::open(LogDest::File(name.to_string()), cfg)?,
         };
-        Ok(LogTarget{ dest })
+        Ok(LogTarget { dest })
     }
 
     /// Create a new LogTarget.
@@ -377,4 +397,3 @@ pub fn set_incoming_logger(target: LogTarget) {
         *lock = Some(Logger::new(target));
     }
 }
-

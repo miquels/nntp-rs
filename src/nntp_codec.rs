@@ -9,10 +9,10 @@ use crate::arttype::ArtTypeScanner;
 use crate::util::HashFeed;
 
 use bytes::{Bytes, BytesMut};
-use futures::{Stream, Sink};
+use futures::{Sink, Stream};
 use memchr::memchr;
-use tokio::prelude::*;
 use tokio::net::TcpStream;
+use tokio::prelude::*;
 use tokio::timer::{self, Delay};
 
 const INITIAL_TIMEOUT: u64 = 60;
@@ -20,7 +20,7 @@ const READ_TIMEOUT: u64 = 630;
 const WRITE_TIMEOUT: u64 = 120;
 
 // Reading state (multiline)
-#[derive(Debug,PartialEq,Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum State {
     Data,
     Cr1Seen,
@@ -32,7 +32,7 @@ enum State {
 }
 
 /// Reading mode.
-#[derive(Debug,PartialEq,Eq,Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CodecMode {
     /// Initial mode
     Connect,
@@ -62,19 +62,19 @@ pub enum NntpInput {
 /// because we need to switch between reading lines and multi-line blocks,
 /// and we might want to do more advanced buffering later on.
 pub struct NntpCodec {
-    socket:	            TcpStream,
-    rd:		            BytesMut,
-    rd_pos:             usize,
-    rd_overflow:        bool,
-    rd_state:           State,
-    rd_line_start:      usize,
-    rd_reserve_size:    usize,
-    wr:		            Bytes,
-    arttype_scanner:    ArtTypeScanner,
-    wr_timeout:         Delay,
-    rd_timeout:         Delay,
-    rd_mode:            CodecMode,
-    msgid:              Option<String>,
+    socket:          TcpStream,
+    rd:              BytesMut,
+    rd_pos:          usize,
+    rd_overflow:     bool,
+    rd_state:        State,
+    rd_line_start:   usize,
+    rd_reserve_size: usize,
+    wr:              Bytes,
+    arttype_scanner: ArtTypeScanner,
+    wr_timeout:      Delay,
+    rd_timeout:      Delay,
+    rd_mode:         CodecMode,
+    msgid:           Option<String>,
 }
 
 impl NntpCodec {
@@ -82,19 +82,19 @@ impl NntpCodec {
     pub fn new(socket: TcpStream) -> NntpCodec {
         let _ = socket.set_nodelay(true);
         NntpCodec {
-			socket:	            socket,
-			rd:		            BytesMut::new(),
-			wr:		            Bytes::new(),
-            rd_pos:             0,
-            rd_overflow:        false,
-            rd_reserve_size:    0,
-            rd_state:           State::Lf1Seen,
-            rd_line_start:      0,
-            arttype_scanner:    ArtTypeScanner::new(),
-            rd_timeout:         timer::delay_for(Duration::new(INITIAL_TIMEOUT, 0)),
-            wr_timeout:         timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
-            rd_mode:            CodecMode::Connect,
-            msgid:              None,
+            socket:          socket,
+            rd:              BytesMut::new(),
+            wr:              Bytes::new(),
+            rd_pos:          0,
+            rd_overflow:     false,
+            rd_reserve_size: 0,
+            rd_state:        State::Lf1Seen,
+            rd_line_start:   0,
+            arttype_scanner: ArtTypeScanner::new(),
+            rd_timeout:      timer::delay_for(Duration::new(INITIAL_TIMEOUT, 0)),
+            wr_timeout:      timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
+            rd_mode:         CodecMode::Connect,
+            msgid:           None,
         }
     }
 
@@ -112,7 +112,13 @@ impl NntpCodec {
             // We grow the reserve_size during the session, and never shrink it.
             if self.rd_reserve_size < 131072 {
                 let buflen = self.rd.len();
-                let size = if buflen <= 1024 { 1024 } else if buflen <= 16384 { 16384 } else { 131072 };
+                let size = if buflen <= 1024 {
+                    1024
+                } else if buflen <= 16384 {
+                    16384
+                } else {
+                    131072
+                };
                 self.rd_reserve_size = size;
             }
             let size = self.rd_reserve_size;
@@ -150,7 +156,6 @@ impl NntpCodec {
     }
 
     fn read_block(&mut self, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
-
         // resume where we left off.
         let mut bufpos = self.rd_pos;
         {
@@ -170,7 +175,7 @@ impl NntpCodec {
                             },
                             None => {
                                 bufpos = buflen;
-                            }
+                            },
                         }
                     },
                     State::Cr1Seen => {
@@ -178,8 +183,9 @@ impl NntpCodec {
                             b'\n' => {
                                 // have a full line. scan it.
                                 if do_scan {
-                                    self.arttype_scanner.scan_line(&buf[self.rd_line_start..bufpos+1]);
-                                    self.rd_line_start = bufpos+1;
+                                    self.arttype_scanner
+                                        .scan_line(&buf[self.rd_line_start..bufpos + 1]);
+                                    self.rd_line_start = bufpos + 1;
                                 }
                                 State::Lf1Seen
                             },
@@ -247,14 +253,14 @@ impl NntpCodec {
         match self.read_block(true) {
             Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
                 let msgid = self.get_msgid();
-                let article = Article{
-                    hash:       HashFeed::hash_str(&msgid),
-                    msgid:      msgid,
-                    len:        buf.len(),
-                    data:       buf,
-                    arttype:    self.arttype_scanner.art_type(),
-                    lines:      self.arttype_scanner.lines(),
-                    pathhost:   None,
+                let article = Article {
+                    hash:     HashFeed::hash_str(&msgid),
+                    msgid:    msgid,
+                    len:      buf.len(),
+                    data:     buf,
+                    arttype:  self.arttype_scanner.art_type(),
+                    lines:    self.arttype_scanner.lines(),
+                    pathhost: None,
                 };
                 self.arttype_scanner.reset();
                 Poll::Ready(Some(Ok(NntpInput::Article(article))))
@@ -263,7 +269,7 @@ impl NntpCodec {
         }
     }
 
-	fn nntp_sink_poll_ready(&mut self, cx: &mut Context, mut flush: bool) -> Poll<Result<(), io::Error>> {
+    fn nntp_sink_poll_ready(&mut self, cx: &mut Context, mut flush: bool) -> Poll<Result<(), io::Error>> {
         trace!("flushing buffer");
 
         while !self.wr.is_empty() {
@@ -272,8 +278,11 @@ impl NntpCodec {
             let socket = Pin::new(&mut self.socket);
             match socket.poll_write(cx, &self.wr) {
                 Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, "failed to
-                                          write buffer to socket")));
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to
+                                          write buffer to socket",
+                    )));
                 },
                 Poll::Ready(Ok(n)) => {
                     let _ = self.wr.split_to(n);
@@ -314,21 +323,21 @@ impl NntpCodec {
                 Poll::Ready(err)
             },
         }
-	}
+    }
 
-	fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
+    fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
         self.wr = item;
         Ok(())
     }
 
-	fn nntp_sink_poll_close(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn nntp_sink_poll_close(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         match self.nntp_sink_poll_ready(cx, true) {
             Poll::Ready(Ok(())) => {},
             other => return other,
         }
         self.socket.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
-	}
+    }
 
     pub fn set_mode(&mut self, mode: CodecMode) {
         self.rd_mode = mode.clone();
@@ -362,7 +371,6 @@ impl Stream for NntpCodec {
     type Item = Result<NntpInput, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-
         let rd_mode = self.get_mode();
         match rd_mode {
             CodecMode::Connect => {
@@ -372,7 +380,6 @@ impl Stream for NntpCodec {
             CodecMode::Quit => return Poll::Ready(None),
             _ => {},
         }
-
 
         // read as much data as we can.
         let sock_closed = match self.fill_read_buf(cx) {
@@ -401,7 +408,6 @@ impl Stream for NntpCodec {
         // see if the other side closed the socket.
         if sock_closed {
             if self.rd_state != State::Eof {
-
                 // we were still processing data .. this was unexpected!
                 if self.rd.len() > 0 {
                     // We were still reading a line, or a block, and hit EOF
@@ -441,26 +447,24 @@ impl Stream for NntpCodec {
 impl Sink<Bytes> for NntpCodec {
     type Error = io::Error;
 
-	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         self.nntp_sink_poll_ready(cx, false)
     }
 
-	fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
+    fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
         self.nntp_sink_start_send(item)
     }
 
-	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         self.nntp_sink_poll_ready(cx, true)
     }
 
-	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         self.nntp_sink_poll_close(cx)
     }
 }
 
 // helper
 fn calc_delay(secs: u64) -> Instant {
-    Instant::now().checked_add(Duration::new(secs, 0)). unwrap()
+    Instant::now().checked_add(Duration::new(secs, 0)).unwrap()
 }
-
-

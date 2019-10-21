@@ -1,6 +1,5 @@
-
 /// List of reasons why we didn't accept the article.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtError {
     /// after receiving article we already had it anyway.
     PostDuplicate,
@@ -63,4 +62,3 @@ pub enum ArtError {
 }
 
 pub type ArtResult<T> = Result<T, ArtError>;
-

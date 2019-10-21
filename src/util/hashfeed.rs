@@ -1,7 +1,6 @@
-/// hashfeed support.
-
-use std::io;
 use std::default::Default;
+/// hashfeed support.
+use std::io;
 
 use md5;
 
@@ -17,8 +16,8 @@ struct HashEntry {
 /// A HashFeed is a list of hash matches.
 #[derive(Default, Debug, Clone, Deserialize)]
 pub struct HashFeed {
-    has_and:    bool,
-    list:       Vec<HashEntry>,
+    has_and: bool,
+    list:    Vec<HashEntry>,
 }
 
 impl HashFeed {
@@ -26,55 +25,45 @@ impl HashFeed {
     pub fn new(list: &str) -> io::Result<HashFeed> {
         let mut has_and = false;
         let mut valid = true;
-        let mut seps = vec![ ',' ];
-        let mut list: Vec<HashEntry> = list.split(|x| {
-            if x == ',' || x == '&' || x == '|' {
-                seps.push(x);
-                true
-            } else {
-                false
-            }
-        }).map(|hm| {
-            let mut dh = HashEntry::default();
+        let mut seps = vec![','];
+        let mut list: Vec<HashEntry> = list
+            .split(|x| {
+                if x == ',' || x == '&' || x == '|' {
+                    seps.push(x);
+                    true
+                } else {
+                    false
+                }
+            })
+            .map(|hm| {
+                let mut dh = HashEntry::default();
 
-            // Split this entry up in a number and a modulo..
-            let a: Vec<&str> = hm.splitn(2, '/').collect();
-            if a.len() != 2 {
-                valid = false;
-                return dh;
-            }
+                // Split this entry up in a number and a modulo..
+                let a: Vec<&str> = hm.splitn(2, '/').collect();
+                if a.len() != 2 {
+                    valid = false;
+                    return dh;
+                }
 
-            // After the modulo there might be a :offset
-            let b: Vec<&str> = a[1].splitn(2, ':').collect();
+                // After the modulo there might be a :offset
+                let b: Vec<&str> = a[1].splitn(2, ':').collect();
 
-            // Parse the modulo.
-            if let Ok(x) = b[0].parse::<u32>() {
-                if x > 0 {
-                    dh.modval = x;
+                // Parse the modulo.
+                if let Ok(x) = b[0].parse::<u32>() {
+                    if x > 0 {
+                        dh.modval = x;
+                    } else {
+                        valid = false;
+                    }
                 } else {
                     valid = false;
                 }
-            } else {
-                valid = false;
-            }
 
-            // Parse the number or number range.
-            let c: Vec<&str> = a[0].splitn(2, '-').collect();
-            if let Ok(x) = c[0].parse::<u32>() {
-                if x > 0 && x <= dh.modval {
-                    dh.start = x;
-                    dh.end = x;
-                } else {
-                    valid = false;
-                }
-            } else {
-                valid = false;
-            }
-
-            // parse the second part of the range, if present.
-            if c.len() > 1 {
-                if let Ok(x) = c[1].parse::<u32>() {
-                    if x > 0 && x >= dh.start && x <= dh.modval {
+                // Parse the number or number range.
+                let c: Vec<&str> = a[0].splitn(2, '-').collect();
+                if let Ok(x) = c[0].parse::<u32>() {
+                    if x > 0 && x <= dh.modval {
+                        dh.start = x;
                         dh.end = x;
                     } else {
                         valid = false;
@@ -82,33 +71,46 @@ impl HashFeed {
                 } else {
                     valid = false;
                 }
-            }
 
-            // Parse the offset.
-            if b.len() > 1 {
-                has_and = true;
-                if let Ok(x) = b[1].parse::<u32>() {
-                    if x <= 12 {
-                        dh.offset = x;
+                // parse the second part of the range, if present.
+                if c.len() > 1 {
+                    if let Ok(x) = c[1].parse::<u32>() {
+                        if x > 0 && x >= dh.start && x <= dh.modval {
+                            dh.end = x;
+                        } else {
+                            valid = false;
+                        }
+                    } else {
+                        valid = false;
+                    }
+                }
+
+                // Parse the offset.
+                if b.len() > 1 {
+                    has_and = true;
+                    if let Ok(x) = b[1].parse::<u32>() {
+                        if x <= 12 {
+                            dh.offset = x;
+                        } else {
+                            valid = false;
+                        }
                     } else {
                         valid = false;
                     }
                 } else {
-                    valid = false;
+                    // Marker, meaning "not set".
+                    dh.offset = 666;
                 }
-            } else {
-                // Marker, meaning "not set".
-                dh.offset = 666;
-            }
-            dh
-        }).collect();
+                dh
+            })
+            .collect();
 
         if !valid {
             return Err(io::Error::new(io::ErrorKind::Other, "cannot parse hashfeed"));
         }
 
         // fill in the rest.
-        for i in 0 .. list.len() {
+        for i in 0..list.len() {
             if seps[i] == '&' || seps[i] == '|' {
                 if list[i].offset == 666 {
                     list[i].offset = 4;
@@ -121,7 +123,7 @@ impl HashFeed {
             }
         }
 
-        Ok(HashFeed{has_and, list})
+        Ok(HashFeed { has_and, list })
     }
 
     /// See if a hash matches one of the hashmatches in this hashfeed.
@@ -183,9 +185,8 @@ pub(crate) mod tests {
         let n = HashFeed::hash_str("<>");
         assert!(m == n);
 
-        assert!(((n >> 0*8) & 0xffffffff) as u32 == 0x49367f83);
-        assert!(((n >> 1*8) & 0xffffffff) as u32 == 0x1549367f);
-        assert!(((n >> 6*8) & 0xffffffff) as u32 == 0x28d992ea);
-
-	}
+        assert!(((n >> 0 * 8) & 0xffffffff) as u32 == 0x49367f83);
+        assert!(((n >> 1 * 8) & 0xffffffff) as u32 == 0x1549367f);
+        assert!(((n >> 6 * 8) & 0xffffffff) as u32 == 0x28d992ea);
+    }
 }

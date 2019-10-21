@@ -14,8 +14,8 @@
 //!   checked to see which ones of them want to receive that article.
 //!   For those the article will be queued to be sent to the peer.
 //!
-use std::default::Default;
 use std::collections::HashMap;
+use std::default::Default;
 use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -23,12 +23,13 @@ use std::str::FromStr;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::hostcache::HostCache;
-use crate::util::{self,HashFeed,MatchList,MatchResult,WildMatList};
+use crate::util::{self, HashFeed, MatchList, MatchResult, WildMatList};
 
 use ipnet::IpNet;
 
 /// A complete newsfeeds file.
 #[derive(Debug)]
+#[rustfmt::skip]
 pub struct NewsFeeds {
     /// The IFILTER label
     pub infilter:       Option<NewsPeer>,
@@ -43,16 +44,15 @@ pub struct NewsFeeds {
 }
 
 impl NewsFeeds {
-
     /// Intialize a new "newsfeeds".
     pub fn new() -> NewsFeeds {
-        NewsFeeds{
-            infilter:       None,
-            peers:          Vec::new(),
-            peer_map:       HashMap::new(),
-            groupdefs:      Vec::new(),
-            hcache:         HostCache::get(),
-            timestamp:      util::unixtime_ms(),
+        NewsFeeds {
+            infilter:  None,
+            peers:     Vec::new(),
+            peer_map:  HashMap::new(),
+            groupdefs: Vec::new(),
+            hcache:    HostCache::get(),
+            timestamp: util::unixtime_ms(),
         }
     }
 
@@ -96,10 +96,10 @@ impl NewsFeeds {
     /// Returns a tuple consisting of the index into the peers vector
     /// and a reference to the NewsPeer instance.
     pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
-        if let Some(name) =  self.hcache.lookup(ipaddr) {
+        if let Some(name) = self.hcache.lookup(ipaddr) {
             return self.peer_map.get(&name).map(|idx| (*idx, &self.peers[*idx]));
         }
-        for i in 0 .. self.peers.len() {
+        for i in 0..self.peers.len() {
             let e = &self.peers[i];
             for n in &e.innet {
                 if n.contains(ipaddr) {
@@ -113,6 +113,7 @@ impl NewsFeeds {
 
 /// Definition of a newspeer.
 #[derive(Default,Debug,Clone)]
+#[rustfmt::skip]
 pub struct NewsPeer {
     /// Name of this feed.
     pub label:              String,
@@ -163,16 +164,23 @@ pub struct NewsPeer {
 impl NewsPeer {
     /// Get a fresh NewsPeer with defaults set.
     pub fn new() -> NewsPeer {
-        NewsPeer{
-            port:           119,
-            maxparallel:    2,
+        NewsPeer {
+            port: 119,
+            maxparallel: 2,
             ..Default::default()
         }
     }
 
     /// Check if this peer wants to have this article.
-    pub fn wants(&self, art: &Article, hashfeed: &HashFeed, path: &[&str], newsgroups: &mut MatchList, dist: Option<&Vec<&str>>) -> bool {
-
+    pub fn wants(
+        &self,
+        art: &Article,
+        hashfeed: &HashFeed,
+        path: &[&str],
+        newsgroups: &mut MatchList,
+        dist: Option<&Vec<&str>>,
+    ) -> bool
+    {
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
             return false;
@@ -219,11 +227,12 @@ impl NewsPeer {
 
         // several min/max matchers.
         if (self.mincross > 0 && newsgroups.len() < (self.mincross as usize)) ||
-           (self.maxcross > 0 && newsgroups.len() > (self.maxcross as usize)) ||
-           (self.minpath > 0 && path.len() < (self.minpath as usize)) ||
-           (self.maxpath > 0 && path.len() > (self.maxpath) as usize) ||
-           (self.minsize > 0 && (art.len as u64) < self.minsize) ||
-           (self.maxsize > 0 && (art.len as u64) > self.maxsize) {
+            (self.maxcross > 0 && newsgroups.len() > (self.maxcross as usize)) ||
+            (self.minpath > 0 && path.len() < (self.minpath as usize)) ||
+            (self.maxpath > 0 && path.len() > (self.maxpath) as usize) ||
+            (self.minsize > 0 && (art.len as u64) < self.minsize) ||
+            (self.maxsize > 0 && (art.len as u64) > self.maxsize)
+        {
             return false;
         }
 
@@ -233,11 +242,12 @@ impl NewsPeer {
         }
 
         // requiregroups matching.
-        if self.requiregroups.patterns.len() > 0 && self.requiregroups.matchlistx(newsgroups) != MatchResult::Match {
+        if self.requiregroups.patterns.len() > 0 &&
+            self.requiregroups.matchlistx(newsgroups) != MatchResult::Match
+        {
             return false;
         }
 
         true
     }
 }
-

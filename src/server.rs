@@ -16,23 +16,22 @@ use tokio::runtime::current_thread;
 use crate::bind_socket;
 use crate::config;
 use crate::diag::SessionStats;
-use crate::nntp_codec::{NntpCodec,NntpInput};
 use crate::history::History;
-use crate::spool::Spool;
+use crate::nntp_codec::{NntpCodec, NntpInput};
 use crate::nntp_session::NntpSession;
+use crate::spool::Spool;
 
 #[derive(Clone)]
 pub struct Server {
-    pub history:    History,
-    pub spool:      Spool,
-    pub conns:      Arc<Mutex<HashMap<String, usize>>>
+    pub history: History,
+    pub spool:   Spool,
+    pub conns:   Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl Server {
-
     /// Create a new Server.
     pub fn new(history: History, spool: Spool) -> Server {
-        Server{
+        Server {
             history,
             spool,
             conns: Arc::new(Mutex::new(HashMap::new())),
@@ -41,7 +40,6 @@ impl Server {
 
     /// Run the server on a bunch of current_thread executors.
     pub fn run_multisingle(self, listeners: Vec<TcpListener>) -> io::Result<()> {
-
         trace!("main server running on thread {:?}", thread::current().id());
         let config = config::get_config();
 
@@ -54,7 +52,10 @@ impl Server {
 
         // copy addresses of the listening sockets, then push the first
         // listener-set on to the listener_sets vector.
-        let addrs = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
+        let addrs = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap())
+            .collect::<Vec<_>>();
         let mut listener_sets = Vec::new();
         listener_sets.push(listeners);
 
@@ -72,10 +73,12 @@ impl Server {
             for _ in 1..num_threads {
                 let mut v = Vec::new();
                 for addr in &addrs {
-                    let l = bind_socket(&addr).map_err(|e| {
+                    let l = bind_socket(&addr)
+                        .map_err(|e| {
                             eprintln!("nntp-rs: server: fatal: {}", e);
                             exit(1);
-                        }).unwrap();
+                        })
+                        .unwrap();
                     v.push(l);
                 }
                 listener_sets.push(v);
@@ -83,7 +86,6 @@ impl Server {
         }
 
         for listener_set in listener_sets.into_iter() {
-
             let server = self.clone();
             let core_id = if core_ids.len() > 0 {
                 Some(core_ids.remove(0))
@@ -92,7 +94,6 @@ impl Server {
             };
 
             let tid = thread::spawn(move || {
-
                 // tokio runtime for this thread alone.
                 let mut runtime = current_thread::Runtime::new().unwrap();
 
@@ -124,7 +125,6 @@ impl Server {
 
     // run the server on the default threadpool executor.
     pub fn run_threadpool(&mut self, listeners: Vec<TcpListener>) -> io::Result<()> {
-
         let reactor_handle = tokio_net::driver::Handle::default();
         let runtime = tokio::runtime::Runtime::new()?;
 
@@ -139,12 +139,10 @@ impl Server {
         Ok(())
     }
 
-    async fn run(self, listener: tokio::net::TcpListener)
-    {
+    async fn run(self, listener: tokio::net::TcpListener) {
         // Pull out a stream of sockets for incoming connections
         let mut incoming = listener.incoming();
         while let Some(socket) = incoming.next().await {
-
             let socket = match socket {
                 Ok(s) => s,
                 Err(_) => {
@@ -158,11 +156,11 @@ impl Server {
             let fdno = socket.as_raw_fd() as u32;
             let codec = NntpCodec::new(socket);
 
-            let stats = SessionStats{
-                hostname:   peer.to_string(),
-                ipaddr:     peer.to_string(),
-                label:      "unknown".to_string(),
-                fdno:       fdno,
+            let stats = SessionStats {
+                hostname: peer.to_string(),
+                ipaddr: peer.to_string(),
+                label: "unknown".to_string(),
+                fdno: fdno,
                 ..SessionStats::default()
             };
 
@@ -173,18 +171,20 @@ impl Server {
                 while let Some(result) = session.codec.next().await {
                     let response = match result {
                         Err(e) => session.on_read_error(e).await,
-                        Ok(input) => match input {
-                            NntpInput::Connect => session.on_connect().await,
-                            NntpInput::Eof => session.on_eof().await,
-                            buf @ NntpInput::Line(_)|
-                            buf @ NntpInput::Block(_)|
-                            buf @ NntpInput::Article(_) => {
-                                match session.on_input(buf).await {
-                                    Ok(res) => res,
-                                    Err(e) => session.on_generic_error(e).await,
-                                }
+                        Ok(input) => {
+                            match input {
+                                NntpInput::Connect => session.on_connect().await,
+                                NntpInput::Eof => session.on_eof().await,
+                                buf @ NntpInput::Line(_) |
+                                buf @ NntpInput::Block(_) |
+                                buf @ NntpInput::Article(_) => {
+                                    match session.on_input(buf).await {
+                                        Ok(res) => res,
+                                        Err(e) => session.on_generic_error(e).await,
+                                    }
+                                },
                             }
-                        }
+                        },
                     };
                     if let Err(e) = session.codec.send(response.data).await {
                         session.on_write_error(e).await;
@@ -228,4 +228,3 @@ impl Server {
         }
     }
 }
-

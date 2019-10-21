@@ -1,7 +1,11 @@
-#[macro_use] extern crate lazy_static;
-#[macro_use] extern crate log;
-#[macro_use] extern crate clap;
-#[macro_use] extern crate serde_derive;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate serde_derive;
 
 pub mod article;
 pub mod arttype;
@@ -22,7 +26,7 @@ pub mod spool;
 pub mod util;
 
 use std::io;
-use std::net::{SocketAddr,TcpListener};
+use std::net::{SocketAddr, TcpListener};
 use std::panic;
 use std::process::exit;
 use std::thread;
@@ -38,14 +42,14 @@ use spool::Spool;
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 fn main() -> io::Result<()> {
-
     let matches = clap_app!(nntp_rs =>
         (version: "0.1")
         (@arg CONFIG: -c --config +takes_value "config file (config.toml)")
         (@arg LISTEN: -l --listen +takes_value "listen address/port ([::]:1119)")
         (@arg DEBUG: --debug "maximum log verbosity: debug (info)")
         (@arg TRACE: --trace "maximum log verbosity: trace (info)")
-    ).get_matches();
+    )
+    .get_matches();
 
     if matches.is_present("TRACE") {
         log::set_max_level(log::LevelFilter::Trace);
@@ -71,16 +75,20 @@ fn main() -> io::Result<()> {
         cmd_listenaddrs = Some(config::StringOrVec::String(l.to_string()));
         listenaddrs = &cmd_listenaddrs;
     }
-    let addrs = config::parse_listeners(listenaddrs).map_err(|e| {
-        eprintln!("nntp-rs: {}", e);
-        exit(1);
-    }).unwrap();
+    let addrs = config::parse_listeners(listenaddrs)
+        .map_err(|e| {
+            eprintln!("nntp-rs: {}", e);
+            exit(1);
+        })
+        .unwrap();
     let mut listeners = Vec::new();
     for addr in &addrs {
-        let listener = bind_socket(&addr).map_err(|e| {
-            eprintln!("nntp-rs: listen socket: bind to {}: {}", addr, e);
-            exit(1);
-        }).unwrap();
+        let listener = bind_socket(&addr)
+            .map_err(|e| {
+                eprintln!("nntp-rs: listen socket: bind to {}: {}", addr, e);
+                exit(1);
+            })
+            .unwrap();
         listeners.push(listener);
     }
 
@@ -120,16 +128,25 @@ fn main() -> io::Result<()> {
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
     let hpath = config::expand_path(&config.paths, &config.history.file);
-    let hist = History::open(&config.history.backend, hpath.clone(), config.history.threads, bt.clone()).map_err(|e| {
-         eprintln!("nntp-rs: history {}: {}", hpath, e);
-         exit(1);
-    }).unwrap();
+    let hist = History::open(
+        &config.history.backend,
+        hpath.clone(),
+        config.history.threads,
+        bt.clone(),
+    )
+    .map_err(|e| {
+        eprintln!("nntp-rs: history {}: {}", hpath, e);
+        exit(1);
+    })
+    .unwrap();
 
     // open spool. ditto.
-    let spool = Spool::new(&config.spool, None, bt).map_err(|e| {
-         eprintln!("nntp-rs: initializing spool: {}", e);
-         exit(1);
-    }).unwrap();
+    let spool = Spool::new(&config.spool, None, bt)
+        .map_err(|e| {
+            eprintln!("nntp-rs: initializing spool: {}", e);
+            exit(1);
+        })
+        .unwrap();
 
     info!("Listening on {:?}", addrs);
 
@@ -141,48 +158,54 @@ fn main() -> io::Result<()> {
     // and start server.
     let mut server = server::Server::new(hist, spool);
     match config.server.runtime.as_ref().map(|s| s.as_str()) {
-        None|Some("threadpool") => server.run_threadpool(listeners),
+        None | Some("threadpool") => server.run_threadpool(listeners),
         Some("multisingle") => server.run_multisingle(listeners),
         Some(e) => {
             eprintln!("nntp-rs: unknown runtime {}", e);
             exit(1);
-        }
+        },
     }
 }
 
 /// Create a socket, set SO_REUSEPORT on it, bind it to an address,
 /// and start listening for connections.
 pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
-
     let builder = if addr.is_ipv6() {
         // create IPv6 socket and make it v6-only.
-        let b = net2::TcpBuilder::new_v6().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e))
-        })?;
+        let b = net2::TcpBuilder::new_v6()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e)))?;
         if let Err(e) = b.only_v6(true) {
-            Err(io::Error::new(io::ErrorKind::Other, format!("setting socket to only_v6: {}", e)))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("setting socket to only_v6: {}", e),
+            ))
         } else {
             Ok(b)
         }
     } else {
-        net2::TcpBuilder::new_v4().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("creating IPv4 socket: {}", e))
-        })
+        net2::TcpBuilder::new_v4()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("creating IPv4 socket: {}", e)))
     }?;
     // reuse_addr to make sure we can restart quickly.
     let builder = builder.reuse_address(true).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("setting SO_REUSEPORT on socket: {}", e))
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("setting SO_REUSEPORT on socket: {}", e),
+        )
     })?;
     // reuse_port to be able to have multiple sockets listening on the same port.
     let builder = builder.reuse_port(true).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("setting SO_REUSEPORT on socket: {}", e))
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("setting SO_REUSEPORT on socket: {}", e),
+        )
     })?;
-    let builder = builder.bind(addr).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("binding socket to {}: {}", addr, e))
-    })?;
-    let listener = builder.listen(128).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("listening on socket: {}", e))
-    })?;
+    let builder = builder
+        .bind(addr)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("binding socket to {}: {}", addr, e)))?;
+    let listener = builder
+        .listen(128)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("listening on socket: {}", e)))?;
     Ok(listener)
 }
 

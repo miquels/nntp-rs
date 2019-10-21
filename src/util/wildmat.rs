@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use super::wildmat;
 
 lazy_static! {
-    static ref IDCOUNTER : Arc<AtomicUsize> = Arc::<AtomicUsize>::default();
+    static ref IDCOUNTER: Arc<AtomicUsize> = Arc::<AtomicUsize>::default();
 }
 
 /// Match result.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchResult {
     Match,
     NoMatch,
@@ -19,7 +19,7 @@ pub enum MatchResult {
 }
 
 /// Wildcard pattern.
-#[derive(Debug,Clone,PartialEq,Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WildPat {
     Text(String),
     Pattern(String),
@@ -67,16 +67,28 @@ impl WildPat {
         match *self {
             WildPat::Text(ref p) => {
                 let (p, t) = wtype(p);
-                if p == text { Some(t) } else { None }
+                if p == text {
+                    Some(t)
+                } else {
+                    None
+                }
             },
             WildPat::Prefix(ref p) => {
                 let (p, t) = wtype(p);
-                if text.starts_with(p) { Some(t) } else { None }
-            }
+                if text.starts_with(p) {
+                    Some(t)
+                } else {
+                    None
+                }
+            },
             WildPat::Pattern(ref p) => {
                 let (p, t) = wtype(p);
-                if wildmat(text, p) { Some(t) } else { None }
-            }
+                if wildmat(text, p) {
+                    Some(t)
+                } else {
+                    None
+                }
+            },
             WildPat::Reference(_) => None,
         }
     }
@@ -84,9 +96,7 @@ impl WildPat {
     /// Is this an empty pattern?
     pub fn is_empty(&self) -> bool {
         match *self {
-            WildPat::Text(ref p) |
-            WildPat::Prefix(ref p) |
-            WildPat::Pattern(ref p) => p.is_empty(),
+            WildPat::Text(ref p) | WildPat::Prefix(ref p) | WildPat::Pattern(ref p) => p.is_empty(),
             _ => false,
         }
     }
@@ -97,21 +107,21 @@ fn new_id() -> u16 {
 }
 
 /// A list of wildcard patterns.
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct WildMatList {
-    pub id:         u16,
-    pub name:       String,
-    pub initial:    MatchResult,
-    pub patterns:   Vec<WildPat>,
+    pub id:       u16,
+    pub name:     String,
+    pub initial:  MatchResult,
+    pub patterns: Vec<WildPat>,
 }
 
 impl Default for WildMatList {
     fn default() -> WildMatList {
-        WildMatList{
-            name: "".to_string(),
-            initial: MatchResult::NoMatch,
+        WildMatList {
+            name:     "".to_string(),
+            initial:  MatchResult::NoMatch,
             patterns: Vec::new(),
-            id: new_id(),
+            id:       new_id(),
         }
     }
 }
@@ -127,7 +137,12 @@ impl WildMatList {
             }
             patterns.push(pat.parse().unwrap());
         }
-        WildMatList{ name: name.to_string(), patterns, initial, id: new_id() }
+        WildMatList {
+            name: name.to_string(),
+            patterns,
+            initial,
+            id: new_id(),
+        }
     }
 
     /// Add a pattern.
@@ -152,7 +167,6 @@ impl WildMatList {
     /// Logs a warning when a reference cannot be found, or when a circular
     /// reference is detected.
     pub fn resolve(&mut self, refs: &[WildMatList]) {
-
         for p in self.patterns.iter_mut() {
             let mut newpat = None;
             if let WildPat::Text(x) = p {
@@ -165,7 +179,10 @@ impl WildMatList {
                         }
                     }
                     if newpat.is_none() {
-                        warn!("resolving references for {}: reference {} not found", self.name, x);
+                        warn!(
+                            "resolving references for {}: reference {} not found",
+                            self.name, x
+                        );
                         newpat = Some(WildPat::Text("".to_string()));
                     }
                 }
@@ -176,7 +193,7 @@ impl WildMatList {
         }
         let mut v = Vec::new();
         self.check_loops(&self.name, refs, &mut v);
-     }
+    }
 
     // Check if there is a circular reference loop
     fn check_loops(&self, top: &str, refs: &[WildMatList], visited: &mut [bool]) {
@@ -211,11 +228,9 @@ impl WildMatList {
 
     // like matches, but knows about references, and cached references.
     pub fn matches2(&self, word: &str, word_idx: usize, list: &mut MatchList) -> Option<MatchResult> {
-
         let mut result = None;
 
         for p in &self.patterns {
-
             let res = if let WildPat::Reference(ref_idx) = p {
                 // a reference. do we have it in cache?
                 let gref = &list.refs[*ref_idx];
@@ -247,7 +262,7 @@ impl WildMatList {
     pub fn matchlist(&self, words: &[&str]) -> MatchResult {
         let mut res = MatchResult::NoMatch;
         for w in words {
-             match self.matches(w) {
+            match self.matches(w) {
                 m @ MatchResult::Poison => return m,
                 m @ MatchResult::Match => res = m,
                 MatchResult::NoMatch => {},
@@ -276,11 +291,11 @@ impl WildMatList {
 }
 
 /// Passed to WildMatList::matchlistx(). Caches matches in references.
-#[derive(Default,Debug)]
+#[derive(Default, Debug)]
 pub struct MatchList<'a> {
-    cache:  HashMap<(u16,u16), Option<MatchResult>>,
-    words:  &'a [&'a str],
-    refs:   &'a [WildMatList],
+    cache: HashMap<(u16, u16), Option<MatchResult>>,
+    words: &'a [&'a str],
+    refs:  &'a [WildMatList],
 }
 
 impl<'a> MatchList<'a> {
@@ -299,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_wildmat() {
-		let w = WildMatList::new("name", "hal*[o]");
+        let w = WildMatList::new("name", "hal*[o]");
         assert!(w.matches("hallo") == MatchResult::Match);
     }
 }

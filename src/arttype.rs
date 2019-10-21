@@ -12,7 +12,7 @@
 //! License: https://opensource.org/licenses/BSD-2-Clause
 //!
 
-use std::fmt::{self,Display};
+use std::fmt::{self, Display};
 use std::str::FromStr;
 
 /*-
@@ -44,18 +44,19 @@ use std::str::FromStr;
  *
  */
 
-const UUE : u8 = 0x01;
-const B64 : u8 = 0x02;
-const BHX : u8 = 0x04;
-const ALLTYPES : u8 = 0x07;
+const UUE: u8 = 0x01;
+const B64: u8 = 0x02;
+const BHX: u8 = 0x04;
+const ALLTYPES: u8 = 0x07;
 
 /// Auto-detected article type.
-#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtType {
-    arttype:    u32,
-    negate:     bool,
+    arttype: u32,
+    negate:  bool,
 }
 
+#[rustfmt::skip]
 impl ArtType {
     pub const NONE: u32        =   0x000000;
     pub const DEFAULT: u32     =   0x000001;
@@ -90,6 +91,7 @@ impl FromStr for ArtType {
             (s, false)
         };
         let s = s.to_ascii_lowercase();
+        #[rustfmt::skip]
         let r = match s.as_str() {
             "none"      => ArtType::NONE,
             "default"   => ArtType::DEFAULT,
@@ -111,9 +113,9 @@ impl FromStr for ArtType {
             "all"       => ArtType::ALL,
             _           => return Err(()),
         };
-        Ok(ArtType{
-            arttype:    r,
-            negate:     negate,
+        Ok(ArtType {
+            arttype: r,
+            negate:  negate,
         })
     }
 }
@@ -129,7 +131,6 @@ impl Display for ArtType {
 }
 
 impl ArtType {
-
     /// Match a article type to a list of types that are acceptable
     ///
     /// Returns:  true  = Match
@@ -171,26 +172,29 @@ fn lcmatch(b: &[u8], s: &str) -> bool {
 
 /// Arttype scanner.
 pub struct ArtTypeScanner {
-    arttype:    ArtType,
-    uuencode:   u32,
-    binhex:     u32,
-    base64:     u32,
-    inheader:   bool,
-    lines:      u32,
-    bodysize:   usize,
+    arttype:  ArtType,
+    uuencode: u32,
+    binhex:   u32,
+    base64:   u32,
+    inheader: bool,
+    lines:    u32,
+    bodysize: usize,
 }
 
 impl ArtTypeScanner {
     /// Return a new arttypescanner ready to scan a new article.
     pub fn new() -> ArtTypeScanner {
         ArtTypeScanner {
-            arttype:    ArtType{arttype: ArtType::DEFAULT, negate: false},
-            uuencode:   0,
-            binhex:     0,
-            base64:     0,
-            inheader:   true,
-            lines:      0,
-            bodysize:   0,
+            arttype:  ArtType {
+                arttype: ArtType::DEFAULT,
+                negate:  false,
+            },
+            uuencode: 0,
+            binhex:   0,
+            base64:   0,
+            inheader: true,
+            lines:    0,
+            bodysize: 0,
         }
     }
 
@@ -211,7 +215,10 @@ impl ArtTypeScanner {
         } else {
             at
         };
-        ArtType{ arttype: u, negate: false }
+        ArtType {
+            arttype: u,
+            negate:  false,
+        }
     }
 
     /// Return the #of lines in the body
@@ -233,7 +240,6 @@ impl ArtTypeScanner {
      */
     /// Scan one line from the article.
     pub fn scan_line(&mut self, line: &[u8]) {
-
         if !self.inheader {
             self.lines += 1;
             self.bodysize += line.len();
@@ -293,10 +299,10 @@ impl ArtTypeScanner {
         }
 
         if first == b'=' && lcmatch(line, "=ybegin part=") {
-            self.arttype.arttype |= ArtType::BINARY|ArtType::PARTIAL|ArtType::YENC;
+            self.arttype.arttype |= ArtType::BINARY | ArtType::PARTIAL | ArtType::YENC;
         }
         if first == b'=' && lcmatch(line, "=ybegin line=") {
-            self.arttype.arttype |= ArtType::BINARY|ArtType::YENC;
+            self.arttype.arttype |= ArtType::BINARY | ArtType::YENC;
         }
 
         if self.inheader {
@@ -309,7 +315,7 @@ impl ArtTypeScanner {
                 }
             }
             if first == b'm' && lcmatch(line, "mime-version: ") {
-                    self.arttype.arttype |= ArtType::MIME;
+                self.arttype.arttype |= ArtType::MIME;
             }
         } else {
             /* Get quoted UUencode, etc. */
@@ -324,10 +330,10 @@ impl ArtTypeScanner {
             };
 
             /*
-             * We look for binary formats first, since these eat 
-             * up CPU like there is no tomorrow.  We may miss 
-             * some flags if we detect a binary file, the 
-             * alternative is to remove the `return`s and 
+             * We look for binary formats first, since these eat
+             * up CPU like there is no tomorrow.  We may miss
+             * some flags if we detect a binary file, the
+             * alternative is to remove the `return`s and
              * eat CPU for the entire binary.
              */
 
@@ -369,6 +375,7 @@ impl ArtTypeScanner {
     }
 }
 
+#[rustfmt::skip]
 static CHARMAP : [u8; 256] = [
         0  |0  |0  ,    /* ASCII 0 */
         0  |0  |0  ,    /* ASCII 1 */
@@ -637,13 +644,13 @@ static CHARMAP : [u8; 256] = [
  * This is a line-scanner that is designed to sniff out various types of
  * binary content that may or may not be well-delimited
  *
- * It scans a line, character at a time, updating a list of content types 
+ * It scans a line, character at a time, updating a list of content types
  * that the line might be, and that the line definitely is not.  The end
  * results are interpreted as the type(s) of content that the line may be.
  *
  * As this is basically a fancy character scan done with logical operations
  * and a table lookup, additional content types can be taught to this
- * function with a minimum of hassle, and up to five more types can be 
+ * function with a minimum of hassle, and up to five more types can be
  * taught with ZERO additional overhead.
  *
  * The function is optimized to abort as soon as it has positively
@@ -657,10 +664,10 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
     let mut isnttype = 255u8;
     let mut len = buf.len();
     if len > 0 {
-        if buf[len-1] == b'\n' {
+        if buf[len - 1] == b'\n' {
             len -= 1;
         }
-        if buf[len-1] == b'\r' {
+        if buf[len - 1] == b'\r' {
             len -= 1;
         }
     }
@@ -695,15 +702,15 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
 
     /*
      * As much as I'd like to check BinHex CRC's, I don't think I
-     * want to write the code... 
+     * want to write the code...
      */
 
 
     for idx in 0..len {
         /*
-        * Short circuit: if we've already de-elected all possible
-        * types, then stop iterating
-        */
+         * Short circuit: if we've already de-elected all possible
+         * types, then stop iterating
+         */
         if (isnttype & ALLTYPES) == 0 {
             return 0;
         }
@@ -730,4 +737,3 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
      */
     return istype & isnttype;
 }
-
