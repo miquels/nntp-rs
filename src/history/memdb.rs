@@ -7,6 +7,7 @@ use std::pin::Pin;
 use parking_lot::RwLock;
 
 use crate::history::{HistBackend,HistEnt,HistStatus};
+use crate::spool;
 
 /// In in-memory history database. Not to be used for production,
 /// mainly used for testing.
@@ -42,6 +43,10 @@ impl MemDb {
         db.insert(msgid.to_vec(), he.clone());
         Ok(())
     }
+
+    async fn do_expire(&self, _spool: spool::Spool, _remember: u64) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl HistBackend for MemDb {
@@ -54,5 +59,10 @@ impl HistBackend for MemDb {
     /// store an article in the MemDb database
     fn store<'a>(&'a self, msgid: &'a [u8], he: &'a HistEnt) -> Pin<Box<dyn Future<Output=io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_store(msgid, he))
+    }
+
+    /// expire the MemDb database.
+    fn expire<'a>(&'a self, spool: &'a spool::Spool, remember: u64) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        Box::pin(self.do_expire(spool.clone(), remember))
     }
 }

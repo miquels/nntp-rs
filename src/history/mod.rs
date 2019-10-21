@@ -29,6 +29,7 @@ pub trait HistBackend: Send + Sync {
     fn lookup<'a>(&'a self, msgid: &'a [u8]) -> Pin<Box<dyn Future<Output=io::Result<HistEnt>> + Send + 'a>>;
     /// Store an entry (an existing entry will be updated).
     fn store<'a>(&'a self, msgid: &'a [u8], he: &'a HistEnt) -> Pin<Box<dyn Future<Output=io::Result<()>> + Send + 'a>>;
+    fn expire<'a>(&'a self, spool: &'a spool::Spool, remember: u64) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
 /// History database functionality.
