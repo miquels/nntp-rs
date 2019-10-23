@@ -37,7 +37,7 @@ syslog = "4.0.1"
 time = "0.1.42"
 tokio = "0.2.0-alpha.6"
 tokio-executor = "0.2.0-alpha.6"
-tokio-net = "0.2.0-alpha.6"
+tokio-net = { version = "0.2.0-alpha.6", features = [ "signal" ] }
 tokio-sync = "0.2.0-alpha.6"
 toml = "0.5.3"
 users = "0.9.1"

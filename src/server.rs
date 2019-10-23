@@ -3,29 +3,34 @@ use std::io;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::process::exit;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64, atomic::Ordering};
 use std::thread;
 use std::time::Duration;
 
 use num_cpus;
 use parking_lot::Mutex;
 use tokio;
+use tokio_net::signal;
 use tokio::prelude::*;
 use tokio::runtime::current_thread;
+use tokio::sync::{mpsc, watch};
 
 use crate::bind_socket;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
+use crate::logger;
 use crate::nntp_codec::{NntpCodec, NntpInput};
 use crate::nntp_session::NntpSession;
 use crate::spool::Spool;
 
 #[derive(Clone)]
 pub struct Server {
-    pub history: History,
-    pub spool:   Spool,
-    pub conns:   Arc<Mutex<HashMap<String, usize>>>,
+    pub history:  History,
+    pub spool:    Spool,
+    pub conns:    Arc<Mutex<HashMap<String, usize>>>,
+    pub totconns: Arc<AtomicU64>,
+    pub thrconns: Arc<AtomicU64>,
 }
 
 impl Server {
@@ -35,6 +40,8 @@ impl Server {
             history,
             spool,
             conns: Arc::new(Mutex::new(HashMap::new())),
+            totconns: Arc::new(AtomicU64::new(0)),
+            thrconns: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -85,32 +92,57 @@ impl Server {
             }
         }
 
+        let (notifier, watcher, task) = self.notification_setup();
+        threads.push(self.notification_thread(notifier.clone(), watcher.clone(), task));
+
         for listener_set in listener_sets.into_iter() {
-            let server = self.clone();
+
+            let mut server = self.clone();
+            server.thrconns = Arc::new(AtomicU64::new(0));
+
             let core_id = if core_ids.len() > 0 {
                 Some(core_ids.remove(0))
             } else {
                 None
             };
 
-            let tid = thread::spawn(move || {
-                // tokio runtime for this thread alone.
-                let mut runtime = current_thread::Runtime::new().unwrap();
+            let mut watcher = watcher.clone();
 
-                trace!("current_thread::runtime on {:?}", thread::current().id());
-                let reactor_handle = tokio_net::driver::Handle::default();
+            let tid = thread::spawn(move || {
 
                 if let Some(id) = core_id {
+                    // tie this thread to a specific core.
                     core_affinity::set_for_current(id);
                 }
 
-                for listener in listener_set.into_iter() {
-                    let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
-                        .expect("cannot convert from net2 listener to tokio listener");
-                    runtime.spawn(server.clone().run(listener));
-                }
+                // tokio runtime for this thread alone.
+                let mut runtime = current_thread::Runtime::new().unwrap();
+                trace!("current_thread::runtime on {:?}", thread::current().id());
 
-                let _ = runtime.run();
+                runtime.block_on(async move {
+                    let reactor_handle = tokio_net::driver::Handle::default();
+
+                    //let (notifier, watcher) = server.notification_setup().await;
+
+                    for listener in listener_set.into_iter() {
+                        let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                            .expect("cannot convert from net2 listener to tokio listener");
+                        tokio::spawn(server.clone().run(listener, watcher.clone()));
+                    }
+
+                    // wait for a shutdown notification
+                    while let Some(notification) = watcher.next().await {
+                        match notification {
+                            Notification::ExitGraceful| Notification::ExitNow => break,
+                            _ => {},
+                        }
+                    }
+
+                    // now busy-wait until all connections are closed.
+                    while server.thrconns.load(Ordering::SeqCst) > 0 {
+                        let _ = tokio::timer::delay_for(Duration::from_millis(100)).await;
+                    }
+                })
             });
 
             threads.push(tid);
@@ -128,33 +160,149 @@ impl Server {
         let reactor_handle = tokio_net::driver::Handle::default();
         let runtime = tokio::runtime::Runtime::new()?;
 
-        for listener in listeners.into_iter() {
-            let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
-                .expect("cannot convert from net2 listener to tokio listener");
-            runtime.spawn(self.clone().run(listener));
-        }
+        runtime.block_on(async move {
 
-        runtime.shutdown_on_idle();
+            let (notifier, watcher, task) = self.notification_setup();
+            tokio::spawn(task);
+
+            for listener in listeners.into_iter() {
+                let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                    .expect("cannot convert from net2 listener to tokio listener");
+                tokio::spawn(self.clone().run(listener, watcher.clone()));
+            }
+            self.wait(notifier, watcher).await;
+        });
 
         Ok(())
     }
 
-    async fn run(self, listener: tokio::net::TcpListener) {
-        // Pull out a stream of sockets for incoming connections
-        let mut incoming = listener.incoming();
-        while let Some(socket) = incoming.next().await {
-            let socket = match socket {
-                Ok(s) => s,
-                Err(_) => {
+    // Set up a notification channel, and forward SIGINT/SIGTERM as notifications.
+    fn notification_setup(&self) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>, impl Future<Output=()>) {
+
+        // tokio::watch::channel is SPMC, so front it with a MPSC channel
+        // so that we have, in effect, a MPMC channel.
+        let (mut notifier_master, watcher) = watch::channel(Notification::None);
+        let (notifier, mut notifier_receiver) = mpsc::channel::<Notification>(16);
+
+        let notifier2 = notifier.clone();
+        let watcher2 = watcher.clone();
+
+        let task = async move {
+            tokio::spawn(async move {
+                while let Some(notification) = notifier_receiver.next().await {
+                    if let Err(_) = notifier_master.send(notification).await {
+                        break;
+                    }
+                }
+            });
+
+            // Forward control-c
+            let mut tx1 = notifier.clone();
+            tokio::spawn(async move {
+                let mut ctrl_c = signal::ctrl_c().unwrap();
+                while let Some(_) = ctrl_c.next().await {
+                    info!("received SIGINT");
+                    let _ = tx1.send(Notification::ExitGraceful).await;
+                }
+            });
+
+            // Forward SIGTERM
+            let mut tx2 = notifier.clone();
+            tokio::spawn(async move {
+                let mut sig_term = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+                while let Some(_) = sig_term.next().await {
+                    info!("received SIGTERM");
+                    let _ = tx2.send(Notification::ExitGraceful).await;
+                }
+            });
+        };
+
+        (notifier2, watcher2, task)
+    }
+
+    // The "multisingle" runtime needs to run the notification task and server.wait()
+    // on a separate runtime.
+    fn notification_thread<F>(&self, notifier: mpsc::Sender<Notification>, watcher: watch::Receiver<Notification>, task: F) -> thread::JoinHandle<()>
+    where
+        F: Future<Output = ()> + 'static + Send,
+    {
+        let server = self.clone();
+        thread::spawn(move || {
+            let mut runtime = current_thread::Runtime::new().unwrap();
+            runtime.block_on(async move {
+                tokio::spawn(task);
+                server.wait(notifier, watcher).await;
+            });
+        })
+    }
+
+    // wait for all sessions to finish.
+    async fn wait(&self, mut notifier: mpsc::Sender<Notification>, mut watcher: watch::Receiver<Notification>) {
+
+        // wait for a shutdown notification
+        let mut waited = 0u32;
+        while let Some(notification) = watcher.next().await {
+            match notification {
+                Notification::ExitGraceful => {
+                    info!("received Notification::ExitGraceful");
+                    break;
+                },
+                Notification::ExitNow => {
+                    waited = 51;
+                    break;
+                },
+                _ => {},
+            }
+        }
+
+        // now busy-wait until all connections are closed.
+        while self.totconns.load(Ordering::SeqCst) > 0 {
+            if waited == 50 {
+                info!("sending Notification::ExitNow to all remaining sessions");
+                let _ = notifier.send(Notification::ExitNow).await;
+            }
+            waited += 1;
+            let _ = tokio::timer::delay_for(Duration::from_millis(100)).await;
+            if waited == 100 || waited % 600 == 0 {
+                warn!("still waiting!");
+            }
+        }
+
+        let logger = logger::get_incoming_logger();
+        logger.quit();
+
+        info!("exiting.");
+    }
+
+    // This is run for every TCP listener socket.
+    async fn run(self, listener: tokio::net::TcpListener, watcher: watch::Receiver<Notification>) {
+
+        use futures::stream;
+        use futures::future::Either;
+
+        // We have two streams. One, a stream of incoming connections.
+        // Two, a stream of notifications. Combine them.
+        let incoming = listener.incoming().map(|s| Either::Left(s));
+        let watcher2 = watcher.clone().map(|w| Either::Right(w));
+        let mut items = stream::select(incoming, watcher2);
+
+        // Now iterate over the combined stream.
+        while let Some(item) = items.next().await {
+            let socket = match item {
+                Either::Left(Ok(s)) => s,
+                Either::Left(Err(_)) => {
                     tokio::timer::delay_for(Duration::from_millis(50));
                     continue;
                 },
+                Either::Right(Notification::ExitGraceful) => break,
+                Either::Right(Notification::ExitNow) => break,
+                _ => continue,
             };
 
             // set up codec for reader and writer.
             let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
             let fdno = socket.as_raw_fd() as u32;
-            let codec = NntpCodec::new(socket);
+            let codec = NntpCodec::new(socket, watcher.clone());
 
             let stats = SessionStats {
                 hostname: peer.to_string(),
@@ -167,10 +315,20 @@ impl Server {
             // build an nntp session.
             let mut session = NntpSession::new(peer, codec, self.clone(), stats);
 
+            let totconns = self.totconns.clone();
+            let thrconns = self.thrconns.clone();
+
             let task = async move {
+
+                totconns.fetch_add(1, Ordering::SeqCst);
+                thrconns.fetch_add(1, Ordering::SeqCst);
+
                 while let Some(result) = session.codec.next().await {
                     let response = match result {
-                        Err(e) => session.on_read_error(e).await,
+                        Err(e) => {
+                            session.on_read_error(e).await;
+                            break;
+                        },
                         Ok(input) => {
                             match input {
                                 NntpInput::Connect => session.on_connect().await,
@@ -183,6 +341,12 @@ impl Server {
                                         Err(e) => session.on_generic_error(e).await,
                                     }
                                 },
+                                NntpInput::Notification(n) => {
+                                    match n {
+                                        Notification::ExitGraceful => session.on_graceful().await,
+                                        _ => continue,
+                                    }
+                                },
                             }
                         },
                     };
@@ -191,6 +355,8 @@ impl Server {
                         break;
                     }
                 }
+                totconns.fetch_sub(1, Ordering::SeqCst);
+                thrconns.fetch_sub(1, Ordering::SeqCst);
             };
 
             tokio::spawn(task);
@@ -228,3 +394,11 @@ impl Server {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum Notification {
+    ExitGraceful,
+    ExitNow,
+    None,
+}
+

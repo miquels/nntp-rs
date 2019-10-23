@@ -151,10 +151,17 @@ impl NntpSession {
     /// Log an error, clean up, and exit.
     pub async fn on_write_error(&self, err: io::Error) {
         let stats = &self.stats;
-        info!(
-            "Write error on {} from {} {}: {}",
-            stats.fdno, stats.hostname, stats.ipaddr, err
-        );
+        if err.kind() == io::ErrorKind::NotFound {
+            info!(
+                "Forcibly closed connection {} from {} {}",
+                stats.fdno, stats.hostname, stats.ipaddr
+            );
+        } else {
+            info!(
+                "Write error on connection {} from {} {}: {}",
+                stats.fdno, stats.hostname, stats.ipaddr, err
+            );
+        }
         stats.on_disconnect();
     }
 
@@ -163,13 +170,21 @@ impl NntpSession {
     pub async fn on_read_error(&mut self, err: io::Error) -> NntpResult {
         self.codec.quit();
         let stats = &self.stats;
-        info!(
-            "Read error on {} from {} {}: {}",
-            stats.fdno, stats.hostname, stats.ipaddr, err
-        );
+        if err.kind() == io::ErrorKind::NotFound {
+            info!(
+                "Forcibly closed connection {} from {} {}",
+                stats.fdno, stats.hostname, stats.ipaddr
+            );
+        } else {
+            info!(
+                "Read error on connection {} from {} {}: {}",
+                stats.fdno, stats.hostname, stats.ipaddr, err
+            );
+        }
         stats.on_disconnect();
         match err.kind() {
             io::ErrorKind::TimedOut => NntpResult::text("400 Timeout - closing connection"),
+            io::ErrorKind::NotFound => NntpResult::text("400 Server shutting down"),
             _ => NntpResult::empty(),
         }
     }
@@ -180,7 +195,7 @@ impl NntpSession {
         self.codec.quit();
         let stats = &self.stats;
         info!(
-            "Error on {} from {} {}: {}",
+            "Error on connection {} from {} {}: {}",
             stats.fdno, stats.hostname, stats.ipaddr, err
         );
         stats.on_disconnect();
@@ -196,6 +211,13 @@ impl NntpSession {
     pub async fn on_eof(&self) -> NntpResult {
         self.stats.on_disconnect();
         NntpResult::empty()
+    }
+
+    /// Called when signalled for a graceful exit.
+    pub async fn on_graceful(&mut self) -> NntpResult {
+        self.codec.quit();
+        self.stats.on_disconnect();
+        NntpResult::text("400 Server shutting down")
     }
 
     /// Called when a line or block has been received.

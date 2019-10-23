@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::thread;
 use std::time::Duration;
+use std::sync::Arc;
 
 use chrono::{offset::Local, offset::TimeZone, Datelike, Timelike};
 use crossbeam_channel as channel;
@@ -102,6 +103,7 @@ enum Message {
 #[derive(Clone)]
 pub struct Logger {
     tx: channel::Sender<Message>,
+    tid: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl Logger {
@@ -114,7 +116,7 @@ impl Logger {
     fn new2(mut dest: LogDest, is_log: bool) -> Logger {
         let (tx, rx) = channel::unbounded();
 
-        thread::spawn(move || {
+        let tid = thread::spawn(move || {
             let ticker = channel::tick(Duration::from_millis(1000));
             loop {
                 channel::select! {
@@ -140,7 +142,7 @@ impl Logger {
             }
         });
 
-        Logger { tx }
+        Logger { tx, tid: Arc::new(Mutex::new(Some(tid))) }
     }
 
     /// For use with the 'log' crate.
@@ -176,6 +178,10 @@ impl Logger {
 
     pub fn quit(&self) {
         let _ = self.tx.send(Message::Quit);
+        let mut tid = self.tid.lock();
+        if let Some(tid) = tid.take() {
+            let _ = tid.join();
+        }
     }
 }
 

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
+use crate::server::Notification;
 use crate::util::HashFeed;
 
 use bytes::{Bytes, BytesMut};
@@ -13,6 +14,7 @@ use futures::{Sink, Stream};
 use memchr::memchr;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio::sync::watch;
 use tokio::timer::{self, Delay};
 
 const INITIAL_TIMEOUT: u64 = 60;
@@ -53,6 +55,7 @@ pub enum NntpInput {
     Line(BytesMut),
     Block(BytesMut),
     Article(Article),
+    Notification(Notification),
 }
 
 /// NntpCodec implements both Stream to receive and Sink to send either
@@ -63,6 +66,7 @@ pub enum NntpInput {
 /// and we might want to do more advanced buffering later on.
 pub struct NntpCodec {
     socket:          TcpStream,
+    watcher:         watch::Receiver<Notification>,
     rd:              BytesMut,
     rd_pos:          usize,
     rd_overflow:     bool,
@@ -75,14 +79,16 @@ pub struct NntpCodec {
     rd_timeout:      Delay,
     rd_mode:         CodecMode,
     msgid:           Option<String>,
+    notification:    Option<Notification>,
 }
 
 impl NntpCodec {
     /// Returns a new NntpCodec.
-    pub fn new(socket: TcpStream) -> NntpCodec {
+    pub fn new(socket: TcpStream, watcher: watch::Receiver<Notification>) -> NntpCodec {
         let _ = socket.set_nodelay(true);
         NntpCodec {
             socket:          socket,
+            watcher:         watcher,
             rd:              BytesMut::new(),
             wr:              Bytes::new(),
             rd_pos:          0,
@@ -95,6 +101,7 @@ impl NntpCodec {
             wr_timeout:      timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
             rd_mode:         CodecMode::Connect,
             msgid:           None,
+            notification:    None,
         }
     }
 
@@ -271,7 +278,7 @@ impl NntpCodec {
 
     fn nntp_sink_poll_ready(&mut self, cx: &mut Context, flush: bool) -> Poll<Result<(), io::Error>> {
 
-        while !self.wr.is_empty() {
+        if !self.wr.is_empty() {
             trace!("writing; remaining={}", self.wr.len());
 
             let socket = &mut self.socket;
@@ -285,12 +292,9 @@ impl NntpCodec {
                 },
                 Poll::Ready(Ok(n)) => {
                     let _ = self.wr.split_to(n);
-                    break;
                 },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {
-                    break;
-                },
+                Poll::Pending => {},
             }
         }
 
@@ -312,6 +316,22 @@ impl NntpCodec {
             } else {
                 return Poll::Ready(Ok(()));
             }
+        }
+
+        // check the notification channel.
+        let fut = self.watcher.recv();
+        pin_utils::pin_mut!(fut);
+        match fut.poll(cx) {
+            Poll::Ready(item) => {
+                match item {
+                    Some(Notification::ExitNow) => {
+                        return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
+                    },
+                    Some(Notification::None) => {},
+                    other => self.notification = other,
+                }
+            },
+            Poll::Pending => {},
         }
 
         // check the timer.
@@ -372,6 +392,28 @@ impl Stream for NntpCodec {
     type Item = Result<NntpInput, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+
+        // check the notification channel.
+        let n = {
+            let fut = self.watcher.recv();
+            pin_utils::pin_mut!(fut);
+            match fut.poll(cx) {
+                Poll::Ready(item) => {
+                    match item {
+                        Some(Notification::ExitNow) => {
+                            return Poll::Ready(Some(Err(io::ErrorKind::NotFound.into())));
+                        },
+                        Some(Notification::None) => None,
+                        other => other,
+                    }
+                },
+                Poll::Pending => None,
+            }
+        };
+        if n.is_some() {
+            self.notification = n;
+        }
+
         let rd_mode = self.get_mode();
         match rd_mode {
             CodecMode::Connect => {
@@ -388,6 +430,13 @@ impl Stream for NntpCodec {
             Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
             Poll::Pending => false,
         };
+
+        // Now if we have no input yet process the notifications.
+        if self.rd.len() == 0 {
+            if let Some(notification) = self.notification.take() {
+                return Poll::Ready(Some(Ok(NntpInput::Notification(notification))));
+            }
+        }
 
         // Then process the data.
         if self.rd.len() > 0 {
