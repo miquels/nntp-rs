@@ -120,8 +120,6 @@ impl Server {
                 runtime.block_on(async move {
                     let reactor_handle = tokio_net::driver::Handle::default();
 
-                    //let (notifier, watcher) = server.notification_setup().await;
-
                     for listener in listener_set.into_iter() {
                         let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
                             .expect("cannot convert from net2 listener to tokio listener");
@@ -188,6 +186,7 @@ impl Server {
 
         let notifier2 = notifier.clone();
         let watcher2 = watcher.clone();
+        let server = self.clone();
 
         let task = async move {
             tokio::spawn(async move {
@@ -215,6 +214,23 @@ impl Server {
                 while let Some(_) = sig_term.next().await {
                     info!("received SIGTERM");
                     let _ = tx2.send(Notification::ExitGraceful).await;
+                }
+            });
+
+            // Catch SIGUSR1
+            let server = server.clone();
+            tokio::spawn(async move {
+                let mut sig_term = signal::unix::signal(signal::unix::SignalKind::user_defined1()).unwrap();
+                while let Some(_) = sig_term.next().await {
+                    info!("received USR1");
+                    let config = config::get_config();
+                    if let Err(e) = server
+                        .history
+                        .expire(&server.spool, config.history.remember.clone(), false)
+                        .await
+                    {
+                        error!("expire: {}", e);
+                    }
                 }
             });
         };
