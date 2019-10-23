@@ -583,14 +583,24 @@ impl NntpSession {
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => {
-                // I/O error, return error straight away.`
+                // I/O error, no incoming.log - we reply with status 400.
+                error!("received_article {}: history lookup: {}", msgid, e);
+                self.stats.art_error(&art, &ArtError::IOError);
                 Err(e)
             },
             Ok(_) => {
                 // store the article.
                 let mut buffer = BytesMut::new();
                 headers.header_bytes(&mut buffer);
-                let artloc = spool.write(spool_no, buffer, body).await?;
+                let artloc = match spool.write(spool_no, buffer, body).await {
+                    Ok(loc) => loc,
+                    Err(e) => {
+                        error!("received_article {}: spool write: {}", msgid, e);
+                        self.stats.art_error(&art, &ArtError::IOError);
+                        history.store_rollback(msgid);
+                        return Err(e);
+                    }
+                };
                 let he = HistEnt {
                     status:    HistStatus::Present,
                     time:      recv_time,
