@@ -9,6 +9,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use fs2::FileExt as _;
@@ -121,12 +122,15 @@ impl DHistory {
 
     // Expire.
     async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool) -> io::Result<()> {
-        let inner_arcswap = self.inner.clone();
         let inner = self.inner.load().clone();
 
-        self.blocking_pool
-            .spawn_fn(move || inner.do_expire(inner_arcswap, spool, remember, no_rename))
-            .await
+        let new_inner = self.blocking_pool
+            .spawn_fn(move || inner.do_expire(spool, remember, no_rename))
+            .await?;
+        if let Some(new_inner) = new_inner {
+            self.inner.store(new_inner);
+        }
+        Ok(())
     }
 
     // History lookup.
@@ -190,6 +194,7 @@ impl DHistory {
                     if e.kind() != io::ErrorKind::NotConnected {
                         return Err(e);
                     }
+                    tokio::timer::delay_for(Duration::from_millis(5)).await;
                 },
             }
         }
@@ -384,17 +389,19 @@ impl DHistoryInner {
 
     // this is for bulk updates. used by do_expire().
     fn write_dhistent_append<W>(&self, file: &mut W, mut dhe: DHistEnt, pos: u64) -> io::Result<u64>
-    where W: io::Write {
+        where
+            W: Write,
+    {
         // calculate bucket.
         let bucket = ((dhe.hv.h1 ^ dhe.hv.h2) & self.hash_mask) as usize;
         dhe.next = self.hash_buckets.load(bucket as usize);
 
-        // calculate index.
-        let idx = (pos + DHISTENT_SIZE as u64 - 1) / DHISTENT_SIZE as u64;
+        // Calculate hashtable index.
+        let idx = (pos - self.data_offset) / DHISTENT_SIZE as u64;
 
         // append to file.
         let buf: [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
-        file.write(&buf)?;
+        file.write_all(&buf)?;
 
         // update hash index
         self.hash_buckets.store(bucket, idx as u32);
@@ -480,7 +487,7 @@ impl DHistoryInner {
             // status update while we're running.
 
             if (kept + removed) % 10000 == 0 && last_tm + 10 < util::unixtime() {
-                last_pct = (100 * rpos) / rsize;
+                last_pct = (100 * (rpos - self.data_offset)) / (rsize - self.data_offset);
                 last_tm = util::unixtime();
                 info!("expire {:?}: {}%", self.path, last_pct);
             }
@@ -509,32 +516,36 @@ impl DHistoryInner {
     // oldest. If it has a timestamp _before_ any of the spool_oldest,
     // we need to expire the history file.
     fn need_expire(&self, spool_oldest: &HashMap<u8, u64>) -> bool {
+        debug!("need_expire: spool_oldest: {:?}", spool_oldest);
         // get first entry (actually, second. First is a zero-entry).
         let pos = self.data_offset + DHISTENT_SIZE as u64;
         if let Ok(dhe) = read_dhistent_at(&self.rfile, pos, None) {
+            debug!("need_expire: first history entry: {:?}", dhe);
             for tm in spool_oldest.values() {
+                debug!("need_expire: check {} < {}", dhe.when(), *tm);
                 if dhe.when() < *tm {
+                    debug!("need_expire: true");
                     return true;
                 }
             }
         }
+        debug!("need_expire: false");
         false
     }
 
     // Expire.
     fn do_expire(
         &self,
-        arcswap: ArcSwap<DHistoryInner>,
         spool: spool::Spool,
         remember: u64,
         no_rename: bool,
-    ) -> io::Result<()>
+    ) -> io::Result<Option<Arc<DHistoryInner>>>
     {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !self.need_expire(&spool_oldest) {
             info!("expire {:?}: no expire needed", self.path);
-            return Ok(());
+            return Ok(None);
         }
 
         info!("expire {:?}: start", self.path);
@@ -570,7 +581,7 @@ impl DHistoryInner {
 
         if no_rename {
             info!("expire {:?}: done, new file is {:?}", self.path, new_path);
-            return Ok(());
+            return Ok(None);
         }
 
         // first link "dhistory" to "dhistory.old"
@@ -585,14 +596,12 @@ impl DHistoryInner {
             e
         })?;
 
-        // and swap the reference.
-        new_inner.path = self.path.clone();
-        arcswap.swap(Arc::new(new_inner));
-        wfile.invalidated = true;
-
         info!("expire {:?}: done", self.path);
 
-        Ok(())
+        // update, and return new inner.
+        new_inner.path = self.path.clone();
+        wfile.invalidated = true;
+        Ok(Some(Arc::new(new_inner)))
     }
 }
 
