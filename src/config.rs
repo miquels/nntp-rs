@@ -7,8 +7,8 @@ use std::io::prelude::*;
 use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
 use std::str::FromStr;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{self, Datelike};
 use core_affinity::{get_core_ids, CoreId};

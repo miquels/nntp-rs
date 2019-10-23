@@ -405,7 +405,11 @@ pub fn logger_reconfig(target: LogTarget) {
 pub fn get_incoming_logger() -> Incoming {
     match INCOMING_LOG.read().as_ref() {
         Some(l) => l.clone(),
-        None => Incoming{ logger: Logger::new2(LogDest::Null, false) },
+        None => {
+            Incoming {
+                logger: Logger::new2(LogDest::Null, false),
+            }
+        },
     }
 }
 
@@ -415,6 +419,8 @@ pub fn set_incoming_logger(target: LogTarget) {
     if let Some(l) = lock.as_ref() {
         l.logger.reconfig(target);
     } else {
-        *lock = Some(Incoming{ logger: Logger::new(target) });
+        *lock = Some(Incoming {
+            logger: Logger::new(target),
+        });
     }
 }

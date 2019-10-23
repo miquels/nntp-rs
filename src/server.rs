@@ -26,11 +26,11 @@ use crate::spool::Spool;
 
 #[derive(Clone)]
 pub struct Server {
-    pub history:  History,
-    pub spool:    Spool,
-    pub conns:    Arc<Mutex<HashMap<String, usize>>>,
-    pub totconns: Arc<AtomicU64>,
-    pub thrconns: Arc<AtomicU64>,
+    pub history:      History,
+    pub spool:        Spool,
+    pub conns:        Arc<Mutex<HashMap<String, usize>>>,
+    pub tot_sessions: Arc<AtomicU64>,
+    pub thr_sessions: Arc<AtomicU64>,
 }
 
 impl Server {
@@ -40,8 +40,8 @@ impl Server {
             history,
             spool,
             conns: Arc::new(Mutex::new(HashMap::new())),
-            totconns: Arc::new(AtomicU64::new(0)),
-            thrconns: Arc::new(AtomicU64::new(0)),
+            tot_sessions: Arc::new(AtomicU64::new(0)),
+            thr_sessions: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -97,7 +97,7 @@ impl Server {
 
         for listener_set in listener_sets.into_iter() {
             let mut server = self.clone();
-            server.thrconns = Arc::new(AtomicU64::new(0));
+            server.thr_sessions = Arc::new(AtomicU64::new(0));
 
             let core_id = if core_ids.len() > 0 {
                 Some(core_ids.remove(0))
@@ -137,7 +137,7 @@ impl Server {
                     }
 
                     // now busy-wait until all connections are closed.
-                    while server.thrconns.load(Ordering::SeqCst) > 0 {
+                    while server.thr_sessions.load(Ordering::SeqCst) > 0 {
                         let _ = tokio::timer::delay_for(Duration::from_millis(100)).await;
                     }
                 })
@@ -267,7 +267,7 @@ impl Server {
         }
 
         // now busy-wait until all connections are closed.
-        while self.totconns.load(Ordering::SeqCst) > 0 {
+        while self.tot_sessions.load(Ordering::SeqCst) > 0 {
             if waited == 50 {
                 info!("sending Notification::ExitNow to all remaining sessions");
                 let _ = notifier.send(Notification::ExitNow).await;
@@ -325,13 +325,7 @@ impl Server {
             // build an nntp session.
             let mut session = NntpSession::new(peer, codec, self.clone(), stats);
 
-            let totconns = self.totconns.clone();
-            let thrconns = self.thrconns.clone();
-
             let task = async move {
-                totconns.fetch_add(1, Ordering::SeqCst);
-                thrconns.fetch_add(1, Ordering::SeqCst);
-
                 while let Some(result) = session.codec.next().await {
                     let response = match result {
                         Err(e) => {
@@ -364,8 +358,6 @@ impl Server {
                         break;
                     }
                 }
-                totconns.fetch_sub(1, Ordering::SeqCst);
-                thrconns.fetch_sub(1, Ordering::SeqCst);
             };
 
             tokio::spawn(task);

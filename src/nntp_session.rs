@@ -2,7 +2,7 @@ use std;
 use std::io;
 use std::mem;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use time;
@@ -29,17 +29,17 @@ pub enum NntpState {
 }
 
 pub struct NntpSession {
-    state:     NntpState,
-    pub codec: NntpCodec,
-    parser:    CmdParser,
-    server:    Server,
-    remote:    SocketAddr,
-    newsfeeds: Arc<NewsFeeds>,
-    config:    Arc<Config>,
-    incoming_logger:    logger::Incoming,
-    peer_idx:  usize,
-    active:    bool,
-    stats:     SessionStats,
+    state:           NntpState,
+    pub codec:       NntpCodec,
+    parser:          CmdParser,
+    server:          Server,
+    remote:          SocketAddr,
+    newsfeeds:       Arc<NewsFeeds>,
+    config:          Arc<Config>,
+    incoming_logger: logger::Incoming,
+    peer_idx:        usize,
+    active:          bool,
+    stats:           SessionStats,
 }
 
 pub struct NntpResult {
@@ -79,18 +79,23 @@ impl NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();
+
+        // decremented in Drop.
+        server.tot_sessions.fetch_add(1, Ordering::SeqCst);
+        server.tot_sessions.fetch_add(1, Ordering::SeqCst);
+
         NntpSession {
-            state:     NntpState::Cmd,
-            codec:     codec,
-            parser:    CmdParser::new(),
-            server:    server,
-            remote:    peer,
-            newsfeeds: newsfeeds,
-            config:    config,
-            incoming_logger:    incoming_logger,
-            peer_idx:  0,
-            active:    false,
-            stats:     stats,
+            state:           NntpState::Cmd,
+            codec:           codec,
+            parser:          CmdParser::new(),
+            server:          server,
+            remote:          peer,
+            newsfeeds:       newsfeeds,
+            config:          config,
+            incoming_logger: incoming_logger,
+            peer_idx:        0,
+            active:          false,
+            stats:           stats,
         }
     }
 
@@ -599,7 +604,7 @@ impl NntpSession {
                         self.stats.art_error(&art, &ArtError::IOError);
                         history.store_rollback(msgid);
                         return Err(e);
-                    }
+                    },
                 };
                 let he = HistEnt {
                     status:    HistStatus::Present,
@@ -774,5 +779,7 @@ impl Drop for NntpSession {
             let name = &self.thispeer().label;
             self.server.remove_connection(name);
         }
+        self.server.tot_sessions.fetch_sub(1, Ordering::SeqCst);
+        self.server.thr_sessions.fetch_sub(1, Ordering::SeqCst);
     }
 }

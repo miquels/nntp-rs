@@ -491,13 +491,15 @@ impl DHistoryInner {
         wfile.sync_all()?;
 
         if last_pct > 0 && last_pct < 100 {
-                info!("expire {:?}: 100%", self.path);
+            info!("expire {:?}: 100%", self.path);
         }
 
         if first || removed > 0 || marked > 0 {
             let i = if first { "" } else { " (incremental)" };
-            info!("expire {:?}{}: removed {} entries, kept {} entries, marked {} entries as expired",
-                self.path, i, removed, kept, marked);
+            info!(
+                "expire {:?}{}: removed {} entries, kept {} entries, marked {} entries as expired",
+                self.path, i, removed, kept, marked
+            );
         }
 
         Ok(rpos)
@@ -568,7 +570,7 @@ impl DHistoryInner {
 
         if no_rename {
             info!("expire {:?}: done, new file is {:?}", self.path, new_path);
-            return Ok(())
+            return Ok(());
         }
 
         // first link "dhistory" to "dhistory.old"

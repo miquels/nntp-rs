@@ -174,7 +174,6 @@ fn main() -> io::Result<()> {
 }
 
 fn expire(config: config::Config, file: &str) {
-
     // save the config permanently.
     let config = config::set_config(config);
 
@@ -184,17 +183,12 @@ fn expire(config: config::Config, file: &str) {
 
     // open history file.
     let hpath = config::expand_path(&config.paths, file);
-    let hist = History::open(
-        &config.history.backend,
-        hpath.clone(),
-        Some(2),
-        None,
-    )
-    .map_err(|e| {
-        eprintln!("nntp-rs: history {}: {}", hpath, e);
-        exit(1);
-    })
-    .unwrap();
+    let hist = History::open(&config.history.backend, hpath.clone(), Some(2), None)
+        .map_err(|e| {
+            eprintln!("nntp-rs: history {}: {}", hpath, e);
+            exit(1);
+        })
+        .unwrap();
 
     // open spool. ditto.
     let spool = Spool::new(&config.spool, None, None)
