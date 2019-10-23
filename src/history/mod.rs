@@ -15,6 +15,7 @@ pub mod memdb;
 use std::future::Future;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use self::cache::HCache;
 use crate::blocking::BlockingType;
@@ -40,6 +41,7 @@ pub trait HistBackend: Send + Sync {
         &'a self,
         spool: &'a spool::Spool,
         remember: u64,
+        no_rename: bool,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
@@ -112,6 +114,15 @@ impl History {
                 backend: h,
             }),
         })
+    }
+
+    pub async fn expire(&self, spool: &spool::Spool, remember: Duration, no_rename: bool) -> io::Result<()> {
+        let remember = if remember.as_secs() == 0 {
+            86400
+        } else {
+            remember.as_secs()
+        };
+        self.inner.backend.expire(spool, remember, no_rename).await
     }
 
     // Do a lookup in the history cache. Just a wrapper around partition.lookup()

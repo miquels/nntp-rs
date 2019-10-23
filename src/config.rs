@@ -1,12 +1,13 @@
+///
+/// Configuration file reader and checker.
+///
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
 use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
 use std::str::FromStr;
-///
-/// Configuration file reader and checker.
-///
+use std::time::Duration;
 use std::sync::Arc;
 
 use chrono::{self, Datelike};
@@ -102,6 +103,8 @@ pub struct HistFile {
     pub file:       String,
     pub backend:    String,
     pub threads:    Option<usize>,
+    #[serde(default,deserialize_with = "util::deserialize_duration")]
+    pub remember:   Duration,
 }
 
 /// Multiple single-threaded executors.

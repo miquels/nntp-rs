@@ -28,6 +28,7 @@ file = "${db}/dhistory"
 backend = "diablo"
 mlock = "all"
 threads = 32
+remember = 7
 
 [multisingle]
 #threads = 12

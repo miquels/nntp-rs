@@ -6,7 +6,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 use std::fmt::Debug;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::FileExt;
 
 use bytes::{BufMut, BytesMut};
 use libc;
@@ -208,7 +208,7 @@ impl DSpool {
     // XXX TODO: cache a few open filehandles.
     fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
         let loc = to_location(art_loc);
-        debug!("art location: {:?}", loc);
+        //debug!("art location: {:?}", loc);
         let flnm = format!("D.{:08x}/B.{:04x}", loc.dir, loc.file);
         let mut path = self.path.clone();
         path.push(flnm);
@@ -217,7 +217,7 @@ impl DSpool {
         ReadAhead::article(&part, &loc, &file);
         let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
 
-        debug!("art header: {:?}", dh);
+        //debug!("art header: {:?}", dh);
 
         // lots of sanity checks !
         if dh.magic1 != 0xff || dh.magic2 != 0x99 || dh.version != 1 || dh.head_len != 24 {
@@ -494,9 +494,10 @@ impl DSpool {
             };
             let mut path = self.path.clone();
             path.push(file);
-            if let Ok(meta) = fs::metadata(&path) {
-                // skip if directory is emtpy.
-                if meta.nlink() != 2 {
+
+            // if the directory is not empty, then return it.
+            if let Ok(mut subdirs) = fs::read_dir(&path) {
+                if subdirs.next().is_some() {
                     return Ok(Some(when));
                 }
             }

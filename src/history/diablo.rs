@@ -1,4 +1,4 @@
-use std;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::future::Future;
@@ -110,23 +110,22 @@ impl DHistory {
 
         // write empty hash table, plus first empty histent.
         let buf = [0u8; 65536];
-        let todo = (num_buckets * 4 + DHISTENT_SIZE as u32) as usize;
-        let mut done = 0;
-        while todo < done {
+        let mut todo = (num_buckets * 4 + DHISTENT_SIZE as u32) as usize;
+        while todo > 0 {
             let w = if todo > buf.len() { buf.len() } else { todo };
-            done += file.write(&buf[0..w])?;
+            todo -= file.write(&buf[0..w])?;
         }
 
         Ok(())
     }
 
     // Expire.
-    async fn do_expire(&self, spool: spool::Spool, remember: u64) -> io::Result<()> {
+    async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool) -> io::Result<()> {
         let inner_arcswap = self.inner.clone();
         let inner = self.inner.load().clone();
 
         self.blocking_pool
-            .spawn_fn(move || inner.do_expire(inner_arcswap, spool, remember))
+            .spawn_fn(move || inner.do_expire(inner_arcswap, spool, remember, no_rename))
             .await
     }
 
@@ -249,9 +248,10 @@ impl HistBackend for DHistory {
         &'a self,
         spool: &'a spool::Spool,
         remember: u64,
+        no_rename: bool,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
     {
-        Box::pin(self.do_expire(spool.clone(), remember))
+        Box::pin(self.do_expire(spool.clone(), remember, no_rename))
     }
 }
 
@@ -407,26 +407,34 @@ impl DHistoryInner {
         &self,
         new: &DHistoryInner,
         rpos: u64,
-        spool: spool::Spool,
+        spool_oldest: &HashMap<u8, u64>,
         remember: u64,
+        first: bool,
     ) -> io::Result<u64>
     {
         // seek to the end, clone filehandle, and buffer it.
         let mut w = new.wfile.lock();
         let mut wpos = w.file.seek(io::SeekFrom::End(0))?;
-        let mut wfile = io::BufWriter::new(w.file.try_clone()?);
+        let mut wfile = io::BufWriter::with_capacity(8000 * DHISTENT_SIZE, w.file.try_clone()?);
 
         // clone filehandle of current file and seek to the first entry.
-        let mut rfile = io::BufReader::new(self.rfile.try_clone()?);
+        let mut rfile = io::BufReader::with_capacity(8000 * DHISTENT_SIZE, self.rfile.try_clone()?);
         let mut rpos = rpos;
         rfile.seek(io::SeekFrom::Start(rpos))?;
+        let rsize = self.rfile.metadata().map(|m| m.len()).unwrap();
 
-        // get age of oldest article for each spool.
-        let spool_oldest = spool.get_oldest();
         let now = util::unixtime();
+        let mut last_tm = now;
+        let mut last_pct = 0;
+
+        let mut kept = 0u64;
+        let mut marked = 0u64;
+        let mut removed = 0u64;
 
         // rebuild history file.
         loop {
+            let mut did_mark = false;
+
             // read entry.
             let mut dhe = match read_dhistent(&mut rfile) {
                 Ok(None) => break,
@@ -453,13 +461,28 @@ impl DHistoryInner {
                     }
                 }
                 if expired {
+                    did_mark = true;
                     dhe.set_status(HistStatus::Expired);
                 }
             }
 
             // only write the entry if it is not expired or if it still is within "remember".
             if !expired || when >= now - remember {
+                kept += 1;
+                if did_mark {
+                    marked += 1;
+                }
                 wpos = new.write_dhistent_append(&mut wfile, dhe, wpos)?;
+            } else {
+                removed += 1;
+            }
+
+            // status update while we're running.
+
+            if (kept + removed) % 10000 == 0 && last_tm + 10 < util::unixtime() {
+                last_pct = (100 * rpos) / rsize;
+                last_tm = util::unixtime();
+                info!("expire {:?}: {}%", self.path, last_pct);
             }
         }
 
@@ -467,7 +490,33 @@ impl DHistoryInner {
         let wfile = wfile.into_inner()?;
         wfile.sync_all()?;
 
+        if last_pct > 0 && last_pct < 100 {
+                info!("expire {:?}: 100%", self.path);
+        }
+
+        if first || removed > 0 || marked > 0 {
+            let i = if first { "" } else { " (incremental)" };
+            info!("expire {:?}{}: removed {} entries, kept {} entries, marked {} entries as expired",
+                self.path, i, removed, kept, marked);
+        }
+
         Ok(rpos)
+    }
+
+    // See if we need to expire. The first entry in the history file is the
+    // oldest. If it has a timestamp _before_ any of the spool_oldest,
+    // we need to expire the history file.
+    fn need_expire(&self, spool_oldest: &HashMap<u8, u64>) -> bool {
+        // get first entry (actually, second. First is a zero-entry).
+        let pos = self.data_offset + DHISTENT_SIZE as u64;
+        if let Ok(dhe) = read_dhistent_at(&self.rfile, pos, None) {
+            for tm in spool_oldest.values() {
+                if dhe.when() < *tm {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     // Expire.
@@ -476,8 +525,18 @@ impl DHistoryInner {
         arcswap: ArcSwap<DHistoryInner>,
         spool: spool::Spool,
         remember: u64,
+        no_rename: bool,
     ) -> io::Result<()>
     {
+        // get age of oldest article for each spool.
+        let spool_oldest = spool.get_oldest();
+        if !self.need_expire(&spool_oldest) {
+            info!("expire {:?}: no expire needed", self.path);
+            return Ok(());
+        }
+
+        info!("expire {:?}: start", self.path);
+
         // open dhistory.new.
         let mut new_path = self.path.clone();
         new_path.set_extension("new");
@@ -489,8 +548,8 @@ impl DHistoryInner {
         // Call expire_incremental a couple of times. The first time will take the longest
         // since we need to sync the entire new history file to disk. After that it will
         // get faster. Try until there are less than 1000 entries left, for a maximum of 5 times.
-        for _ in 0..5 {
-            rpos = self.expire_incremental(&new_inner, rpos, spool.clone(), remember)?;
+        for i in 0..5 {
+            rpos = self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, i == 0)?;
             let meta = self.rfile.metadata()?;
             if rpos + 1000 * (DHISTENT_SIZE as u64) > meta.len() {
                 break;
@@ -505,7 +564,12 @@ impl DHistoryInner {
         let mut wfile = self.wfile.lock();
 
         // process entries that were added in the mean time.
-        self.expire_incremental(&new_inner, rpos, spool.clone(), remember)?;
+        self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, false)?;
+
+        if no_rename {
+            info!("expire {:?}: done, new file is {:?}", self.path, new_path);
+            return Ok(())
+        }
 
         // first link "dhistory" to "dhistory.old"
         let mut old_path = self.path.clone();
@@ -523,6 +587,8 @@ impl DHistoryInner {
         new_inner.path = self.path.clone();
         arcswap.swap(Arc::new(new_inner));
         wfile.invalidated = true;
+
+        info!("expire {:?}: done", self.path);
 
         Ok(())
     }
@@ -757,15 +823,25 @@ fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
 // helper
 fn read_dhistent<F>(file: &mut F) -> io::Result<Option<DHistEnt>>
 where F: Read {
+    // The file might be buffered. In that case, there is no guarantee
+    // that we will read exactly DHISTENT_SIZE bytes in one read. So we
+    // implement the equivalent of read_exact()..
     let mut buf = [0u8; DHISTENT_SIZE];
-    let n = file.read(&mut buf)?;
-    if n == 0 {
+    let mut done = 0;
+    while done < DHISTENT_SIZE {
+        let n = file.read(&mut buf[done..])?;
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    if done == 0 {
         return Ok(None);
     }
-    if n != DHISTENT_SIZE {
+    if done != DHISTENT_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("read_dhistent: short read: {} bytes", n),
+            format!("read_dhistent: short read: {} bytes", done),
         ));
     }
     Ok(Some(unsafe { mem::transmute(buf) }))

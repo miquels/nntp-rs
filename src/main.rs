@@ -46,6 +46,7 @@ fn main() -> io::Result<()> {
         (version: "0.1")
         (@arg CONFIG: -c --config +takes_value "config file (config.toml)")
         (@arg LISTEN: -l --listen +takes_value "listen address/port ([::]:1119)")
+        (@arg EXPIRE: --expire +takes_value "expire history file *offline*")
         (@arg DEBUG: --debug "maximum log verbosity: debug (info)")
         (@arg TRACE: --trace "maximum log verbosity: trace (info)")
     )
@@ -68,6 +69,11 @@ fn main() -> io::Result<()> {
             exit(1);
         },
     };
+
+    if let Some(expire_file) = matches.value_of("EXPIRE") {
+        expire(config, expire_file);
+        return Ok(());
+    }
 
     let mut listenaddrs = &config.server.listen;
     let cmd_listenaddrs;
@@ -165,6 +171,45 @@ fn main() -> io::Result<()> {
             exit(1);
         },
     }
+}
+
+fn expire(config: config::Config, file: &str) {
+
+    // save the config permanently.
+    let config = config::set_config(config);
+
+    // set up the logger.
+    let target = LogTarget::new_with("stderr", &config).unwrap();
+    logger::logger_init(target);
+
+    // open history file.
+    let hpath = config::expand_path(&config.paths, file);
+    let hist = History::open(
+        &config.history.backend,
+        hpath.clone(),
+        Some(2),
+        None,
+    )
+    .map_err(|e| {
+        eprintln!("nntp-rs: history {}: {}", hpath, e);
+        exit(1);
+    })
+    .unwrap();
+
+    // open spool. ditto.
+    let spool = Spool::new(&config.spool, None, None)
+        .map_err(|e| {
+            eprintln!("nntp-rs: initializing spool: {}", e);
+            exit(1);
+        })
+        .unwrap();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        if let Err(e) = hist.expire(&spool, config.history.remember.clone(), true).await {
+            eprintln!("{}", e);
+        }
+    })
 }
 
 /// Create a socket, set SO_REUSEPORT on it, bind it to an address,
