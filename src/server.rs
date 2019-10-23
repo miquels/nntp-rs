@@ -3,17 +3,17 @@ use std::io;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
 use std::process::exit;
-use std::sync::{Arc, atomic::AtomicU64, atomic::Ordering};
+use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::thread;
 use std::time::Duration;
 
 use num_cpus;
 use parking_lot::Mutex;
 use tokio;
-use tokio_net::signal;
 use tokio::prelude::*;
 use tokio::runtime::current_thread;
 use tokio::sync::{mpsc, watch};
+use tokio_net::signal;
 
 use crate::bind_socket;
 use crate::config;
@@ -96,7 +96,6 @@ impl Server {
         threads.push(self.notification_thread(notifier.clone(), watcher.clone(), task));
 
         for listener_set in listener_sets.into_iter() {
-
             let mut server = self.clone();
             server.thrconns = Arc::new(AtomicU64::new(0));
 
@@ -109,7 +108,6 @@ impl Server {
             let mut watcher = watcher.clone();
 
             let tid = thread::spawn(move || {
-
                 if let Some(id) = core_id {
                     // tie this thread to a specific core.
                     core_affinity::set_for_current(id);
@@ -133,7 +131,7 @@ impl Server {
                     // wait for a shutdown notification
                     while let Some(notification) = watcher.next().await {
                         match notification {
-                            Notification::ExitGraceful| Notification::ExitNow => break,
+                            Notification::ExitGraceful | Notification::ExitNow => break,
                             _ => {},
                         }
                     }
@@ -161,7 +159,6 @@ impl Server {
         let runtime = tokio::runtime::Runtime::new()?;
 
         runtime.block_on(async move {
-
             let (notifier, watcher, task) = self.notification_setup();
             tokio::spawn(task);
 
@@ -177,8 +174,13 @@ impl Server {
     }
 
     // Set up a notification channel, and forward SIGINT/SIGTERM as notifications.
-    fn notification_setup(&self) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>, impl Future<Output=()>) {
-
+    fn notification_setup(
+        &self,
+    ) -> (
+        mpsc::Sender<Notification>,
+        watch::Receiver<Notification>,
+        impl Future<Output = ()>,
+    ) {
         // tokio::watch::channel is SPMC, so front it with a MPSC channel
         // so that we have, in effect, a MPMC channel.
         let (mut notifier_master, watcher) = watch::channel(Notification::None);
@@ -222,7 +224,12 @@ impl Server {
 
     // The "multisingle" runtime needs to run the notification task and server.wait()
     // on a separate runtime.
-    fn notification_thread<F>(&self, notifier: mpsc::Sender<Notification>, watcher: watch::Receiver<Notification>, task: F) -> thread::JoinHandle<()>
+    fn notification_thread<F>(
+        &self,
+        notifier: mpsc::Sender<Notification>,
+        watcher: watch::Receiver<Notification>,
+        task: F,
+    ) -> thread::JoinHandle<()>
     where
         F: Future<Output = ()> + 'static + Send,
     {
@@ -237,8 +244,12 @@ impl Server {
     }
 
     // wait for all sessions to finish.
-    async fn wait(&self, mut notifier: mpsc::Sender<Notification>, mut watcher: watch::Receiver<Notification>) {
-
+    async fn wait(
+        &self,
+        mut notifier: mpsc::Sender<Notification>,
+        mut watcher: watch::Receiver<Notification>,
+    )
+    {
         // wait for a shutdown notification
         let mut waited = 0u32;
         while let Some(notification) = watcher.next().await {
@@ -276,9 +287,8 @@ impl Server {
 
     // This is run for every TCP listener socket.
     async fn run(self, listener: tokio::net::TcpListener, watcher: watch::Receiver<Notification>) {
-
-        use futures::stream;
         use futures::future::Either;
+        use futures::stream;
 
         // We have two streams. One, a stream of incoming connections.
         // Two, a stream of notifications. Combine them.
@@ -319,7 +329,6 @@ impl Server {
             let thrconns = self.thrconns.clone();
 
             let task = async move {
-
                 totconns.fetch_add(1, Ordering::SeqCst);
                 thrconns.fetch_add(1, Ordering::SeqCst);
 
@@ -401,4 +410,3 @@ pub enum Notification {
     ExitNow,
     None,
 }
-

@@ -705,7 +705,6 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
      * want to write the code...
      */
 
-
     for idx in 0..len {
         /*
          * Short circuit: if we've already de-elected all possible

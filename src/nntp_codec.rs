@@ -277,7 +277,6 @@ impl NntpCodec {
     }
 
     fn nntp_sink_poll_ready(&mut self, cx: &mut Context, flush: bool) -> Poll<Result<(), io::Error>> {
-
         if !self.wr.is_empty() {
             trace!("writing; remaining={}", self.wr.len());
 
@@ -392,7 +391,6 @@ impl Stream for NntpCodec {
     type Item = Result<NntpInput, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-
         // check the notification channel.
         let n = {
             let fut = self.watcher.recv();

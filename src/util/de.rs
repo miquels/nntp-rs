@@ -90,7 +90,6 @@ pub fn parse_bool(s: &str) -> io::Result<bool> {
     Ok(r)
 }
 
-
 /// Serde helper, calls parse_size().
 pub fn deserialize_size<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where D: Deserializer<'de> {

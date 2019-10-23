@@ -1,9 +1,9 @@
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::sync::Arc;
 
 use chrono::{offset::Local, offset::TimeZone, Datelike, Timelike};
 use crossbeam_channel as channel;
@@ -102,7 +102,7 @@ enum Message {
 /// Contains a channel over which messages can be sent to the logger thread.
 #[derive(Clone)]
 pub struct Logger {
-    tx: channel::Sender<Message>,
+    tx:  channel::Sender<Message>,
     tid: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
@@ -142,7 +142,10 @@ impl Logger {
             }
         });
 
-        Logger { tx, tid: Arc::new(Mutex::new(Some(tid))) }
+        Logger {
+            tx,
+            tid: Arc::new(Mutex::new(Some(tid))),
+        }
     }
 
     /// For use with the 'log' crate.

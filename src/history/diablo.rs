@@ -610,7 +610,6 @@ impl DHistEnt {
         dhe
     }
 
-
     // convert a DHistEnt to a spool::ArtLoc
     fn to_location(&self) -> Option<spool::ArtLoc> {
         // validate.
