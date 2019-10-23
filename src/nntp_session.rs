@@ -82,7 +82,7 @@ impl NntpSession {
 
         // decremented in Drop.
         server.tot_sessions.fetch_add(1, Ordering::SeqCst);
-        server.tot_sessions.fetch_add(1, Ordering::SeqCst);
+        server.thr_sessions.fetch_add(1, Ordering::SeqCst);
 
         NntpSession {
             state:           NntpState::Cmd,
