@@ -279,8 +279,8 @@ impl Server {
             }
         }
 
-        let logger = logger::get_incoming_logger();
-        logger.quit();
+        let incoming_logger = logger::get_incoming_logger();
+        incoming_logger.quit();
 
         info!("exiting.");
     }

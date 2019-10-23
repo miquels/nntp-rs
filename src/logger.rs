@@ -16,54 +16,66 @@ use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
 use crate::util;
 
-pub fn incoming_reject(logger: &Logger, label: &str, art: &Article, error: ArtError) {
-    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
-    let l = format!(
-        "{} - {} {} {} {:?}",
-        pathhost, art.msgid, art.len, art.arttype, error
-    );
-    logger.log_line(l);
-}
-
-pub fn incoming_defer(logger: &Logger, label: &str, art: &Article, error: ArtError) {
-    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
-    let l = format!(
-        "{} d {} {} {} {:?}",
-        pathhost, art.msgid, art.len, art.arttype, error
-    );
-    logger.log_line(l);
-}
-
-pub fn incoming_accept(logger: &Logger, label: &str, art: &Article, peers: &[NewsPeer], wantpeers: &[u32]) {
-    // allocate string with peers in one go.
-    let len = wantpeers
-        .iter()
-        .fold(0, |t, i| t + peers[*i as usize].label.len() + 1);
-    let mut s = String::with_capacity(len);
-
-    // push peers onto string, separated by space.
-    for idx in 0..wantpeers.len() {
-        s.push_str(&peers[wantpeers[idx as usize] as usize].label);
-        if idx as usize + 1 < wantpeers.len() {
-            s.push(' ');
-        }
-    }
-
-    // special case.
-    if peers.len() == 0 && wantpeers.len() == 0 {
-        s.push_str("DontStore");
-    }
-
-    // and log.
-    let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
-    let l = format!("{} + {} {} {} {}", pathhost, art.msgid, art.len, art.arttype, s);
-    logger.log_line(l);
-}
-
 lazy_static! {
     static ref LOGGER_: Mutex<Option<Logger>> = Mutex::new(None);
     static ref LOGGER: Logger = { LOGGER_.lock().take().unwrap() };
-    static ref INCOMING_LOG: RwLock<Option<Logger>> = RwLock::new(None);
+    static ref INCOMING_LOG: RwLock<Option<Incoming>> = RwLock::new(None);
+}
+
+/// Logger for the "incoming.log" logfile.
+#[derive(Clone)]
+pub struct Incoming {
+    logger: Logger,
+}
+
+impl Incoming {
+    pub fn reject(&self, label: &str, art: &Article, error: ArtError) {
+        let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+        let l = format!(
+            "{} - {} {} {} {:?}",
+            pathhost, art.msgid, art.len, art.arttype, error
+        );
+        self.logger.log_line(l);
+    }
+
+    pub fn defer(&self, label: &str, art: &Article, error: ArtError) {
+        let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+        let l = format!(
+            "{} d {} {} {} {:?}",
+            pathhost, art.msgid, art.len, art.arttype, error
+        );
+        self.logger.log_line(l);
+    }
+
+    pub fn accept(&self, label: &str, art: &Article, peers: &[NewsPeer], wantpeers: &[u32]) {
+        // allocate string with peers in one go.
+        let len = wantpeers
+            .iter()
+            .fold(0, |t, i| t + peers[*i as usize].label.len() + 1);
+        let mut s = String::with_capacity(len);
+
+        // push peers onto string, separated by space.
+        for idx in 0..wantpeers.len() {
+            s.push_str(&peers[wantpeers[idx as usize] as usize].label);
+            if idx as usize + 1 < wantpeers.len() {
+                s.push(' ');
+            }
+        }
+
+        // special case.
+        if peers.len() == 0 && wantpeers.len() == 0 {
+            s.push_str("DontStore");
+        }
+
+        // and log.
+        let pathhost = art.pathhost.as_ref().map(|s| s.as_str()).unwrap_or(label);
+        let l = format!("{} + {} {} {} {}", pathhost, art.msgid, art.len, art.arttype, s);
+        self.logger.log_line(l);
+    }
+
+    pub fn quit(&self) {
+        self.logger.quit()
+    }
 }
 
 /// Target destination of the log. First create a LogTarget, then
@@ -390,10 +402,10 @@ pub fn logger_reconfig(target: LogTarget) {
 }
 
 /// Get a clone of the incoming.log logger.
-pub fn get_incoming_logger() -> Logger {
+pub fn get_incoming_logger() -> Incoming {
     match INCOMING_LOG.read().as_ref() {
         Some(l) => l.clone(),
-        None => Logger::new2(LogDest::Null, false),
+        None => Incoming{ logger: Logger::new2(LogDest::Null, false) },
     }
 }
 
@@ -401,8 +413,8 @@ pub fn get_incoming_logger() -> Logger {
 pub fn set_incoming_logger(target: LogTarget) {
     let mut lock = INCOMING_LOG.write();
     if let Some(l) = lock.as_ref() {
-        l.reconfig(target);
+        l.logger.reconfig(target);
     } else {
-        *lock = Some(Logger::new(target));
+        *lock = Some(Incoming{ logger: Logger::new(target) });
     }
 }

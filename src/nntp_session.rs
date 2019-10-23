@@ -13,7 +13,7 @@ use crate::config::{self, Config};
 use crate::diag::{SessionStats, Stats};
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
-use crate::logger::{self, Logger};
+use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{CodecMode, NntpCodec, NntpInput};
 use crate::server::Server;
@@ -36,7 +36,7 @@ pub struct NntpSession {
     remote:    SocketAddr,
     newsfeeds: Arc<NewsFeeds>,
     config:    Arc<Config>,
-    logger:    Logger,
+    incoming_logger:    logger::Incoming,
     peer_idx:  usize,
     active:    bool,
     stats:     SessionStats,
@@ -78,7 +78,7 @@ impl NntpSession {
     pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: SessionStats) -> NntpSession {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
-        let logger = logger::get_incoming_logger();
+        let incoming_logger = logger::get_incoming_logger();
         NntpSession {
             state:     NntpState::Cmd,
             codec:     codec,
@@ -87,7 +87,7 @@ impl NntpSession {
             remote:    peer,
             newsfeeds: newsfeeds,
             config:    config,
-            logger:    logger,
+            incoming_logger:    incoming_logger,
             peer_idx:  0,
             active:    false,
             stats:     stats,
@@ -480,7 +480,7 @@ impl NntpSession {
                 let _ = self.server.history.store_commit(&art.msgid, he).await;
                 self.stats.art_error(&art, &e);
                 let label = &self.thispeer().label;
-                logger::incoming_reject(&self.logger, label, &art, e);
+                self.incoming_logger.reject(label, &art, e);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::Status(_)) => {
@@ -488,7 +488,7 @@ impl NntpSession {
                 let e = ArtError::PostDuplicate;
                 self.stats.art_error(&art, &e);
                 let label = &self.thispeer().label;
-                logger::incoming_reject(&self.logger, label, &art, e);
+                self.incoming_logger.reject(label, &art, e);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => {
@@ -512,7 +512,7 @@ impl NntpSession {
                 let _ = self.server.history.store_commit(&art.msgid, he).await;
                 self.stats.art_accepted(&art);
                 let label = &self.thispeer().label;
-                logger::incoming_accept(&self.logger, label, art, &[], &[]);
+                self.incoming_logger.accept(label, art, &[], &[]);
                 Ok(ArtAccept::Accept)
             },
             Err(HistError::Status(_)) => {
@@ -520,7 +520,7 @@ impl NntpSession {
                 let e = ArtError::PostDuplicate;
                 self.stats.art_error(&art, &e);
                 let label = &self.thispeer().label;
-                logger::incoming_reject(&self.logger, label, &art, e);
+                self.incoming_logger.reject(label, &art, e);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => Err(e),
@@ -543,10 +543,10 @@ impl NntpSession {
                     ArtError::MsgIdMismatch |
                     ArtError::NoPath => {
                         if can_defer {
-                            logger::incoming_defer(&self.logger, &self.thispeer().label, art, e);
+                            self.incoming_logger.defer(&self.thispeer().label, art, e);
                             Ok(ArtAccept::Defer)
                         } else {
-                            logger::incoming_reject(&self.logger, &self.thispeer().label, art, e);
+                            self.incoming_logger.reject(&self.thispeer().label, art, e);
                             Ok(ArtAccept::Reject)
                         }
                     },
@@ -579,7 +579,7 @@ impl NntpSession {
         match res {
             Err(HistError::Status(_)) => {
                 // message-id seen before, log "duplicate"
-                logger::incoming_reject(&self.logger, label, art, ArtError::PostDuplicate);
+                self.incoming_logger.reject(label, art, ArtError::PostDuplicate);
                 Ok(ArtAccept::Reject)
             },
             Err(HistError::IoError(e)) => {
@@ -609,14 +609,14 @@ impl NntpSession {
                 };
                 match history.store_commit(msgid, he).await {
                     Err(e) => {
-                        error!("received_article {}: write: {}", msgid, e);
+                        error!("received_article {}: history write: {}", msgid, e);
                         self.stats.art_error(&art, &ArtError::IOError);
                         history.store_rollback(msgid);
                         Err(e)
                     },
                     Ok(_) => {
                         let peers = &self.newsfeeds.peers;
-                        logger::incoming_accept(&self.logger, label, art, peers, &wantpeers);
+                        self.incoming_logger.accept(label, art, peers, &wantpeers);
                         self.stats.art_accepted(&art);
                         Ok(ArtAccept::Accept)
                     },
