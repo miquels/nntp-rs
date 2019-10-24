@@ -3,8 +3,6 @@ extern crate lazy_static;
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate clap;
-#[macro_use]
 extern crate serde_derive;
 
 pub mod article;
@@ -33,6 +31,7 @@ use std::thread;
 
 use logger::LogTarget;
 use net2::unix::UnixTcpBuilderExt;
+use structopt::StructOpt;
 
 use history::History;
 use spool::Spool;
@@ -41,28 +40,57 @@ use spool::Spool;
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-fn main() -> io::Result<()> {
-    let matches = clap_app!(nntp_rs =>
-        (version: "0.1")
-        (@arg CONFIG: -c --config +takes_value "config file (config.toml)")
-        (@arg LISTEN: -l --listen +takes_value "listen address/port ([::]:1119)")
-        (@arg EXPIRE: --expire +takes_value "expire history file *offline*")
-        (@arg DEBUG: --debug "maximum log verbosity: debug (info)")
-        (@arg TRACE: --trace "maximum log verbosity: trace (info)")
-    )
-    .get_matches();
+#[derive(StructOpt, Debug)]
+pub struct MainOpts {
+    #[structopt(short, long, default_value = "config.toml")]
+    /// config file (config.toml)
+    pub config:     String,
+    #[structopt(short, long)]
+    /// maximum log verbosity: debug (info)
+    pub debug:      bool,
+    #[structopt(short, long)]
+    /// maximum log verbosity: debug (trace)
+    pub trace:      bool,
+    #[structopt(subcommand)]
+    pub cmd:        Command,
+}
 
-    if matches.is_present("TRACE") {
+#[derive(StructOpt, Debug)]
+pub enum Command {
+    /// run the server
+    Run(RunOpts),
+    /// exire history file
+    Expire(ExpireOpts),
+}
+
+#[derive(StructOpt, Debug)]
+pub struct RunOpts {
+    #[structopt(short, long)]
+    /// listen address/port ([::]:1119)
+    pub listen:     Option<Vec<String>>,
+}
+
+#[derive(StructOpt, Debug)]
+pub struct ExpireOpts {
+    #[structopt(short, long)]
+    /// file to expire
+    pub file:   String,
+}
+
+fn main() -> io::Result<()> {
+
+    let opts = MainOpts::from_args();
+
+    if opts.trace {
         log::set_max_level(log::LevelFilter::Trace);
-    } else if matches.is_present("DEBUG") {
+    } else if opts.debug {
         log::set_max_level(log::LevelFilter::Debug);
     } else {
         log::set_max_level(log::LevelFilter::Info);
     }
 
     // first read the config file.
-    let cfg_file = matches.value_of("CONFIG").unwrap_or("config.toml");
-    let config = match config::read_config(cfg_file) {
+    let config = match config::read_config(&opts.config) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("{}", e);
@@ -70,15 +98,18 @@ fn main() -> io::Result<()> {
         },
     };
 
-    if let Some(expire_file) = matches.value_of("EXPIRE") {
-        expire(config, expire_file);
-        return Ok(());
-    }
+    let run_opts = match opts.cmd {
+        Command::Run(opts) => opts,
+        Command::Expire(opts) => {
+            expire(config, &opts);
+            return Ok(());
+        }
+    };
 
     let mut listenaddrs = &config.server.listen;
     let cmd_listenaddrs;
-    if let Some(l) = matches.value_of("LISTEN") {
-        cmd_listenaddrs = Some(config::StringOrVec::String(l.to_string()));
+    if let Some(ref l) = run_opts.listen {
+        cmd_listenaddrs = Some(config::StringOrVec::Vec(l.to_vec()));
         listenaddrs = &cmd_listenaddrs;
     }
     let addrs = config::parse_listeners(listenaddrs)
@@ -173,7 +204,7 @@ fn main() -> io::Result<()> {
     }
 }
 
-fn expire(config: config::Config, file: &str) {
+fn expire(config: config::Config, opts: &ExpireOpts) {
     // save the config permanently.
     let config = config::set_config(config);
 
@@ -182,7 +213,7 @@ fn expire(config: config::Config, file: &str) {
     logger::logger_init(target);
 
     // open history file.
-    let hpath = config::expand_path(&config.paths, file);
+    let hpath = config::expand_path(&config.paths, &opts.file);
     let hist = History::open(&config.history.backend, hpath.clone(), Some(2), None)
         .map_err(|e| {
             eprintln!("nntp-rs: history {}: {}", hpath, e);
