@@ -43,13 +43,13 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[derive(StructOpt, Debug)]
 pub struct MainOpts {
     #[structopt(short, long, default_value = "config.toml")]
-    /// config file (config.toml)
+    /// Config file (config.toml)
     pub config:     String,
     #[structopt(short, long)]
-    /// maximum log verbosity: debug (info)
+    /// Maximum log verbosity: debug (info)
     pub debug:      bool,
     #[structopt(short, long)]
-    /// maximum log verbosity: debug (trace)
+    /// Maximum log verbosity: debug (trace)
     pub trace:      bool,
     #[structopt(subcommand)]
     pub cmd:        Command,
@@ -57,10 +57,10 @@ pub struct MainOpts {
 
 #[derive(StructOpt, Debug)]
 pub enum Command {
-    /// run the server
+    /// Run the server
     Run(RunOpts),
-    /// exire history file
-    Expire(ExpireOpts),
+    /// History file stuff
+    History(HistoryCmd),
 }
 
 #[derive(StructOpt, Debug)]
@@ -71,10 +71,20 @@ pub struct RunOpts {
 }
 
 #[derive(StructOpt, Debug)]
+pub struct HistoryCmd {
+    #[structopt(subcommand)]
+    sub:    HistorySubCmd,
+}
+
+#[derive(StructOpt, Debug)]
+pub enum HistorySubCmd {
+    Expire(ExpireOpts),
+}
+
+#[derive(StructOpt, Debug)]
 pub struct ExpireOpts {
-    #[structopt(short, long)]
-    /// file to expire
-    pub file:   String,
+    /// file to run expire on
+    pub file:     String,
 }
 
 fn main() -> io::Result<()> {
@@ -98,10 +108,13 @@ fn main() -> io::Result<()> {
         },
     };
 
+    // save the config permanently.
+    let config = config::set_config(config);
+
     let run_opts = match opts.cmd {
         Command::Run(opts) => opts,
-        Command::Expire(opts) => {
-            expire(config, &opts);
+        Command::History(cmd) => {
+            history(&*config, cmd.sub);
             return Ok(());
         }
     };
@@ -145,9 +158,6 @@ fn main() -> io::Result<()> {
             exit(1);
         },
     }
-
-    // save the config permanently.
-    let config = config::set_config(config);
 
     // Open the incoming log
     let i_log = config.logging.incoming.as_ref();
@@ -204,24 +214,38 @@ fn main() -> io::Result<()> {
     }
 }
 
-fn expire(config: config::Config, opts: &ExpireOpts) {
-    // save the config permanently.
-    let config = config::set_config(config);
+/*
+fn history_help() {
+    let _ = HistoryOpts::clap().bin_name("history").print_help();
+    println!("");
+    exit(1);
+}
+*/
 
+fn history(config: &config::Config, cmd: HistorySubCmd) {
     // set up the logger.
     let target = LogTarget::new_with("stderr", &config).unwrap();
     logger::logger_init(target);
 
+    match cmd {
+        HistorySubCmd::Expire(opts) => {
+            history_expire(config, opts)
+        }
+    }
+}
+
+fn history_expire(config: &config::Config, opts: ExpireOpts) {
+
     // open history file.
     let hpath = config::expand_path(&config.paths, &opts.file);
-    let hist = History::open(&config.history.backend, hpath.clone(), Some(2), None)
+    let hist = History::open(&config.history.backend, hpath.clone(), None, None)
         .map_err(|e| {
             eprintln!("nntp-rs: history {}: {}", hpath, e);
             exit(1);
         })
         .unwrap();
 
-    // open spool. ditto.
+    // open spool.
     let spool = Spool::new(&config.spool, None, None)
         .map_err(|e| {
             eprintln!("nntp-rs: initializing spool: {}", e);
@@ -306,3 +330,4 @@ fn handle_panic() {
         }
     }));
 }
+
