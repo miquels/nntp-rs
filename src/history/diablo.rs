@@ -124,7 +124,8 @@ impl DHistory {
     async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool) -> io::Result<()> {
         let inner = self.inner.load().clone();
 
-        let new_inner = self.blocking_pool
+        let new_inner = self
+            .blocking_pool
             .spawn_fn(move || inner.do_expire(spool, remember, no_rename))
             .await?;
         if let Some(new_inner) = new_inner {
@@ -389,9 +390,7 @@ impl DHistoryInner {
 
     // this is for bulk updates. used by do_expire().
     fn write_dhistent_append<W>(&self, file: &mut W, mut dhe: DHistEnt, pos: u64) -> io::Result<u64>
-        where
-            W: Write,
-    {
+    where W: Write {
         // calculate bucket.
         let bucket = ((dhe.hv.h1 ^ dhe.hv.h2) & self.hash_mask) as usize;
         dhe.next = self.hash_buckets.load(bucket as usize);

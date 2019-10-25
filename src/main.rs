@@ -44,15 +44,15 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 pub struct MainOpts {
     #[structopt(short, long, default_value = "config.toml")]
     /// Config file (config.toml)
-    pub config:     String,
+    pub config: String,
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (info)
-    pub debug:      bool,
+    pub debug: bool,
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (trace)
-    pub trace:      bool,
+    pub trace: bool,
     #[structopt(subcommand)]
-    pub cmd:        Command,
+    pub cmd: Command,
 }
 
 #[derive(StructOpt, Debug)]
@@ -67,13 +67,13 @@ pub enum Command {
 pub struct RunOpts {
     #[structopt(short, long)]
     /// listen address/port ([::]:1119)
-    pub listen:     Option<Vec<String>>,
+    pub listen: Option<Vec<String>>,
 }
 
 #[derive(StructOpt, Debug)]
 pub struct HistoryCmd {
     #[structopt(subcommand)]
-    sub:    HistorySubCmd,
+    sub: HistorySubCmd,
 }
 
 #[derive(StructOpt, Debug)]
@@ -84,11 +84,10 @@ pub enum HistorySubCmd {
 #[derive(StructOpt, Debug)]
 pub struct ExpireOpts {
     /// file to run expire on
-    pub file:     String,
+    pub file: String,
 }
 
 fn main() -> io::Result<()> {
-
     let opts = MainOpts::from_args();
 
     if opts.trace {
@@ -116,7 +115,7 @@ fn main() -> io::Result<()> {
         Command::History(cmd) => {
             history(&*config, cmd.sub);
             return Ok(());
-        }
+        },
     };
 
     let mut listenaddrs = &config.server.listen;
@@ -228,14 +227,11 @@ fn history(config: &config::Config, cmd: HistorySubCmd) {
     logger::logger_init(target);
 
     match cmd {
-        HistorySubCmd::Expire(opts) => {
-            history_expire(config, opts)
-        }
+        HistorySubCmd::Expire(opts) => history_expire(config, opts),
     }
 }
 
 fn history_expire(config: &config::Config, opts: ExpireOpts) {
-
     // open history file.
     let hpath = config::expand_path(&config.paths, &opts.file);
     let hist = History::open(&config.history.backend, hpath.clone(), None, None)
@@ -330,4 +326,3 @@ fn handle_panic() {
         }
     }));
 }
-
