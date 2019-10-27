@@ -149,7 +149,10 @@ impl Logger {
                             Ok(Message::Record(r)) => dest.log_record(is_log, r),
                             Ok(Message::Line(s)) => dest.log_line(is_log, log::Level::Info, s),
                             Ok(Message::Reconfig(d)) => dest = d,
-                            Ok(Message::Flush(tx)) => { let _ = tx.send(()); },
+                            Ok(Message::Flush(tx)) => {
+                                dest.log_flush();
+                                let _ = tx.send(());
+                            },
                             Ok(Message::Quit) |
                             Err(_) => break,
                         }
@@ -306,6 +309,15 @@ impl LogDest {
                 unreachable!();
             },
             LogDest::Null => {},
+        }
+    }
+
+    fn log_flush(&mut self) {
+        match self {
+            LogDest::FileData(FileData { ref mut file, ..  }) => {
+                let _ = file.flush();
+            },
+            _ => {},
         }
     }
 
