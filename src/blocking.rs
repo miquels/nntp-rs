@@ -20,6 +20,7 @@ pub(crate) struct InnerBlockingPool {
 pub enum BlockingType {
     OwnPool      = 1,
     SeparatePool = 2,
+    Blocking     = 3,
     Check        = 42,
 }
 
@@ -27,6 +28,8 @@ pub enum BlockingType {
 const OwnPool: usize = BlockingType::OwnPool as usize;
 #[allow(non_upper_case_globals)]
 const SeparatePool: usize = BlockingType::SeparatePool as usize;
+#[allow(non_upper_case_globals)]
+const Blocking: usize = BlockingType::Blocking as usize;
 #[allow(non_upper_case_globals)]
 const Check: usize = BlockingType::Check as usize;
 
@@ -40,6 +43,7 @@ impl BlockingPool {
         let bt = match btype {
             Some(BlockingType::OwnPool) => BlockingType::Check,
             Some(BlockingType::SeparatePool) => BlockingType::SeparatePool,
+            Some(BlockingType::Blocking) => BlockingType::Blocking,
             Some(BlockingType::Check) | None => BlockingType::Check,
         };
 
@@ -56,24 +60,23 @@ impl BlockingPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let use_ownpool = match self.inner.use_ownpool.load(Ordering::Relaxed) {
-            OwnPool => true,
-            SeparatePool => false,
-            Check | _ => {
+        let pool_type = match self.inner.use_ownpool.load(Ordering::Relaxed) {
+            Check => {
                 match threadpool::blocking(|| 42) {
                     std::task::Poll::Ready(Err(_)) => {
                         // cannot use tokio_executor::threadpool::blocking (which does NOT
                         // run the closure on a threadpool), so use tokio_executor::blocking::run
                         // which DOES run it on a threadpool.
                         self.inner.use_ownpool.store(SeparatePool, Ordering::SeqCst);
-                        false
+                        SeparatePool
                     },
                     _ => {
                         self.inner.use_ownpool.store(OwnPool, Ordering::SeqCst);
-                        true
+                        OwnPool
                     },
                 }
             },
+            x => x,
         };
 
         let mut permit = Permit::new();
@@ -84,18 +87,21 @@ impl BlockingPool {
             panic!("BlockingPool::spawn_fn: poll_acquire() returned error (cannot happen)");
         }
 
-        let res = if !use_ownpool {
-            tokio_executor::blocking::run(move || func()).await
-        } else {
-            let mut func = Some(func);
-            let r = future::poll_fn(move |_| threadpool::blocking(|| (func.take().unwrap())())).await;
-            match r {
-                Ok(x) => x,
-                Err(_) => {
-                    permit.release(&self.inner.sem);
-                    panic!("the thread pool has shut down");
-                },
-            }
+        let res = match pool_type {
+            SeparatePool => tokio_executor::blocking::run(move || func()).await,
+            OwnPool => {
+                let mut func = Some(func);
+                let r = future::poll_fn(move |_| threadpool::blocking(|| (func.take().unwrap())())).await;
+                match r {
+                    Ok(x) => x,
+                    Err(e) => {
+                        permit.release(&self.inner.sem);
+                        panic!("the thread pool has shut down ({:?})", e);
+                    },
+                }
+            },
+            Blocking => func(),
+            _ => unreachable!(),
         };
 
         permit.release(&self.inner.sem);

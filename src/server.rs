@@ -226,7 +226,7 @@ impl Server {
                     let config = config::get_config();
                     if let Err(e) = server
                         .history
-                        .expire(&server.spool, config.history.remember.clone(), false)
+                        .expire(&server.spool, config.history.remember.clone(), false, true)
                         .await
                     {
                         error!("expire: {}", e);

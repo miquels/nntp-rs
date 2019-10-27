@@ -33,6 +33,7 @@ use logger::LogTarget;
 use net2::unix::UnixTcpBuilderExt;
 use structopt::StructOpt;
 
+use blocking::BlockingType;
 use history::History;
 use spool::Spool;
 
@@ -79,6 +80,7 @@ pub struct HistoryCmd {
 #[derive(StructOpt, Debug)]
 pub enum HistorySubCmd {
     Expire(ExpireOpts),
+    Inspect(ExpireOpts),
 }
 
 #[derive(StructOpt, Debug)]
@@ -114,6 +116,7 @@ fn main() -> io::Result<()> {
         Command::Run(opts) => opts,
         Command::History(cmd) => {
             history(&*config, cmd.sub);
+            logger::logger_flush();
             return Ok(());
         },
     };
@@ -177,6 +180,7 @@ fn main() -> io::Result<()> {
     let hist = History::open(
         &config.history.backend,
         hpath.clone(),
+        true,
         config.history.threads,
         bt.clone(),
     )
@@ -228,21 +232,28 @@ fn history(config: &config::Config, cmd: HistorySubCmd) {
 
     match cmd {
         HistorySubCmd::Expire(opts) => history_expire(config, opts),
+        HistorySubCmd::Inspect(opts) => history_inspect(config, opts),
     }
 }
 
 fn history_expire(config: &config::Config, opts: ExpireOpts) {
     // open history file.
     let hpath = config::expand_path(&config.paths, &opts.file);
-    let hist = History::open(&config.history.backend, hpath.clone(), None, None)
-        .map_err(|e| {
-            eprintln!("nntp-rs: history {}: {}", hpath, e);
-            exit(1);
-        })
-        .unwrap();
+    let hist = History::open(
+        &config.history.backend,
+        hpath.clone(),
+        false,
+        None,
+        Some(BlockingType::Blocking),
+    )
+    .map_err(|e| {
+        eprintln!("nntp-rs: history {}: {}", hpath, e);
+        exit(1);
+    })
+    .unwrap();
 
     // open spool.
-    let spool = Spool::new(&config.spool, None, None)
+    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
         .map_err(|e| {
             eprintln!("nntp-rs: initializing spool: {}", e);
             exit(1);
@@ -251,11 +262,44 @@ fn history_expire(config: &config::Config, opts: ExpireOpts) {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        if let Err(e) = hist.expire(&spool, config.history.remember.clone(), true).await {
+        if let Err(e) = hist.expire(&spool, config.history.remember.clone(), true, true).await {
             eprintln!("{}", e);
         }
     })
 }
+
+fn history_inspect(config: &config::Config, opts: ExpireOpts) {
+    // open history file.
+    let hpath = config::expand_path(&config.paths, &opts.file);
+    let hist = History::open(
+        &config.history.backend,
+        hpath.clone(),
+        false,
+        None,
+        Some(BlockingType::Blocking),
+    )
+    .map_err(|e| {
+        eprintln!("nntp-rs: history {}: {}", hpath, e);
+        exit(1);
+    })
+    .unwrap();
+
+    // open spool.
+    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
+        .map_err(|e| {
+            eprintln!("nntp-rs: initializing spool: {}", e);
+            exit(1);
+        })
+        .unwrap();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        if let Err(e) = hist.inspect(&spool).await {
+            eprintln!("{}", e);
+        }
+    })
+}
+
 
 /// Create a socket, set SO_REUSEPORT on it, bind it to an address,
 /// and start listening for connections.

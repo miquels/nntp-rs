@@ -108,6 +108,7 @@ enum Message {
     Record((log::Level, String, String)),
     Line(String),
     Reconfig(LogDest),
+    Flush(channel::Sender<()>),
     Quit,
 }
 
@@ -148,6 +149,7 @@ impl Logger {
                             Ok(Message::Record(r)) => dest.log_record(is_log, r),
                             Ok(Message::Line(s)) => dest.log_line(is_log, log::Level::Info, s),
                             Ok(Message::Reconfig(d)) => dest = d,
+                            Ok(Message::Flush(tx)) => { let _ = tx.send(()); },
                             Ok(Message::Quit) |
                             Err(_) => break,
                         }
@@ -201,6 +203,13 @@ impl Logger {
             let _ = tid.join();
         }
     }
+
+    pub fn log_flush(&self) {
+        let (tx, rx) = channel::unbounded();
+        let _ = self.tx.send(Message::Flush(tx));
+        let _ = rx.recv();
+    }
+
 }
 
 impl Log for Logger {
@@ -214,7 +223,9 @@ impl Log for Logger {
         }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        self.log_flush();
+    }
 }
 
 impl LogDest {
@@ -402,6 +413,11 @@ pub fn logger_init(target: LogTarget) {
 pub fn logger_reconfig(target: LogTarget) {
     let l = &*LOGGER;
     l.reconfig(target);
+}
+
+pub fn logger_flush() {
+    let l = &*LOGGER;
+    l.flush();
 }
 
 /// Get a clone of the incoming.log logger.

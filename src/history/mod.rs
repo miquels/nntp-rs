@@ -37,11 +37,18 @@ pub trait HistBackend: Send + Sync {
         msgid: &'a [u8],
         he: &'a HistEnt,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+    /// Do an expire run on the history file.
     fn expire<'a>(
         &'a self,
         spool: &'a spool::Spool,
         remember: u64,
         no_rename: bool,
+        force: bool,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+    /// Inspect the history file (debugging).
+    fn inspect<'a>(
+        &'a self,
+        spool: &'a spool::Spool,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 }
 
@@ -98,12 +105,13 @@ impl History {
     pub fn open(
         tp: &str,
         path: impl AsRef<Path>,
+        rw: bool,
         threads: Option<usize>,
         bt: Option<BlockingType>,
     ) -> io::Result<History>
     {
         let h: Box<dyn HistBackend> = match tp {
-            "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), threads, bt)?),
+            "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), rw, threads, bt)?),
             "memdb" => Box::new(memdb::MemDb::new()),
             s => Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))?,
         };
@@ -116,13 +124,17 @@ impl History {
         })
     }
 
-    pub async fn expire(&self, spool: &spool::Spool, remember: Duration, no_rename: bool) -> io::Result<()> {
+    pub async fn expire(&self, spool: &spool::Spool, remember: Duration, no_rename: bool, force: bool) -> io::Result<()> {
         let remember = if remember.as_secs() == 0 {
             86400
         } else {
             remember.as_secs()
         };
-        self.inner.backend.expire(spool, remember, no_rename).await
+        self.inner.backend.expire(spool, remember, no_rename, force).await
+    }
+
+    pub async fn inspect(&self, spool: &spool::Spool) -> io::Result<()> {
+        self.inner.backend.inspect(spool).await
     }
 
     // Do a lookup in the history cache. Just a wrapper around partition.lookup()

@@ -1,13 +1,18 @@
 use std::fmt::{self, Debug};
 use std::fs;
 use std::io;
-use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use memmap::{MmapMut, MmapOptions};
+use memmap::{Mmap, MmapMut, MmapOptions};
+
+#[derive(Debug)]
+pub enum MmapMode {
+    Ro(Mmap),
+    Rw(MmapMut),
+}
 
 pub struct MmapAtomicU32 {
-    map:  MmapMut,
+    map:  MmapMode,
     data: *const AtomicU32,
 }
 
@@ -21,15 +26,23 @@ impl Debug for MmapAtomicU32 {
 }
 
 impl MmapAtomicU32 {
-    pub fn new(file: &fs::File, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
+    pub fn new(file: &fs::File, rw: bool, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
         let mut opts = MmapOptions::new();
-        let mmap: MmapMut = unsafe { opts.offset(offset).len(num_elems * 4).map_mut(file)? };
-        let mut m = MmapAtomicU32 {
-            map:  mmap,
-            data: ptr::null_mut(),
-        };
-        m.data = m.map.as_ptr() as *const AtomicU32;
-        Ok(m)
+        Ok(if rw {
+            let mmap: MmapMut = unsafe { opts.offset(offset).len(num_elems * 4).map_mut(file)? };
+            let data = mmap.as_ptr() as *const AtomicU32;
+            MmapAtomicU32 {
+                map:  MmapMode::Rw(mmap),
+                data,
+            }
+        } else {
+            let mmap: Mmap = unsafe { opts.offset(offset).len(num_elems * 4).map(file)? };
+            let data = mmap.as_ptr() as *const AtomicU32;
+            MmapAtomicU32 {
+                map:  MmapMode::Ro(mmap),
+                data,
+            }
+        })
     }
 
     pub fn load(&self, index: usize) -> u32 {

@@ -72,8 +72,14 @@ const DHISTHEAD_DEADMAGIC: u32 = 0xDEADF5E6;
 impl DHistory {
     /// open existing history database
     /// Note: blocking.
-    pub fn open(path: &Path, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<DHistory> {
-        let inner = DHistoryInner::open(path)?;
+    pub fn open(
+        path: &Path,
+        rw: bool,
+        threads: Option<usize>,
+        bt: Option<BlockingType>,
+    ) -> io::Result<DHistory>
+    {
+        let inner = DHistoryInner::open(path, rw)?;
         Ok(DHistory {
             inner:         ArcSwap::from(Arc::new(inner)),
             blocking_type: bt.clone(),
@@ -121,17 +127,23 @@ impl DHistory {
     }
 
     // Expire.
-    async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool) -> io::Result<()> {
+    async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool, force: bool) -> io::Result<()> {
         let inner = self.inner.load().clone();
 
         let new_inner = self
             .blocking_pool
-            .spawn_fn(move || inner.do_expire(spool, remember, no_rename))
+            .spawn_fn(move || inner.do_expire(spool, remember, no_rename, force))
             .await?;
         if let Some(new_inner) = new_inner {
             self.inner.store(new_inner);
         }
         Ok(())
+    }
+
+    // Inspect.
+    async fn do_inspect(&self, spool: spool::Spool) -> io::Result<()> {
+        let inner = self.inner.load();
+        self.blocking_pool.spawn_fn(move || inner.do_inspect(spool)).await
     }
 
     // History lookup.
@@ -255,20 +267,35 @@ impl HistBackend for DHistory {
         spool: &'a spool::Spool,
         remember: u64,
         no_rename: bool,
+        force: bool,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
     {
-        Box::pin(self.do_expire(spool.clone(), remember, no_rename))
+        Box::pin(self.do_expire(spool.clone(), remember, no_rename, force))
+    }
+
+    /// inspect the DHistory database.
+    fn inspect<'a>(
+        &'a self,
+        spool: &'a spool::Spool,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
+    {
+        Box::pin(self.do_inspect(spool.clone()))
     }
 }
 
 impl DHistoryInner {
     /// open existing history database
-    fn open(path: &Path) -> io::Result<DHistoryInner> {
+    fn open(path: &Path, rw: bool) -> io::Result<DHistoryInner> {
         // open file, lock it, get the meta info, and clone a write handle.
-        let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
-        if let Err(_) = f.try_lock_exclusive() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "in use"));
-        }
+        let f = if rw {
+            let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
+            if let Err(_) = f.try_lock_exclusive() {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "in use"));
+            }
+            f
+        } else {
+            fs::OpenOptions::new().read(true).open(path)?
+        };
         let meta = f.metadata()?;
         let w = f.try_clone()?;
 
@@ -302,7 +329,7 @@ impl DHistoryInner {
         }
 
         // mmap the hash table index.
-        let buckets = MmapAtomicU32::new(&f, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
+        let buckets = MmapAtomicU32::new(&f, rw, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
             .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
 
         Ok(DHistoryInner {
@@ -538,11 +565,12 @@ impl DHistoryInner {
         spool: spool::Spool,
         remember: u64,
         no_rename: bool,
+        force: bool,
     ) -> io::Result<Option<Arc<DHistoryInner>>>
     {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
-        if !self.need_expire(&spool_oldest) {
+        if !force && !self.need_expire(&spool_oldest) {
             info!("expire {:?}: no expire needed", self.path);
             return Ok(None);
         }
@@ -553,7 +581,7 @@ impl DHistoryInner {
         let mut new_path = self.path.clone();
         new_path.set_extension("new");
         DHistory::create(&new_path, self.hash_size)?;
-        let mut new_inner = DHistoryInner::open(&new_path)?;
+        let mut new_inner = DHistoryInner::open(&new_path, true)?;
 
         let mut rpos = self.data_offset + DHISTENT_SIZE as u64;
 
@@ -601,6 +629,89 @@ impl DHistoryInner {
         new_inner.path = self.path.clone();
         wfile.invalidated = true;
         Ok(Some(Arc::new(new_inner)))
+    }
+
+    // Inspect the history file.
+    fn do_inspect(&self, spool: spool::Spool) -> io::Result<()> {
+        info!("inspect {:?}: start.", self.path);
+
+        // get age of oldest article for each spool.
+        let spool_oldest = spool.get_oldest();
+        if !self.need_expire(&spool_oldest) {
+            info!("inspect {:?}: status: no expire needed", self.path);
+        }
+
+        // clone filehandle of current file and seek to the first entry.
+        let mut rfile = io::BufReader::with_capacity(8000 * DHISTENT_SIZE, self.rfile.try_clone()?);
+        let rpos = self.data_offset + DHISTENT_SIZE as u64;
+        rfile.seek(io::SeekFrom::Start(rpos))?;
+
+        #[derive(Default)]
+        struct Stats {
+            tot:          u64,
+            exp:          u64,
+            rej:          u64,
+            unk:          u64,
+            oldest:       u64,
+            newest:       u64,
+            spool_oldest: u64,
+            is_defined:   bool,
+        }
+        // Fill hashmap with empty Stats for currently defined pools.
+        let mut stats = HashMap::<u8, Stats>::new();
+        for (s, o) in &spool_oldest {
+            stats.insert(
+                *s,
+                Stats {
+                    spool_oldest: *o,
+                    is_defined: true,
+                    ..Stats::default()
+                },
+            );
+        }
+
+        let mut idx = 0;
+
+        // scan history file.
+        while let Some(dhe) = read_dhistent(&mut rfile)? {
+            let spool = dhe.spool().unwrap_or(0x80);
+            if !stats.contains_key(&spool) {
+                stats.insert(spool, Stats::default());
+            }
+            let when = dhe.when();
+            let s = stats.get_mut(&spool).unwrap();
+
+            match dhe.status() {
+                HistStatus::Present => s.tot += 1,
+                HistStatus::Expired => s.exp += 1,
+                HistStatus::Rejected => s.rej += 1,
+                _ => s.unk += 1,
+            }
+
+            if when < s.oldest || s.oldest == 0 {
+                s.oldest = when;
+            }
+            if when > s.newest {
+                s.newest = when;
+            }
+            idx += 1;
+        }
+
+        // now report.
+        info!("inspect {:?}: {} entries total", self.path, idx);
+        let mut spools = stats.keys().map(|k| *k).collect::<Vec<_>>();
+        spools.sort();
+        for k in &spools {
+            let s = &stats[k];
+            let star = if s.is_defined { " " } else { "*" };
+            let spno = if *k == 128 { "none".to_string() } else { (*k).to_string() };
+            info!(
+                "spool {:>4}{} present: {:10} remembered: {:10} rejected: {:10} \
+                 unknown: {:10} oldest: {} newest: {} spool_oldest: {}",
+                spno, star, s.tot, s.exp, s.rej, s.unk, s.oldest, s.newest, s.spool_oldest
+            );
+        }
+        Ok(())
     }
 }
 
@@ -809,7 +920,7 @@ impl DHistEnt {
     // Get the spool number.
     fn spool(&self) -> Option<u8> {
         let spool = (self.exp & 0xff) as u8;
-        if self.status() == HistStatus::Present && spool >= 100 && spool < 200 {
+        if spool >= 100 && spool < 200 {
             Some(spool - 100)
         } else {
             None

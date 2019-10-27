@@ -42,7 +42,11 @@ impl MemDb {
         Ok(())
     }
 
-    async fn do_expire(&self, _spool: spool::Spool, _remember: u64, _no_rename: bool) -> io::Result<()> {
+    async fn do_expire(&self, _spool: spool::Spool, _remember: u64, _no_rename: bool, _force: bool) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn do_inspect(&self, _spool: spool::Spool) -> io::Result<()> {
         Ok(())
     }
 }
@@ -73,8 +77,18 @@ impl HistBackend for MemDb {
         spool: &'a spool::Spool,
         remember: u64,
         no_rename: bool,
+        force: bool,
     ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
     {
-        Box::pin(self.do_expire(spool.clone(), remember, no_rename))
+        Box::pin(self.do_expire(spool.clone(), remember, no_rename, force))
+    }
+
+    /// inspect the MemDb database.
+    fn inspect<'a>(
+        &'a self,
+        spool: &'a spool::Spool,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
+    {
+        Box::pin(self.do_inspect(spool.clone()))
     }
 }
