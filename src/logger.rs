@@ -115,10 +115,10 @@ enum Message {
 /// Contains a channel over which messages can be sent to the logger thread.
 #[derive(Clone)]
 pub struct Logger {
-    tx:  channel::Sender<Message>,
-    tid: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    tx:              channel::Sender<Message>,
+    tid:             Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     pkg_name_prefix: String,
-    pkg_name: String,
+    pkg_name:        String,
 }
 
 impl Logger {
@@ -212,7 +212,6 @@ impl Logger {
         let _ = self.tx.send(Message::Flush(tx));
         let _ = rx.recv();
     }
-
 }
 
 impl Log for Logger {
@@ -314,7 +313,7 @@ impl LogDest {
 
     fn log_flush(&mut self) {
         match self {
-            LogDest::FileData(FileData { ref mut file, ..  }) => {
+            LogDest::FileData(FileData { ref mut file, .. }) => {
                 let _ = file.flush();
             },
             _ => {},

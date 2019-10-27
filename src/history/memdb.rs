@@ -42,7 +42,14 @@ impl MemDb {
         Ok(())
     }
 
-    async fn do_expire(&self, _spool: spool::Spool, _remember: u64, _no_rename: bool, _force: bool) -> io::Result<()> {
+    async fn do_expire(
+        &self,
+        _spool: spool::Spool,
+        _remember: u64,
+        _no_rename: bool,
+        _force: bool,
+    ) -> io::Result<()>
+    {
         Ok(())
     }
 

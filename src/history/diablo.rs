@@ -127,7 +127,14 @@ impl DHistory {
     }
 
     // Expire.
-    async fn do_expire(&self, spool: spool::Spool, remember: u64, no_rename: bool, force: bool) -> io::Result<()> {
+    async fn do_expire(
+        &self,
+        spool: spool::Spool,
+        remember: u64,
+        no_rename: bool,
+        force: bool,
+    ) -> io::Result<()>
+    {
         let inner = self.inner.load().clone();
 
         let new_inner = self
@@ -704,7 +711,11 @@ impl DHistoryInner {
         for k in &spools {
             let s = &stats[k];
             let star = if s.is_defined { " " } else { "*" };
-            let spno = if *k == 128 { "none".to_string() } else { (*k).to_string() };
+            let spno = if *k == 128 {
+                "none".to_string()
+            } else {
+                (*k).to_string()
+            };
             info!(
                 "spool {:>4}{} present: {:10} remembered: {:10} rejected: {:10} \
                  unknown: {:10} oldest: {} newest: {} spool_oldest: {}",

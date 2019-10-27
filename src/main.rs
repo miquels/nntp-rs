@@ -57,36 +57,46 @@ pub struct MainOpts {
 }
 
 #[derive(StructOpt, Debug)]
+#[structopt(rename_all = "kebab-case")]
 pub enum Command {
     /// Run the server
-    Run(RunOpts),
-    /// History file stuff
-    History(HistoryCmd),
+    Serve(ServeOpts),
+    /// History file inspection / debugging
+    HistInspect(HistInspectOpts),
+    /// History file lookup
+    HistLookup(HistLookupOpts),
+    /// History file expire (offline)
+    HistExpire(HistExpireOpts),
 }
 
 #[derive(StructOpt, Debug)]
-pub struct RunOpts {
+pub struct ServeOpts {
     #[structopt(short, long)]
     /// listen address/port ([::]:1119)
     pub listen: Option<Vec<String>>,
 }
 
 #[derive(StructOpt, Debug)]
-pub struct HistoryCmd {
-    #[structopt(subcommand)]
-    sub: HistorySubCmd,
+pub struct HistInspectOpts {
+    #[structopt(short, long)]
+    /// history file.
+    pub file: Option<String>,
 }
 
 #[derive(StructOpt, Debug)]
-pub enum HistorySubCmd {
-    Expire(ExpireOpts),
-    Inspect(ExpireOpts),
+pub struct HistExpireOpts {
+    #[structopt(short, long)]
+    /// history file.
+    pub file: Option<String>,
 }
 
 #[derive(StructOpt, Debug)]
-pub struct ExpireOpts {
-    /// file to run expire on
-    pub file: String,
+pub struct HistLookupOpts {
+    #[structopt(short, long)]
+    /// history file.
+    pub file: Option<String>,
+    /// Message-Id.
+    pub msgid: String,
 }
 
 fn main() -> io::Result<()> {
@@ -113,12 +123,8 @@ fn main() -> io::Result<()> {
     let config = config::set_config(config);
 
     let run_opts = match opts.cmd {
-        Command::Run(opts) => opts,
-        Command::History(cmd) => {
-            history(&*config, cmd.sub);
-            logger::logger_flush();
-            return Ok(());
-        },
+        Command::Serve(opts) => opts,
+        other => run_subcommand(other, &*config),
     };
 
     let mut listenaddrs = &config.server.listen;
@@ -217,28 +223,34 @@ fn main() -> io::Result<()> {
     }
 }
 
-/*
-fn history_help() {
-    let _ = HistoryOpts::clap().bin_name("history").print_help();
-    println!("");
-    exit(1);
-}
-*/
-
-fn history(config: &config::Config, cmd: HistorySubCmd) {
+fn run_subcommand(cmd: Command, config: &config::Config) -> ! {
     // set up the logger.
     let target = LogTarget::new_with("stderr", &config).unwrap();
     logger::logger_init(target);
 
-    match cmd {
-        HistorySubCmd::Expire(opts) => history_expire(config, opts),
-        HistorySubCmd::Inspect(opts) => history_inspect(config, opts),
+    // run subcommand.
+    let res = match cmd {
+        Command::Serve(_) => unreachable!(),
+        Command::HistLookup(opts) => history_lookup(&*config, opts),
+        Command::HistExpire(opts) => history_expire(&*config, opts),
+        Command::HistInspect(opts) => history_inspect(&*config, opts),
+    };
+
+    // flush and exit.
+    logger::logger_flush();
+    match res {
+        Ok(_) => exit(0),
+        Err(_) => exit(1),
     }
 }
 
-fn history_expire(config: &config::Config, opts: ExpireOpts) {
+fn history_common(
+    config: &config::Config,
+    file: Option<&String>,
+) -> io::Result<(history::History, spool::Spool)>
+{
     // open history file.
-    let hpath = config::expand_path(&config.paths, &opts.file);
+    let hpath = config::expand_path(&config.paths, file.unwrap_or(&config.history.file));
     let hist = History::open(
         &config.history.backend,
         hpath.clone(),
@@ -248,56 +260,55 @@ fn history_expire(config: &config::Config, opts: ExpireOpts) {
     )
     .map_err(|e| {
         eprintln!("nntp-rs: history {}: {}", hpath, e);
-        exit(1);
-    })
-    .unwrap();
+        e
+    })?;
 
     // open spool.
-    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
-        .map_err(|e| {
-            eprintln!("nntp-rs: initializing spool: {}", e);
-            exit(1);
-        })
-        .unwrap();
+    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking)).map_err(|e| {
+        eprintln!("nntp-rs: initializing spool: {}", e);
+        e
+    })?;
 
+    Ok((hist, spool))
+}
+
+fn history_inspect(config: &config::Config, opts: HistInspectOpts) -> io::Result<()> {
+    let (hist, spool) = history_common(config, opts.file.as_ref())?;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        if let Err(e) = hist.expire(&spool, config.history.remember.clone(), true, true).await {
+        hist.inspect(&spool).await.map_err(|e| {
             eprintln!("{}", e);
-        }
+            e
+        })
     })
 }
 
-fn history_inspect(config: &config::Config, opts: ExpireOpts) {
-    // open history file.
-    let hpath = config::expand_path(&config.paths, &opts.file);
-    let hist = History::open(
-        &config.history.backend,
-        hpath.clone(),
-        false,
-        None,
-        Some(BlockingType::Blocking),
-    )
-    .map_err(|e| {
-        eprintln!("nntp-rs: history {}: {}", hpath, e);
-        exit(1);
-    })
-    .unwrap();
-
-    // open spool.
-    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
-        .map_err(|e| {
-            eprintln!("nntp-rs: initializing spool: {}", e);
-            exit(1);
-        })
-        .unwrap();
-
+fn history_expire(config: &config::Config, opts: HistExpireOpts) -> io::Result<()> {
+    let (hist, spool) = history_common(config, opts.file.as_ref())?;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        if let Err(e) = hist.inspect(&spool).await {
+        hist.expire(&spool, config.history.remember.clone(), true, true)
+            .await
+            .map_err(|e| {
+                eprintln!("{}", e);
+                e
+            })
+    })
+}
+
+fn history_lookup(config: &config::Config, opts: HistLookupOpts) -> io::Result<()> {
+    //let (hist, spool) = history_common(config, opts.file.as_ref())?;
+    println!("unimplemented");
+    return Ok(());
+    /*
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        hist.expire(&spool, config.history.remember.clone(), true, true).await.map_err(|e|
             eprintln!("{}", e);
+            e
         }
     })
+    */
 }
 
 

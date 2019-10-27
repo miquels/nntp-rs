@@ -32,14 +32,14 @@ impl MmapAtomicU32 {
             let mmap: MmapMut = unsafe { opts.offset(offset).len(num_elems * 4).map_mut(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
             MmapAtomicU32 {
-                map:  MmapMode::Rw(mmap),
+                map: MmapMode::Rw(mmap),
                 data,
             }
         } else {
             let mmap: Mmap = unsafe { opts.offset(offset).len(num_elems * 4).map(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
             MmapAtomicU32 {
-                map:  MmapMode::Ro(mmap),
+                map: MmapMode::Ro(mmap),
                 data,
             }
         })

@@ -124,7 +124,14 @@ impl History {
         })
     }
 
-    pub async fn expire(&self, spool: &spool::Spool, remember: Duration, no_rename: bool, force: bool) -> io::Result<()> {
+    pub async fn expire(
+        &self,
+        spool: &spool::Spool,
+        remember: Duration,
+        no_rename: bool,
+        force: bool,
+    ) -> io::Result<()>
+    {
         let remember = if remember.as_secs() == 0 {
             86400
         } else {
