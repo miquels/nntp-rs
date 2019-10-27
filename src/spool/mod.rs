@@ -88,7 +88,8 @@ pub struct ArtLoc {
     /// On what spool the article lives (0..99).
     pub spool:          u8,
     /// The backend-specific, otherwise opaque, storage-token.
-    pub token:          Vec<u8>,
+    pub token:          [u8; 16],
+    pub toklen:         u8,
 }
 
 impl Debug for ArtLoc {
@@ -98,7 +99,7 @@ impl Debug for ArtLoc {
             "ArtLoc {{ storage_type: {:?}, spool: {}, token: [",
             self.storage_type, self.spool
         )?;
-        for b in &self.token {
+        for b in &self.token[0..self.toklen as usize] {
             write!(f, "{:02x}", b)?;
         }
         write!(f, "] }}")

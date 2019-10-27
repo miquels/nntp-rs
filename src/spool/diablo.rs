@@ -98,13 +98,13 @@ fn to_location(loc: &ArtLoc) -> DArtLocation {
     }
 }
 
-fn from_location(loc: DArtLocation) -> Vec<u8> {
-    let mut t = [0u8; 14];
+fn from_location(loc: DArtLocation) -> ([u8; 16], u8) {
+    let mut t = [0u8; 16];
     u16_write_le_bytes(&mut t[0..2], loc.file);
     u32_write_le_bytes(&mut t[2..6], loc.pos);
     u32_write_le_bytes(&mut t[6..10], loc.size);
     u32_write_le_bytes(&mut t[10..14], loc.dir);
-    t.to_vec()
+    (t, 14)
 }
 
 fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DArtHead> {
@@ -456,7 +456,7 @@ impl DSpool {
         }
 
         // build storage token
-        let t = from_location(DArtLocation {
+        let (token, toklen) = from_location(DArtLocation {
             dir:  writer.dir,
             file: writer.file,
             pos:  pos as u32,
@@ -467,7 +467,8 @@ impl DSpool {
         Ok(ArtLoc {
             storage_type: Backend::Diablo,
             spool:        self.spool_no,
-            token:        t,
+            token,
+            toklen,
         })
     }
 

@@ -816,25 +816,26 @@ impl DHistEnt {
         }
         let spool = self.spool()?;
 
-        let mut t = [0u8; 14];
-        u16_write_le_bytes(&mut t[0..2], self.iter);
-        u32_write_le_bytes(&mut t[2..6], self.boffset);
-        u32_write_le_bytes(&mut t[6..10], self.bsize);
+        let mut token = [0u8; 16];
+        u16_write_le_bytes(&mut token[0..2], self.iter);
+        u32_write_le_bytes(&mut token[2..6], self.boffset);
+        u32_write_le_bytes(&mut token[6..10], self.bsize);
 
-        let s = if (self.exp & 0x1000) != 0 {
+        let toklen = if (self.exp & 0x1000) != 0 {
             // not a diablo-spool history entry.
-            (&t)[0..10].to_vec()
+            10
         } else {
             // This is a diablo-spool history entry, so include
             // gmt in the returned StorageToken
-            u32_write_le_bytes(&mut t[10..14], self.gmt);
-            (&t)[0..14].to_vec()
+            u32_write_le_bytes(&mut token[10..14], self.gmt);
+            14
         };
         let btype = spool::Backend::from_u8(((self.exp & 0x0f00) >> 8) as u8);
         Some(spool::ArtLoc {
             storage_type: btype,
             spool:        spool,
-            token:        s,
+            token,
+            toklen,
         })
     }
 
