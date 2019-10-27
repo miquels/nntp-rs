@@ -116,6 +116,8 @@ enum Message {
 pub struct Logger {
     tx:  channel::Sender<Message>,
     tid: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    pkg_name_prefix: String,
+    pkg_name: String,
 }
 
 impl Logger {
@@ -157,6 +159,8 @@ impl Logger {
         Logger {
             tx,
             tid: Arc::new(Mutex::new(Some(tid))),
+            pkg_name_prefix: concat!(env!("CARGO_PKG_NAME"), "::").replace('-', "_"),
+            pkg_name: env!("CARGO_PKG_NAME").replace('-', "_"),
         }
     }
 
@@ -167,10 +171,9 @@ impl Logger {
         // program-name, only log Warn and Error messages.
         let level = record.level();
         let mut target = record.target();
-        let prefix = "nntp_rs_server::";
-        if target.starts_with(prefix) {
-            target = &target[prefix.len()..];
-        } else if target == "nntp_rs_server" {
+        if target.starts_with(&self.pkg_name_prefix) {
+            target = &target[self.pkg_name_prefix.len()..];
+        } else if target == self.pkg_name {
             target = "main";
         } else {
             match level {
