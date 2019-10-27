@@ -299,6 +299,7 @@ impl Server {
         incoming_logger.quit();
 
         info!("exiting.");
+        logger::logger_flush();
     }
 
     // This is run for every TCP listener socket.
