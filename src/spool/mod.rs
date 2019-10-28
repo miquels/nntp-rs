@@ -48,6 +48,9 @@ pub trait SpoolBackend: Send + Sync {
 
     /// Get the timestamp of the oldest article.
     fn get_oldest(&self) -> io::Result<Option<u64>>;
+
+    /// Return JSON version of token.
+    fn token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value;
 }
 
 /// Backend storage, e.g. Backend::Diablo, or Backend::Cyclic.
@@ -75,6 +78,18 @@ impl Backend {
             _ => Backend::Unknown,
         }
     }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Backend::Diablo => "diablo",
+            Backend::Cyclic => "cyclic",
+            // the ones below are virtual.
+            Backend::Unknown => "unknown",
+            Backend::NoSpool => "nospool",
+            Backend::DontStore => "dontstore",
+            Backend::RejectArts => "rejectarts",
+        }
+    }
 }
 
 /// Article location.
@@ -94,15 +109,29 @@ pub struct ArtLoc {
 
 impl Debug for ArtLoc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "ArtLoc {{ storage_type: {:?}, spool: {}, token: [",
-            self.storage_type, self.spool
-        )?;
-        for b in &self.token[0..self.toklen as usize] {
-            write!(f, "{:02x}", b)?;
-        }
-        write!(f, "] }}")
+        let token = &self.token[..self.toklen as usize]
+            .iter()
+            .fold("0x".to_string(), |acc, x| acc + &format!("{:02x}", x));
+        f.debug_struct("ArtLoc")
+            .field("storage_type", &self.storage_type.name())
+            .field("spool", &self.spool)
+            .field("token", &token)
+            .finish()
+    }
+}
+
+impl ArtLoc {
+    pub fn to_json(&self, spool: &Spool) -> serde_json::Value {
+        let location = spool
+            .inner
+            .spool
+            .get(&self.spool)
+            .map(|s| s.backend.token_to_json(self));
+        serde_json::json!({
+            "type":   self.storage_type.name(),
+            "spool":  self.spool,
+            "location": location
+        })
     }
 }
 

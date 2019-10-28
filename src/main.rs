@@ -42,6 +42,7 @@ use spool::Spool;
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
 #[derive(StructOpt, Debug)]
+#[structopt(setting = clap::AppSettings::VersionlessSubcommands)]
 pub struct MainOpts {
     #[structopt(short, long, default_value = "config.toml")]
     /// Config file (config.toml)
@@ -52,6 +53,9 @@ pub struct MainOpts {
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (trace)
     pub trace: bool,
+    /// Prettify (json) output
+    #[structopt(long)]
+    pub pretty: bool,
     #[structopt(subcommand)]
     pub cmd: Command,
 }
@@ -59,14 +63,21 @@ pub struct MainOpts {
 #[derive(StructOpt, Debug)]
 #[structopt(rename_all = "kebab-case")]
 pub enum Command {
+    #[structopt(display_order = 1)]
     /// Run the server
     Serve(ServeOpts),
-    /// History file inspection / debugging
-    HistInspect(HistInspectOpts),
+    #[structopt(display_order = 2)]
     /// History file lookup
     HistLookup(HistLookupOpts),
+    #[structopt(display_order = 3)]
+    /// History file inspection / debugging
+    HistInspect(HistInspectOpts),
+    #[structopt(display_order = 4)]
     /// History file expire (offline)
     HistExpire(HistExpireOpts),
+    #[structopt(display_order = 5)]
+    /// Read article from spool.
+    SpoolRead(SpoolReadOpts),
 }
 
 #[derive(StructOpt, Debug)]
@@ -99,6 +110,21 @@ pub struct HistLookupOpts {
     pub msgid: String,
 }
 
+#[derive(StructOpt, Debug)]
+pub struct SpoolReadOpts {
+    #[structopt(short, long)]
+    /// Default is headers only, add this to read the body.
+    pub body: bool,
+    #[structopt(short, long)]
+    /// Dump article in raw wire-format.
+    pub raw: bool,
+    #[structopt(short, long)]
+    /// history file.
+    pub file: Option<String>,
+    /// Message-Id.
+    pub msgid: String,
+}
+
 fn main() -> io::Result<()> {
     let opts = MainOpts::from_args();
 
@@ -111,7 +137,11 @@ fn main() -> io::Result<()> {
     }
 
     // first read the config file.
-    let config = match config::read_config(&opts.config) {
+    let load_newsfeeds = match opts.cmd {
+        Command::Serve(_) => true,
+        _ => false,
+    };
+    let config = match config::read_config(&opts.config, load_newsfeeds) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("{}", e);
@@ -124,7 +154,7 @@ fn main() -> io::Result<()> {
 
     let run_opts = match opts.cmd {
         Command::Serve(opts) => opts,
-        other => run_subcommand(other, &*config),
+        other => run_subcommand(other, &*config, opts.pretty),
     };
 
     let mut listenaddrs = &config.server.listen;
@@ -223,7 +253,7 @@ fn main() -> io::Result<()> {
     }
 }
 
-fn run_subcommand(cmd: Command, config: &config::Config) -> ! {
+fn run_subcommand(cmd: Command, config: &config::Config, pretty: bool) -> ! {
     // set up the logger.
     let target = LogTarget::new_with("stderr", &config).unwrap();
     logger::logger_init(target);
@@ -231,9 +261,10 @@ fn run_subcommand(cmd: Command, config: &config::Config) -> ! {
     // run subcommand.
     let res = match cmd {
         Command::Serve(_) => unreachable!(),
-        Command::HistLookup(opts) => history_lookup(&*config, opts),
+        Command::HistLookup(opts) => history_lookup(&*config, opts, pretty),
         Command::HistExpire(opts) => history_expire(&*config, opts),
         Command::HistInspect(opts) => history_inspect(&*config, opts),
+        Command::SpoolRead(opts) => spool_read(&*config, opts),
     };
 
     // flush and exit.
@@ -296,19 +327,88 @@ fn history_expire(config: &config::Config, opts: HistExpireOpts) -> io::Result<(
     })
 }
 
-fn history_lookup(config: &config::Config, opts: HistLookupOpts) -> io::Result<()> {
-    //let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    println!("unimplemented");
-    return Ok(());
-    /*
+fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -> io::Result<()> {
+    let (hist, spool) = history_common(config, opts.file.as_ref())?;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
-        hist.expire(&spool, config.history.remember.clone(), true, true).await.map_err(|e|
+        let he = hist.lookup(&opts.msgid).await.map_err(|e| {
             eprintln!("{}", e);
             e
-        }
+        })?;
+        let json = he
+            .map(|h| h.to_json(&spool))
+            .unwrap_or(serde_json::json!({"status":"notfound"}));
+        println!(
+            "{}",
+            if pretty {
+                serde_json::to_string_pretty(&json).unwrap()
+            } else {
+                json.to_string()
+            }
+        );
+        Ok(())
     })
-    */
+}
+
+// Read an article from the spool.
+fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
+    let (hist, spool) = history_common(config, opts.file.as_ref())?;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        // For now, lookup goes through the history file. We might add
+        // lookup by "storage token" or hash.
+        let he = match hist.lookup(&opts.msgid).await {
+            Ok(Some(he)) => he,
+            Ok(None) => {
+                eprintln!("{} not found", opts.msgid);
+                return Err(io::ErrorKind::NotFound.into());
+            },
+            Err(e) => {
+                eprintln!("{}", e);
+                return Err(e);
+            },
+        };
+        let loc = match he.location {
+            Some(loc) => loc,
+            None => {
+                eprintln!("{} {}", opts.msgid, he.status.name());
+                return Err(io::ErrorKind::NotFound.into());
+            },
+        };
+
+        // just headers or whole article?
+        let part = match opts.body {
+            true => spool::ArtPart::Article,
+            false => spool::ArtPart::Head,
+        };
+
+        // find it
+        let mut buf = spool.read(loc, part, bytes::BytesMut::new()).await.map_err(|e| {
+            eprintln!("spool_read {}: {}", opts.msgid, e);
+            e
+        })?;
+
+        // Output article
+        use std::io::Write;
+        if opts.raw {
+            // wire-format
+            io::stdout().write_all(&buf[..])?;
+        } else {
+            // translate from on-the-wire format to normal format.
+            for line in buf.split_mut(|&b| b == b'\n') {
+                if line.ends_with(b"\r") {
+                    line[line.len() - 1] = b'\n';
+                }
+                if line == b".\n" {
+                    break;
+                }
+                let start = if line.starts_with(b".") { 1 } else { 0 };
+                io::stdout().write_all(&line[start..])?;
+            }
+        }
+
+        Ok(())
+    })
 }
 
 

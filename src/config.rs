@@ -139,7 +139,7 @@ impl std::fmt::Debug for MultiSingle {
 }
 
 /// Read the configuration.
-pub fn read_config(name: &str) -> io::Result<Config> {
+pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     let mut f = File::open(name)?;
     let mut buffer = String::new();
     f.read_to_string(&mut buffer)?;
@@ -185,14 +185,17 @@ pub fn read_config(name: &str) -> io::Result<Config> {
     check_multisingle(&mut cfg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("multisingle: {}", e)))?;
 
-    let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
-    if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
-        read_diablo_hosts(&mut feeds, dhosts)?;
+    if load_newsfeeds {
+        let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
+        if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
+            read_diablo_hosts(&mut feeds, dhosts)?;
+        }
+        cfg.newsfeeds = Some(feeds);
     }
+
     if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.config.dspool_ctl) {
         read_dspool_ctl(dspoolctl, &cfg.paths.spool.clone(), &mut cfg.spool)?;
     }
-    cfg.newsfeeds = Some(feeds);
 
     return Ok(cfg);
 }

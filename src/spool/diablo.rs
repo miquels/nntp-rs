@@ -466,7 +466,7 @@ impl DSpool {
         // return article location
         Ok(ArtLoc {
             storage_type: Backend::Diablo,
-            spool:        self.spool_no,
+            spool: self.spool_no,
             token,
             toklen,
         })
@@ -509,6 +509,27 @@ impl DSpool {
         );
         Ok(None)
     }
+
+    fn do_token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value {
+        #[derive(Serialize, Deserialize)]
+        struct DLoc {
+            file:   String,
+            offset: u32,
+            length: u32,
+        }
+        let dart_loc = to_location(art_loc);
+        let d = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or("unknown".to_string());
+        let d = DLoc {
+            file:   format!("{}/D.{:08x}/B.{:04x}", d, dart_loc.dir, dart_loc.file),
+            offset: dart_loc.pos,
+            length: dart_loc.size,
+        };
+        serde_json::to_value(d).unwrap()
+    }
 }
 
 impl SpoolBackend for DSpool {
@@ -530,6 +551,10 @@ impl SpoolBackend for DSpool {
 
     fn get_oldest(&self) -> io::Result<Option<u64>> {
         self.do_get_oldest()
+    }
+
+    fn token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value {
+        self.do_token_to_json(art_loc)
     }
 }
 

@@ -119,7 +119,7 @@ impl HeadersParser {
     /// unless no_body_ok == true.
     pub fn parse(&mut self, buf: &[u8], no_body_ok: bool, last: bool) -> Option<ArtResult<u64>> {
         // Parse into NL delimited lines.
-        let nlines = buf.len() / 30;
+        let nlines = std::cmp::max(buf.len() / 40, 100);
         let mut lines: Vec<Range<usize>> = Vec::with_capacity(nlines);
         let mut pos = 0usize;
         loop {

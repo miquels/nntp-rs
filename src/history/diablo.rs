@@ -833,7 +833,7 @@ impl DHistEnt {
         let btype = spool::Backend::from_u8(((self.exp & 0x0f00) >> 8) as u8);
         Some(spool::ArtLoc {
             storage_type: btype,
-            spool:        spool,
+            spool: spool,
             token,
             toklen,
         })

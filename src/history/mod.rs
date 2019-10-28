@@ -76,6 +76,25 @@ pub struct HistEnt {
     pub location: Option<spool::ArtLoc>,
 }
 
+impl HistEnt {
+    pub fn to_json(&self, spool: &spool::Spool) -> serde_json::Value {
+        use chrono::{offset::Local, offset::TimeZone};
+        let time = Local.timestamp(self.time as i64, 0).to_rfc3339();
+        let mut obj = serde_json::json!({
+            "status": self.status.name(),
+            "time": time,
+            "head_only": &self.head_only,
+        });
+        if let Some(ref loc) = self.location {
+            let obj_mut = obj.as_object_mut().unwrap();
+            for (k, v) in loc.to_json(spool).as_object().unwrap().iter() {
+                obj_mut.insert(k.to_owned(), v.to_owned());
+            }
+        }
+        obj
+    }
+}
+
 /// Status of a history entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HistStatus {
@@ -91,6 +110,20 @@ pub enum HistStatus {
     Expired,
     /// article was offered but was rejected.
     Rejected,
+}
+
+impl HistStatus {
+    /// Short name of this state as &str
+    pub fn name(&self) -> &'static str {
+        match self {
+            HistStatus::Present => "present",
+            HistStatus::Tentative => "tentative",
+            HistStatus::Writing => "writing",
+            HistStatus::NotFound => "notfound",
+            HistStatus::Expired => "expired",
+            HistStatus::Rejected => "rejected",
+        }
+    }
 }
 
 /// Returned as error by some of the methods.
