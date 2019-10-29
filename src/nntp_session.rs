@@ -667,11 +667,11 @@ impl NntpSession {
             // Servers like Diablo simply ignore the Date: header
             // if it cannot be parsed. So do the same.
             let date = headers.get_str(HeaderName::Date).unwrap();
-            let dp = util::DateParser::new();
-            if let Some(tm) = dp.parse(&date) {
+            if let Some(tm) = util::parse_date(&date) {
                 // FIXME make this configurable (and reasonable)
                 // 315529200 is 1 Jan 1980, for now.
-                if tm < 315529200 {
+                use util::SystemTimeExt;
+                if tm.as_secs() < 315529200 {
                     return Err(ArtError::TooOld);
                 }
             }

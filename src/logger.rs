@@ -3,9 +3,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use chrono::{offset::Local, offset::TimeZone, Datelike, Timelike};
 use crossbeam_channel as channel;
 use log::{self, Log, Metadata, Record};
 use parking_lot::{Mutex, RwLock};
@@ -14,7 +13,7 @@ use crate::article::Article;
 use crate::config::{self, Config};
 use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
-use crate::util;
+use crate::util::SystemTimeExt;
 
 lazy_static! {
     static ref LOGGER_: Mutex<Option<Logger>> = Mutex::new(None);
@@ -90,7 +89,7 @@ struct FileData {
     name:    String,
     curname: String,
     ino:     u64,
-    when:    u64,
+    when:    SystemTime,
 }
 
 // Type of log.
@@ -287,17 +286,16 @@ impl LogDest {
             LogDest::FileData(FileData {
                 ref mut file, when, ..
             }) => {
-                let ns = ((*when % 1000) * 1_000_000) as u32;
-                let now = Local.timestamp((*when / 1000) as i64, ns);
+                let dt = when.datetime_local();
                 let t = format!(
                     "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                    now.year(),
-                    now.month(),
-                    now.day(),
-                    now.hour(),
-                    now.minute(),
-                    now.second(),
-                    now.timestamp_subsec_millis()
+                    dt.year(),
+                    dt.month(),
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                    dt.timestamp_subsec_millis()
                 );
                 let _ = write!(file, "{} {}\n", t, line);
             },
@@ -337,7 +335,7 @@ impl LogDest {
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
                 let ino = file.metadata()?.ino();
                 let file = io::BufWriter::new(file);
-                let when = util::unixtime_ms();
+                let when = SystemTime::coarse();
                 LogDest::FileData(FileData {
                     file,
                     name,
@@ -358,10 +356,10 @@ impl LogDest {
             _ => return Ok(()),
         };
         // max once a second.
-        let now = util::unixtime_ms();
+        let now = SystemTime::coarse();
         let when = fd.when;
-        fd.when = now;
-        if now / 1000 <= when / 1000 {
+        fd.when = now.clone();
+        if now.as_secs() <= when.as_secs() {
             return Ok(());
         }
 

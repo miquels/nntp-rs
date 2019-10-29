@@ -8,9 +8,8 @@ use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use chrono::{self, Datelike};
 use core_affinity::{get_core_ids, CoreId};
 use parking_lot::RwLock;
 use regex::{Captures, Regex};
@@ -21,7 +20,7 @@ use crate::blocking::BlockingType;
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
-use crate::util;
+use crate::util::{self, SystemTimeExt};
 
 use toml;
 
@@ -285,7 +284,7 @@ pub fn expand_path(paths: &Paths, path: &str) -> String {
             "${db}" => paths.db.clone(),
             "${run}" => paths.run.clone(),
             "${date}" => {
-                let now = chrono::offset::Local::now();
+                let now = SystemTime::now().datetime_local();
                 format!("{:04}{:02}{:02}", now.year(), now.month(), now.day())
             },
             p => p.to_string(),

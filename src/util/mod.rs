@@ -2,7 +2,7 @@
 
 pub(crate) mod byteorder;
 pub(crate) mod clock;
-mod dateparser;
+mod datetime;
 mod de;
 mod dhash;
 mod hashfeed;
@@ -13,7 +13,7 @@ mod wildmat_fn;
 
 pub use self::byteorder::*;
 pub use self::clock::*;
-pub use self::dateparser::*;
+pub use self::datetime::*;
 pub use self::de::*;
 pub use self::dhash::*;
 pub use self::hashfeed::*;
