@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use crossbeam_channel as channel;
 use log::{self, Log, Metadata, Record};
+use once_cell::sync::{Lazy, OnceCell};
 use parking_lot::{Mutex, RwLock};
 
 use crate::article::Article;
@@ -15,11 +16,8 @@ use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
 use crate::util::SystemTimeExt;
 
-lazy_static! {
-    static ref LOGGER_: Mutex<Option<Logger>> = Mutex::new(None);
-    static ref LOGGER: Logger = { LOGGER_.lock().take().unwrap() };
-    static ref INCOMING_LOG: RwLock<Option<Incoming>> = RwLock::new(None);
-}
+static INCOMING_LOG: Lazy<RwLock<Option<Incoming>>> = Lazy::new(|| RwLock::new(None));
+static LOGGER: OnceCell<Logger> = OnceCell::new();
 
 /// Logger for the "incoming.log" logfile.
 #[derive(Clone)]
@@ -414,19 +412,21 @@ impl LogTarget {
 
 /// initialize global logger.
 pub fn logger_init(target: LogTarget) {
-    (*LOGGER_.lock()) = Some(Logger::new2(target.dest, true));
-    let _ = log::set_logger(&*LOGGER);
+    let _ = LOGGER.set(Logger::new2(target.dest, true));
+    let _ = log::set_logger(LOGGER.get().unwrap());
 }
 
 /// reconfigure global logger.
 pub fn logger_reconfig(target: LogTarget) {
-    let l = &*LOGGER;
-    l.reconfig(target);
+    if let Some(l) = LOGGER.get() {
+        l.reconfig(target);
+    } else {
+        logger_init(target);
+    }
 }
 
 pub fn logger_flush() {
-    let l = &*LOGGER;
-    l.flush();
+    LOGGER.get().map(|l| l.flush());
 }
 
 /// Get a clone of the incoming.log logger.

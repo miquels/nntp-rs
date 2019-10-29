@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::str;
 
 use bytes::{BufMut, Bytes, BytesMut};
+use once_cell::sync::Lazy;
 use regex::Regex;
 
 /// Capabilities.
@@ -120,9 +121,7 @@ cmd! {
 }
 
 // initialize globals.
-lazy_static! {
-    static ref CMD_MAP: HashMap<String, CmdDef> = build_cmd_map();
-}
+static CMD_MAP: Lazy<HashMap<String, CmdDef>> = Lazy::new(|| build_cmd_map());
 
 // very cheap ASCII lowercasing.
 fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {

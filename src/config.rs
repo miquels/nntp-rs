@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use core_affinity::{get_core_ids, CoreId};
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use regex::{Captures, Regex};
 use users::switch::{set_effective_gid, set_effective_uid};
@@ -24,10 +25,8 @@ use crate::util::{self, SystemTimeExt};
 
 use toml;
 
-lazy_static! {
-    static ref CONFIG: RwLock<Option<Arc<Config>>> = RwLock::new(None);
-    static ref NEWSFEEDS: RwLock<Option<Arc<NewsFeeds>>> = RwLock::new(None);
-}
+static CONFIG: Lazy<RwLock<Option<Arc<Config>>>> = Lazy::new(|| RwLock::new(None));
+static NEWSFEEDS: Lazy<RwLock<Option<Arc<NewsFeeds>>>> = Lazy::new(|| RwLock::new(None));
 
 /// Toml config.
 #[derive(Deserialize, Debug)]

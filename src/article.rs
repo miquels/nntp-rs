@@ -8,6 +8,7 @@ use crate::errors::*;
 
 use bytes::BytesMut;
 use memchr::memchr;
+use once_cell::sync::Lazy;
 
 // helper macro to build header names and hashmap.
 macro_rules! nntp_headers {
@@ -59,10 +60,8 @@ const MANDATORY_HEADERS: [(HeaderName, bool); 6] = [
 ];
 
 // initialize globals.
-lazy_static! {
-    static ref HEADER_ENUMS: HashMap<Vec<u8>, HeaderName> = build_header_enums();
-    static ref HEADER_NAMES: HashMap<HeaderName, &'static [u8]> = build_header_names();
-}
+static HEADER_ENUMS: Lazy<HashMap<Vec<u8>, HeaderName>> = Lazy::new(|| build_header_enums());
+static HEADER_NAMES: Lazy<HashMap<HeaderName, &'static [u8]>> = Lazy::new(|| build_header_names());
 
 #[derive(Debug)]
 struct HeaderPos {

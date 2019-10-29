@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use crate::util;
 use dns_lookup::{self, AddrInfoHints, LookupErrorKind, SockType};
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 use crate::newsfeeds::NewsFeeds;
@@ -18,9 +19,7 @@ use crate::newsfeeds::NewsFeeds;
 const DNS_REFRESH_SECS: u64 = 3600;
 const DNS_MAX_TEMPERROR_SECS: u64 = 86400;
 
-lazy_static! {
-    static ref HOST_CACHE: HostCache = HostCache::new();
-}
+static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
 
 #[derive(Clone, Default, Debug)]
 struct HostEntry {

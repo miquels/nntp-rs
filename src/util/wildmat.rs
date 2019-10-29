@@ -4,11 +4,11 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
+
 use super::wildmat;
 
-lazy_static! {
-    static ref IDCOUNTER: Arc<AtomicUsize> = Arc::<AtomicUsize>::default();
-}
+static IDCOUNTER: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::<AtomicUsize>::default());
 
 /// Match result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
