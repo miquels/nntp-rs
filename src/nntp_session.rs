@@ -358,8 +358,15 @@ impl NntpSession {
             },
             Cmd::Date => {
                 let dt = UnixTime::now().datetime_utc();
-                let fmt = format!("{:04}{:02}{:02}{:02}{:02}{:02}",
-                                  dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
+                let fmt = format!(
+                    "{:04}{:02}{:02}{:02}{:02}{:02}",
+                    dt.year(),
+                    dt.month(),
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second()
+                );
                 return Ok(NntpResult::text(&format!("111 {}", fmt)));
             },
             Cmd::Group => {

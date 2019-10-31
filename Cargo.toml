@@ -46,7 +46,6 @@ users = "0.9.1"
 [dev-dependencies]
 env_logger = "0.7.0"
 criterion = "0.3"
-time = "0.1.42"
 
 [[bench]]
 name = "clocksources"

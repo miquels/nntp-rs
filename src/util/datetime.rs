@@ -4,7 +4,11 @@ use std::cmp;
 use std::fmt;
 use std::time::SystemTime;
 
-use chrono::{self, offset::{Local, FixedOffset, Utc, TimeZone}, Datelike, Timelike};
+use chrono::{
+    self,
+    offset::{FixedOffset, Local, TimeZone, Utc},
+    Datelike, Timelike,
+};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -58,7 +62,7 @@ impl UnixTime {
 
     pub fn now() -> UnixTime {
         let d = SystemTime::UNIX_EPOCH.elapsed().unwrap();
-        UnixTime(d.as_secs() as u64 *1000 + d.subsec_millis() as u64)
+        UnixTime(d.as_secs() as u64 * 1000 + d.subsec_millis() as u64)
     }
 
     pub fn from_secs(secs: u64) -> UnixTime {
@@ -94,7 +98,9 @@ impl UnixTime {
     }
 
     pub fn to_rfc3339(&self) -> String {
-        Local.timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000).to_rfc3339()
+        Local
+            .timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000)
+            .to_rfc3339()
     }
 
     pub fn seconds_since(&self, earlier: impl AsRef<UnixTime>) -> u64 {
@@ -246,4 +252,3 @@ fn month_to_num(mon: &str) -> Option<u32> {
         _ => return None,
     })
 }
-

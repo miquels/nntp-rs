@@ -4,8 +4,8 @@ use std::hash::Hasher;
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::util::UnixTime;
 use super::{HistEnt, HistStatus};
+use crate::util::UnixTime;
 
 // Constants that define how the cache behaves.
 pub const NUM_PARTITIONS: u32 = 32;
@@ -105,7 +105,7 @@ impl<'a> HCachePartition<'a> {
     pub fn store_update(&mut self, what: HistStatus) {
         let he = HistEnt {
             status:    what,
-            time:      UnixTime::from_secs(self.when  as u64),
+            time:      UnixTime::from_secs(self.when as u64),
             head_only: false,
             location:  None,
         };
