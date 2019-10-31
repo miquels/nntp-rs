@@ -8,7 +8,7 @@ use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use core_affinity::{get_core_ids, CoreId};
 use once_cell::sync::Lazy;
@@ -21,7 +21,7 @@ use crate::blocking::BlockingType;
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
-use crate::util::{self, SystemTimeExt};
+use crate::util;
 
 use toml;
 
@@ -283,7 +283,7 @@ pub fn expand_path(paths: &Paths, path: &str) -> String {
             "${db}" => paths.db.clone(),
             "${run}" => paths.run.clone(),
             "${date}" => {
-                let now = SystemTime::now().datetime_local();
+                let now = util::UnixTime::now().datetime_local();
                 format!("{:04}{:02}{:02}", now.year(), now.month(), now.day())
             },
             p => p.to_string(),

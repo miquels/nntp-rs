@@ -20,6 +20,7 @@ use std::time::Duration;
 use self::cache::HCache;
 use crate::blocking::BlockingType;
 use crate::spool;
+use crate::util::UnixTime;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;
 const PRESTORE_MAX_AGE: u32 = 60;
@@ -69,7 +70,7 @@ pub struct HistEnt {
     /// Present, Expired, etc.
     pub status: HistStatus,
     /// Unixtime when article was received.
-    pub time: u64,
+    pub time: UnixTime,
     /// Whether this article was received via MODE HEADFEED.
     pub head_only: bool,
     /// Location in the article spool.
@@ -78,11 +79,9 @@ pub struct HistEnt {
 
 impl HistEnt {
     pub fn to_json(&self, spool: &spool::Spool) -> serde_json::Value {
-        use chrono::{offset::Local, offset::TimeZone};
-        let time = Local.timestamp(self.time as i64, 0).to_rfc3339();
         let mut obj = serde_json::json!({
             "status": self.status.name(),
-            "time": time,
+            "time": &self.time.to_string(),
             "head_only": &self.head_only,
         });
         if let Some(ref loc) = self.location {
@@ -338,7 +337,6 @@ pub(crate) mod tests {
     use super::*;
     use env_logger;
     use std::sync::Once;
-    use std::time::SystemTime;
 
     static START: Once = Once::new();
     pub(crate) fn logger_init() {
@@ -351,13 +349,10 @@ pub(crate) mod tests {
     }
 
     async fn test_simple_async() -> Result<Option<HistEnt>, io::Error> {
-        let h = History::open("memdb", "[memdb]", None).unwrap();
+        let h = History::open("memdb", "[memdb]", true, None, None).unwrap();
         let he = HistEnt {
             status:    HistStatus::Tentative,
-            time:      SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            time:      crate::util::UnixTime::now(),
             head_only: false,
             location:  None,
         };

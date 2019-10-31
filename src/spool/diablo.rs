@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
-use crate::util::unixtime;
+use crate::util::UnixTime;
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT: u32 = 600;
@@ -327,7 +327,7 @@ impl DSpool {
 
         // check if we had this file open for more than file_reallocint secs,
         // or if we need to move to a new directory.
-        let now = unixtime();
+        let now = UnixTime::now().as_secs();
         if writer.fh.is_some() {
             let cur_dirslot = ((now / 60) as u32) / (self.dir_reallocint / 60);
             let wri_dirslot = writer.dir / (self.dir_reallocint / 60);
@@ -474,7 +474,7 @@ impl DSpool {
 
     // Get a list of D.xxxxxxxx directories, and sort them. Then find the oldest
     // non-empty directory, and return the xxxxxxxx part as a timestamp.
-    fn do_get_oldest(&self) -> io::Result<Option<u64>> {
+    fn do_get_oldest(&self) -> io::Result<Option<UnixTime>> {
         let d = match fs::read_dir(&self.path) {
             Ok(d) => d,
             Err(e) => {
@@ -499,7 +499,7 @@ impl DSpool {
             // if the directory is not empty, then return it.
             if let Ok(mut subdirs) = fs::read_dir(&path) {
                 if subdirs.next().is_some() {
-                    return Ok(Some(when));
+                    return Ok(Some(UnixTime::from_secs(when)));
                 }
             }
         }
@@ -511,24 +511,17 @@ impl DSpool {
     }
 
     fn do_token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value {
-        #[derive(Serialize, Deserialize)]
-        struct DLoc {
-            file:   String,
-            offset: u32,
-            length: u32,
-        }
         let dart_loc = to_location(art_loc);
         let d = self
             .path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or("unknown".to_string());
-        let d = DLoc {
-            file:   format!("{}/D.{:08x}/B.{:04x}", d, dart_loc.dir, dart_loc.file),
-            offset: dart_loc.pos,
-            length: dart_loc.size,
-        };
-        serde_json::to_value(d).unwrap()
+        serde_json::json!({
+            "file":   format!("{}/D.{:08x}/B.{:04x}", d, dart_loc.dir, dart_loc.file),
+            "offset": dart_loc.pos,
+            "length": dart_loc.size,
+        })
     }
 }
 
@@ -549,7 +542,7 @@ impl SpoolBackend for DSpool {
         self.maxsize
     }
 
-    fn get_oldest(&self) -> io::Result<Option<u64>> {
+    fn get_oldest(&self) -> io::Result<Option<UnixTime>> {
         self.do_get_oldest()
     }
 

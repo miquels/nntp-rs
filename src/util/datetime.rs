@@ -1,53 +1,121 @@
 //! Date and time structs and functions.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::cmp;
+use std::fmt;
+use std::time::SystemTime;
 
-use chrono::{self, offset::{Local, FixedOffset}, offset::TimeZone, Datelike, Timelike};
+use chrono::{self, offset::{Local, FixedOffset, Utc, TimeZone}, Datelike, Timelike};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::util::clock;
 
-pub trait SystemTimeExt {
-    fn coarse() -> SystemTime;
-    fn from_secs(sec: u64) -> SystemTime;
-    fn from_millis(millis: u64) -> SystemTime;
-    fn as_secs(&self) -> u64;
-    fn as_millis(&self) -> u64;
-    fn datetime_local(&self) -> DateTime<Local>;
+#[derive(Clone, Copy, Default, Deserialize)]
+pub struct UnixTime(u64);
+
+impl fmt::Debug for UnixTime {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}.{:03}", self.0 / 1000, self.0 % 1000)
+    }
 }
 
-impl SystemTimeExt for SystemTime {
-    fn coarse() -> SystemTime {
+impl fmt::Display for UnixTime {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.to_rfc3339())
+    }
+}
+
+impl cmp::PartialOrd for UnixTime {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl cmp::Ord for UnixTime {
+    fn cmp(&self, other: &UnixTime) -> cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl cmp::PartialEq for UnixTime {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl cmp::Eq for UnixTime {}
+
+impl AsRef<UnixTime> for UnixTime {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl UnixTime {
+    pub fn coarse() -> UnixTime {
         let now = clock::gettime(clock::ClockId::RealtimeCoarse);
-        UNIX_EPOCH.checked_add(Duration::new(now.sec as u64, now.nsec as u32)).unwrap()
+        UnixTime((now.sec as u64 * 1000) + (now.nsec as u64 / 1_000_000))
     }
 
-    fn from_secs(sec: u64) -> SystemTime {
-        UNIX_EPOCH.checked_add(Duration::new(sec, 0)).unwrap()
+    pub fn now() -> UnixTime {
+        let d = SystemTime::UNIX_EPOCH.elapsed().unwrap();
+        UnixTime(d.as_secs() as u64 *1000 + d.subsec_millis() as u64)
     }
 
-    fn from_millis(millis: u64) -> SystemTime {
-        let sec = millis / 1000;
-        let ns = (millis - sec * 1000) * 1_000_000;
-        UNIX_EPOCH.checked_add(Duration::new(sec, ns as u32)).unwrap()
+    pub fn from_secs(secs: u64) -> UnixTime {
+        UnixTime(secs * 1000)
     }
 
-    fn as_secs(&self) -> u64 {
-        let d = self.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        d.as_secs()
+    pub fn from_millis(millis: u64) -> UnixTime {
+        UnixTime(millis)
     }
 
-    fn as_millis(&self) -> u64 {
-        let d = self.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        d.as_millis() as u64
+    pub fn zero() -> UnixTime {
+        UnixTime(0)
     }
 
-    fn datetime_local(&self) -> DateTime<Local> {
-        let d = self.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        DateTime(Local.timestamp(d.as_secs() as i64, d.subsec_nanos()))
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn as_secs(&self) -> u64 {
+        self.0 / 1000
+    }
+
+    pub fn subsec_millis(&self) -> u32 {
+        (self.0 % 1000) as u32
+    }
+
+    pub fn datetime_local(&self) -> DateTime<Local> {
+        DateTime(Local.timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000))
+    }
+
+    pub fn datetime_utc(&self) -> DateTime<Utc> {
+        DateTime(Utc.timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000))
+    }
+
+    pub fn to_rfc3339(&self) -> String {
+        Local.timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000).to_rfc3339()
+    }
+
+    pub fn seconds_since(&self, earlier: impl AsRef<UnixTime>) -> u64 {
+        let earlier = earlier.as_ref();
+        if self.0 >= earlier.0 {
+            (self.0 - earlier.0) / 1000
+        } else {
+            0
+        }
+    }
+
+    pub fn seconds_elapsed(&self) -> u64 {
+        let now = UnixTime::coarse();
+        if now.0 >= self.0 {
+            (now.0 - self.0) / 1000
+        } else {
+            0
+        }
     }
 }
+
 
 pub struct DateTime<Tz: TimeZone>(chrono::DateTime<Tz>);
 
@@ -99,7 +167,7 @@ static DT_RE: Lazy<Regex> = Lazy::new(|| {
 /// but also allow for some variations as seen in the wild on Usenet.
 ///
 /// Only parses dates from years 1970..9999.
-pub fn parse_date(datetime: &str) -> Option<SystemTime> {
+pub fn parse_date(datetime: &str) -> Option<UnixTime> {
     let s = DT_RE.captures(datetime)?;
     if s.len() < 8 {
         return None;
@@ -154,7 +222,7 @@ pub fn parse_date(datetime: &str) -> Option<SystemTime> {
 
     let tm = dt.ymd(year, mon, day).and_hms(hour, mins, secs).timestamp();
     if tm >= 0 {
-        Some(SystemTime::from_secs(tm as u64))
+        Some(UnixTime::from_secs(tm as u64))
     } else {
         None
     }

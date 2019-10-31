@@ -7,6 +7,7 @@ use parking_lot::RwLock;
 
 use crate::history::{HistBackend, HistEnt, HistStatus};
 use crate::spool;
+use crate::util::UnixTime;
 
 /// In in-memory history database. Not to be used for production,
 /// mainly used for testing.
@@ -28,7 +29,7 @@ impl MemDb {
     async fn do_lookup(&self, msgid: &[u8]) -> io::Result<HistEnt> {
         let db = self.db.read();
         let res = db.get(msgid).map(|e| e.clone()).unwrap_or(HistEnt {
-            time:      0,
+            time:      UnixTime::zero(),
             status:    HistStatus::NotFound,
             head_only: false,
             location:  None,

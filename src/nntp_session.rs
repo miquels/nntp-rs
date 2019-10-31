@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use time;
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands::{self, Capb, Cmd, CmdParser};
@@ -18,7 +17,7 @@ use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{CodecMode, NntpCodec, NntpInput};
 use crate::server::Server;
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
-use crate::util::{self, HashFeed, MatchList, MatchResult};
+use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NntpState {
@@ -358,8 +357,9 @@ impl NntpSession {
                 return Ok(NntpResult::text(&s));
             },
             Cmd::Date => {
-                let tm = time::now_utc();
-                let fmt = tm.strftime("%Y%m%d%H%M%S").unwrap();
+                let dt = UnixTime::now().datetime_utc();
+                let fmt = format!("{:04}{:02}{:02}{:02}{:02}{:02}",
+                                  dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
                 return Ok(NntpResult::text(&format!("111 {}", fmt)));
             },
             Cmd::Group => {
@@ -471,7 +471,7 @@ impl NntpSession {
         Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
     }
 
-    async fn reject_art(&mut self, art: &Article, recv_time: u64, e: ArtError) -> io::Result<ArtAccept> {
+    async fn reject_art(&mut self, art: &Article, recv_time: UnixTime, e: ArtError) -> io::Result<ArtAccept> {
         let he = HistEnt {
             status:    HistStatus::Rejected,
             time:      recv_time,
@@ -503,7 +503,7 @@ impl NntpSession {
         }
     }
 
-    async fn dontstore_art(&mut self, art: &Article, recv_time: u64) -> io::Result<ArtAccept> {
+    async fn dontstore_art(&mut self, art: &Article, recv_time: UnixTime) -> io::Result<ArtAccept> {
         let he = HistEnt {
             status:    HistStatus::Expired,
             time:      recv_time,
@@ -534,7 +534,7 @@ impl NntpSession {
 
     // Received article: see if we want it, find out if it needs to be sent to other peers.
     async fn received_article(&mut self, mut art: &mut Article, can_defer: bool) -> io::Result<ArtAccept> {
-        let recv_time = util::unixtime();
+        let recv_time = UnixTime::now();
 
         // parse article.
         let (headers, body, wantpeers) = match self.process_headers(&mut art) {
@@ -670,7 +670,6 @@ impl NntpSession {
             if let Some(tm) = util::parse_date(&date) {
                 // FIXME make this configurable (and reasonable)
                 // 315529200 is 1 Jan 1980, for now.
-                use util::SystemTimeExt;
                 if tm.as_secs() < 315529200 {
                     return Err(ArtError::TooOld);
                 }

@@ -17,7 +17,7 @@ use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::{BlockingPool, BlockingType};
 use crate::config;
-use crate::util::{self, HashFeed, MatchResult};
+use crate::util::{self, HashFeed, MatchResult, UnixTime};
 
 // Faux spoolno's returned by get_spool.
 pub const SPOOL_REJECTARTS: u8 = 253;
@@ -47,7 +47,7 @@ pub trait SpoolBackend: Send + Sync {
     fn get_maxsize(&self) -> u64;
 
     /// Get the timestamp of the oldest article.
-    fn get_oldest(&self) -> io::Result<Option<u64>>;
+    fn get_oldest(&self) -> io::Result<Option<UnixTime>>;
 
     /// Return JSON version of token.
     fn token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value;
@@ -406,7 +406,7 @@ impl Spool {
         })
     }
 
-    pub fn get_oldest(&self) -> HashMap<u8, u64> {
+    pub fn get_oldest(&self) -> HashMap<u8, UnixTime> {
         let mut res = HashMap::new();
         for (s, b) in &self.inner.spool {
             if let Ok(Some(oldest)) = b.backend.get_oldest() {

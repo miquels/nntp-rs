@@ -7,17 +7,16 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::util;
 use dns_lookup::{self, AddrInfoHints, LookupErrorKind, SockType};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 use crate::newsfeeds::NewsFeeds;
 
-const DNS_REFRESH_SECS: u64 = 3600;
-const DNS_MAX_TEMPERROR_SECS: u64 = 86400;
+const DNS_REFRESH_SECS: Duration = Duration::from_secs(3600);
+const DNS_MAX_TEMPERROR_SECS: Duration = Duration::from_secs(86400);
 
 static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
 
@@ -26,7 +25,7 @@ struct HostEntry {
     label:      String,
     hostname:   String,
     addrs:      Vec<IpAddr>,
-    lastupdate: u64,
+    lastupdate: Option<Instant>,
     valid:      bool,
 }
 
@@ -97,7 +96,7 @@ impl HostCache {
                             label:      p.label.clone(),
                             hostname:   h.clone(),
                             addrs:      Vec::new(),
-                            lastupdate: 0,
+                            lastupdate: None,
                             valid:      true,
                         });
                     },
@@ -179,15 +178,15 @@ impl HostCache {
                 }
 
                 // see if any entries need updating.
-                let now = util::unixtime();
                 while idx < len {
-                    if inner.entries[idx].lastupdate < now - DNS_REFRESH_SECS {
-                        break;
+                    match inner.entries[idx].lastupdate {
+                        Some(t) if t.elapsed() < DNS_REFRESH_SECS => {},
+                        _ => break,
                     }
                     idx += 1;
                 }
 
-                // if not, break.
+                // if not, break out of the outer loop.
                 if idx == len {
                     break;
                 }
@@ -199,9 +198,9 @@ impl HostCache {
             debug!("Refreshing host cache for {}", host);
 
             // We are not locked here anymore. Lookup "hostname".
-            let now = std::time::Instant::now();
+            let start = Instant::now();
             let res = dns_lookup::getaddrinfo(Some(&host), None, Some(hints));
-            let elapsed = now.elapsed().as_millis();
+            let elapsed = start.elapsed().as_millis();
             if elapsed >= 1500 {
                 let elapsed = (elapsed / 100) as f64 / 10f64;
                 warn!("resolver: lookup {}: took {} seconds", host, elapsed);
@@ -217,7 +216,7 @@ impl HostCache {
                         warn!("resolver: lookup {}: OK, but 0 results?!", host);
                         (o_addrs, lastupdate)
                     } else {
-                        (addrs, util::unixtime())
+                        (addrs, Some(Instant::now()))
                     }
                 },
                 Err(e) => {
@@ -225,22 +224,24 @@ impl HostCache {
                         // NXDOMAIN or NODATA - normal retry time.
                         LookupErrorKind::NoName | LookupErrorKind::NoData => {
                             warn!("resolver: lookup {}: host not found", host);
-                            (Vec::new(), util::unixtime())
+                            (Vec::new(), Some(Instant::now()))
                         },
                         // Transient error, retry soon.
                         _ => {
                             let err: io::Error = e.into();
                             warn!("resolver: lookup {}: {}", host, err);
-                            (o_addrs, 0)
+                            (o_addrs, None)
                         },
                     }
                 },
             };
 
-            let now = util::unixtime();
-            if lastupdate < now - DNS_MAX_TEMPERROR_SECS {
-                addrs.truncate(0);
-                lastupdate = 0;
+            match lastupdate {
+                Some(t) if t.elapsed() < DNS_MAX_TEMPERROR_SECS => {},
+                _ => {
+                    addrs.truncate(0);
+                    lastupdate = None;
+                },
             }
 
             // Critical section.

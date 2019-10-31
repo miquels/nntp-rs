@@ -4,6 +4,7 @@ use std::hash::Hasher;
 
 use parking_lot::{Mutex, MutexGuard};
 
+use crate::util::UnixTime;
 use super::{HistEnt, HistStatus};
 
 // Constants that define how the cache behaves.
@@ -28,7 +29,7 @@ fn hash_str(s: &str) -> u64 {
 
 #[inline]
 fn unixtime() -> u32 {
-    crate::util::clock::unixtime() as u32
+    crate::util::UnixTime::coarse().as_secs() as u32
 }
 
 impl HCache {
@@ -88,7 +89,7 @@ impl<'a> HCachePartition<'a> {
     pub fn store_tentative(&mut self, what: HistStatus) {
         let he = HistEnt {
             status:    what,
-            time:      self.when as u64,
+            time:      UnixTime::from_secs(self.when as u64),
             head_only: false,
             location:  None,
         };
@@ -104,7 +105,7 @@ impl<'a> HCachePartition<'a> {
     pub fn store_update(&mut self, what: HistStatus) {
         let he = HistEnt {
             status:    what,
-            time:      self.when as u64,
+            time:      UnixTime::from_secs(self.when  as u64),
             head_only: false,
             location:  None,
         };
@@ -239,6 +240,7 @@ impl LruMap {
 mod tests {
     use super::*;
     use crate::history::HistStatus;
+    use crate::util::UnixTime;
 
     #[test]
     fn test_simple() {
@@ -246,7 +248,7 @@ mod tests {
         let cache = HCache::new();
         let histent = HistEnt {
             status:    HistStatus::Present,
-            time:      unixtime() as u64,
+            time:      UnixTime::coarse(),
             head_only: false,
             location:  None,
         };
@@ -268,7 +270,7 @@ mod tests {
         let cache = HCache::new();
         let histent = HistEnt {
             status:    HistStatus::Present,
-            time:      unixtime() as u64,
+            time:      UnixTime::coarse(),
             head_only: false,
             location:  None,
         };

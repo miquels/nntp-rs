@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use crossbeam_channel as channel;
 use log::{self, Log, Metadata, Record};
@@ -14,7 +14,7 @@ use crate::article::Article;
 use crate::config::{self, Config};
 use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
-use crate::util::SystemTimeExt;
+use crate::util::UnixTime;
 
 static INCOMING_LOG: Lazy<RwLock<Option<Incoming>>> = Lazy::new(|| RwLock::new(None));
 static LOGGER: OnceCell<Logger> = OnceCell::new();
@@ -87,7 +87,7 @@ struct FileData {
     name:    String,
     curname: String,
     ino:     u64,
-    when:    SystemTime,
+    when:    UnixTime,
 }
 
 // Type of log.
@@ -333,7 +333,7 @@ impl LogDest {
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
                 let ino = file.metadata()?.ino();
                 let file = io::BufWriter::new(file);
-                let when = SystemTime::coarse();
+                let when = UnixTime::coarse();
                 LogDest::FileData(FileData {
                     file,
                     name,
@@ -354,7 +354,7 @@ impl LogDest {
             _ => return Ok(()),
         };
         // max once a second.
-        let now = SystemTime::coarse();
+        let now = UnixTime::coarse();
         let when = fd.when;
         fd.when = now.clone();
         if now.as_secs() <= when.as_secs() {

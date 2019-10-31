@@ -20,7 +20,7 @@ use crate::history::{HistBackend, HistEnt, HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
 use crate::util::DHash;
-use crate::util::{self, MmapAtomicU32};
+use crate::util::{MmapAtomicU32, UnixTime};
 
 /// Diablo compatible history file.
 #[derive(Debug)]
@@ -182,7 +182,7 @@ impl DHistory {
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
                     return Ok(HistEnt {
-                        time:      0,
+                        time:      UnixTime::zero(),
                         status:    HistStatus::NotFound,
                         head_only: false,
                         location:  None,
@@ -447,7 +447,7 @@ impl DHistoryInner {
         &self,
         new: &DHistoryInner,
         rpos: u64,
-        spool_oldest: &HashMap<u8, u64>,
+        spool_oldest: &HashMap<u8, UnixTime>,
         remember: u64,
         first: bool,
     ) -> io::Result<u64>
@@ -463,7 +463,7 @@ impl DHistoryInner {
         rfile.seek(io::SeekFrom::Start(rpos))?;
         let rsize = self.rfile.metadata().map(|m| m.len()).unwrap();
 
-        let now = util::unixtime();
+        let now = UnixTime::now();
         let mut last_tm = now;
         let mut last_pct = 0;
 
@@ -507,7 +507,7 @@ impl DHistoryInner {
             }
 
             // only write the entry if it is not expired or if it still is within "remember".
-            if !expired || when >= now - remember {
+            if !expired || now.seconds_since(when) < remember {
                 kept += 1;
                 if did_mark {
                     marked += 1;
@@ -519,9 +519,9 @@ impl DHistoryInner {
 
             // status update while we're running.
 
-            if (kept + removed) % 10000 == 0 && last_tm + 10 < util::unixtime() {
+            if (kept + removed) % 10000 == 0 && last_tm.seconds_elapsed() >= 10 {
                 last_pct = (100 * (rpos - self.data_offset)) / (rsize - self.data_offset);
-                last_tm = util::unixtime();
+                last_tm = UnixTime::now();
                 info!("expire {:?}: {}%", self.path, last_pct);
             }
         }
@@ -548,7 +548,7 @@ impl DHistoryInner {
     // See if we need to expire. The first entry in the history file is the
     // oldest. If it has a timestamp _before_ any of the spool_oldest,
     // we need to expire the history file.
-    fn need_expire(&self, spool_oldest: &HashMap<u8, u64>) -> bool {
+    fn need_expire(&self, spool_oldest: &HashMap<u8, UnixTime>) -> bool {
         debug!("need_expire: spool_oldest: {:?}", spool_oldest);
         // get first entry (actually, second. First is a zero-entry).
         let pos = self.data_offset + DHISTENT_SIZE as u64;
@@ -659,9 +659,9 @@ impl DHistoryInner {
             exp:          u64,
             rej:          u64,
             unk:          u64,
-            oldest:       u64,
-            newest:       u64,
-            spool_oldest: u64,
+            oldest:       UnixTime,
+            newest:       UnixTime,
+            spool_oldest: UnixTime,
             is_defined:   bool,
         }
         // Fill hashmap with empty Stats for currently defined pools.
@@ -695,7 +695,7 @@ impl DHistoryInner {
                 _ => s.unk += 1,
             }
 
-            if when < s.oldest || s.oldest == 0 {
+            if when < s.oldest || s.oldest.is_zero() {
                 s.oldest = when;
             }
             if when > s.newest {
@@ -718,7 +718,7 @@ impl DHistoryInner {
             };
             info!(
                 "spool {:>4}{} present: {:10} remembered: {:10} rejected: {:10} \
-                 unknown: {:10} oldest: {} newest: {} spool_oldest: {}",
+                 unknown: {:10} oldest: {:?} newest: {:?} spool_oldest: {:?}",
                 spno, star, s.tot, s.exp, s.rej, s.unk, s.oldest, s.newest, s.spool_oldest
             );
         }
@@ -760,7 +760,7 @@ impl DHistEnt {
         let mut dhe: DHistEnt = Default::default();
         dhe.next = next;
         dhe.hv = hv;
-        dhe.gmt = (he.time / 60) as u32;
+        dhe.gmt = (he.time.as_secs() / 60) as u32;
 
         let mut storage_type = spool::Backend::Diablo;
         if let Some(ref loc) = he.location {
@@ -920,8 +920,8 @@ impl DHistEnt {
     }
 
     // Get the "when" of this entry.
-    fn when(&self) -> u64 {
-        self.gmt as u64 * 60
+    fn when(&self) -> UnixTime {
+        UnixTime::from_secs(self.gmt as u64 * 60)
     }
 
     // is this a head-only entry.

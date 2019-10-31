@@ -23,7 +23,7 @@ use std::str::FromStr;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::hostcache::HostCache;
-use crate::util::{self, HashFeed, MatchList, MatchResult, WildMatList};
+use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
 
 use ipnet::IpNet;
 
@@ -39,7 +39,7 @@ pub struct NewsFeeds {
     /// And the groupdefs that can be referenced by the peers.
     pub groupdefs:      Vec<WildMatList>,
     /// timestamp of file when we loaded this data
-    pub timestamp:      u64,
+    pub timestamp:      UnixTime,
     hcache:             HostCache,
 }
 
@@ -52,7 +52,7 @@ impl NewsFeeds {
             peer_map:  HashMap::new(),
             groupdefs: Vec::new(),
             hcache:    HostCache::get(),
-            timestamp: util::unixtime_ms(),
+            timestamp: UnixTime::now(),
         }
     }
 
