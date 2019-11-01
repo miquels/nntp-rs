@@ -3,7 +3,8 @@
 //!
 //! Benchmark results:
 //!
-//! time::now_utc().to_timespec()   95 ns
+//! SystemTime::now()               28 ns
+//! Instant::now()                  15 ns
 //! libc::gettimeofday()            15 ns
 //! libc::clock_gettime             15 ns
 //! libc::clock_gettime (coarse)     5 ns
