@@ -10,6 +10,7 @@ pub mod commands;
 pub mod config;
 pub mod dconfig;
 pub mod diag;
+#[macro_use]
 pub mod errors;
 pub mod history;
 pub mod hostcache;
@@ -416,11 +417,9 @@ pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
     let builder = if addr.is_ipv6() {
         // create IPv6 socket and make it v6-only.
         let b = net2::TcpBuilder::new_v6()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("creating IPv6 socket: {}", e)))?;
+            .map_err(|e| ioerr!(Other, "creating IPv6 socket: {}", e))?;
         if let Err(e) = b.only_v6(true) {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("setting socket to only_v6: {}", e),
+            Err(ioerr!(Other, "setting socket to only_v6: {}", e)),
             ))
         } else {
             Ok(b)
