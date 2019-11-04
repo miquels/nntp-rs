@@ -132,6 +132,10 @@ impl SessionStats {
 
         let elapsed = self.instant.elapsed().as_secs();
         let dt = std::cmp::max(1, elapsed);
+        let mut rate = nuse as f64 / (dt as f64);
+        if rate >= 10.0 {
+            rate = rate.round();
+        }
 
         info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
 			self.hostname,
@@ -154,7 +158,7 @@ impl SessionStats {
 			self.stats[Stats::ReceivedBytes as usize],
 			self.stats[Stats::AcceptedBytes as usize],
 			self.stats[Stats::RejectedBytes as usize],
-			nuse as u64 / dt,
+			rate,
         );
     }
 
