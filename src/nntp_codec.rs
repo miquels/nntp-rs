@@ -1,6 +1,4 @@
 use std::io;
-use std::net::Shutdown;
-use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -10,16 +8,16 @@ use crate::server::Notification;
 use crate::util::HashFeed;
 
 use bytes::{Bytes, BytesMut};
-use futures::{Sink, Stream};
 use memchr::memchr;
+use tokio::future::poll_fn;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::sync::watch;
 use tokio::timer::{self, Delay};
 
-const INITIAL_TIMEOUT: u64 = 60;
-const READ_TIMEOUT: u64 = 630;
-const WRITE_TIMEOUT: u64 = 120;
+pub const INITIAL_TIMEOUT: u64 = 60;
+pub const READ_TIMEOUT: u64 = 630;
+pub const WRITE_TIMEOUT: u64 = 120;
 
 // Reading state (multiline)
 #[derive(Debug, PartialEq, Eq)]
@@ -30,27 +28,28 @@ enum State {
     DotSeen,
     Cr2Seen,
     Lf2Seen,
-    Eof,
 }
 
 /// Reading mode.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum CodecMode {
-    /// Initial mode
-    Connect,
+enum CodecMode {
     /// in "read line" mode.
     ReadLine,
     /// in "read multiline block" mode
     ReadBlock,
     /// in "read article" mode
     ReadArticle,
-    /// at next read, return quit.
-    Quit,
 }
 
-/// Stream object.
-pub enum NntpInput {
-    Connect,
+/// Possible return values from read_line()
+pub enum NntpLine {
+    Eof,
+    Line(BytesMut),
+    Notification(Notification),
+}
+
+// Internal return values from poll_read().
+enum NntpInput {
     Eof,
     Line(BytesMut),
     Block(BytesMut),
@@ -58,51 +57,99 @@ pub enum NntpInput {
     Notification(Notification),
 }
 
-/// NntpCodec implements both Stream to receive and Sink to send either
-/// lines or multi-line blocks.
-///
-/// Like a tokio::io::codec, but it has to be a seperate implementation
-/// because we need to switch between reading lines and multi-line blocks,
-/// and we might want to do more advanced buffering later on.
+/// NntpCodec precursor.
+pub struct NntpCodecBuilder {
+    socket:         TcpStream,
+    watcher:        Option<watch::Receiver<Notification>>,
+    rd_tmout:       Option<Duration>,
+    wr_tmout:       Option<Duration>,
+}
+
+impl NntpCodecBuilder {
+    /// New builder for a NntpCodec.
+    pub fn new(socket: TcpStream) -> NntpCodecBuilder {
+        NntpCodecBuilder {
+            socket,
+            watcher:        None,
+            rd_tmout:       None,
+            wr_tmout:       None,
+        }
+    }
+
+    /// Set read timeout
+    pub fn read_timeout(mut self, secs: u64) -> Self {
+        self.rd_tmout = Some(Duration::from_secs(secs));
+        self
+    }
+
+    /// Set write timeout
+    pub fn write_timeout(mut self, secs: u64) -> Self {
+        self.wr_tmout = Some(Duration::from_secs(secs));
+        self
+    }
+
+    /// Set the watcher we watch for receipt of Notifications.
+    pub fn watcher(mut self, w: watch::Receiver<Notification>) -> Self {
+        self.watcher = Some(w);
+        self
+    }
+
+    /// Build the final NntpCodec.
+    pub fn build(self) -> NntpCodec {
+        let _ = self.socket.set_nodelay(true);
+        NntpCodec {
+            socket:          self.socket,
+            watcher:         self.watcher,
+            rd:              BytesMut::new(),
+            rd_pos:          0,
+            rd_overflow:     false,
+            rd_reserve_size: 0,
+            rd_state:        State::Lf1Seen,
+            rd_line_start:   0,
+            rd_mode:         CodecMode::ReadLine,
+            rd_tmout:        self.rd_tmout,
+            rd_timer:        None,
+            wr:              Bytes::new(),
+            wr_tmout:        self.wr_tmout,
+            wr_timer:        None,
+            arttype_scanner: ArtTypeScanner::new(),
+            notification:    None,
+            msgid:           None,
+        }
+    }
+}
+
+/// NntpCodec can read lines/blocks/articles from  a TcpStream, and
+/// write buffers to a TcpStream.
 pub struct NntpCodec {
     socket:          TcpStream,
-    watcher:         watch::Receiver<Notification>,
+    watcher:         Option<watch::Receiver<Notification>>,
     rd:              BytesMut,
     rd_pos:          usize,
     rd_overflow:     bool,
     rd_state:        State,
     rd_line_start:   usize,
     rd_reserve_size: usize,
-    wr:              Bytes,
-    arttype_scanner: ArtTypeScanner,
-    wr_timeout:      Delay,
-    rd_timeout:      Delay,
+    rd_tmout:        Option<Duration>,
+    rd_timer:        Option<Delay>,
     rd_mode:         CodecMode,
-    msgid:           Option<String>,
+    wr:              Bytes,
+    wr_tmout:        Option<Duration>,
+    wr_timer:        Option<Delay>,
+    arttype_scanner: ArtTypeScanner,
     notification:    Option<Notification>,
+    msgid:           Option<String>,
 }
 
 impl NntpCodec {
-    /// Returns a new NntpCodec.
-    pub fn new(socket: TcpStream, watcher: watch::Receiver<Notification>) -> NntpCodec {
-        let _ = socket.set_nodelay(true);
-        NntpCodec {
-            socket:          socket,
-            watcher:         watcher,
-            rd:              BytesMut::new(),
-            wr:              Bytes::new(),
-            rd_pos:          0,
-            rd_overflow:     false,
-            rd_reserve_size: 0,
-            rd_state:        State::Lf1Seen,
-            rd_line_start:   0,
-            arttype_scanner: ArtTypeScanner::new(),
-            rd_timeout:      timer::delay_for(Duration::new(INITIAL_TIMEOUT, 0)),
-            wr_timeout:      timer::delay_for(Duration::new(WRITE_TIMEOUT, 0)),
-            rd_mode:         CodecMode::Connect,
-            msgid:           None,
-            notification:    None,
-        }
+    /// Returns a new NntpCodec. For more control, use builder() or NntpCodecBuilder::new().
+    pub fn new(socket: TcpStream) -> NntpCodec {
+        NntpCodecBuilder::new(socket).build()
+    }
+
+    /// New builder for a NntpCodec.
+    pub fn builder(socket: TcpStream) -> NntpCodecBuilder {
+        NntpCodecBuilder::new(socket)
     }
 
     // fill the read buffer as much as possible.
@@ -143,7 +190,7 @@ impl NntpCodec {
         }
     }
 
-    fn read_line(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
+    fn poll_read_line(&mut self) -> Poll<io::Result<NntpInput>> {
         // resume where we left off.
         let bufpos = self.rd_pos;
         let buflen = self.rd.len();
@@ -159,10 +206,10 @@ impl NntpCodec {
         };
         let buf = self.rd.split_to(nl_pos + 1);
         self.rd_pos = 0;
-        Poll::Ready(Some(Ok(NntpInput::Line(buf))))
+        Poll::Ready(Ok(NntpInput::Line(buf)))
     }
 
-    fn read_block(&mut self, do_scan: bool) -> Poll<Option<Result<NntpInput, io::Error>>> {
+    fn poll_read_block(&mut self, do_scan: bool) -> Poll<io::Result<NntpInput>> {
         // resume where we left off.
         let mut bufpos = self.rd_pos;
         {
@@ -228,7 +275,6 @@ impl NntpCodec {
                         }
                     },
                     State::Lf2Seen => unreachable!(),
-                    State::Eof => unreachable!(),
                 }
             }
         }
@@ -245,9 +291,9 @@ impl NntpCodec {
             if self.rd_overflow {
                 // recoverable error.
                 self.rd_overflow = false;
-                return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::InvalidData, "Overflow"))));
+                return Poll::Ready(Err(ioerr!(InvalidData, "Overflow")));
             }
-            return Poll::Ready(Some(Ok(NntpInput::Block(buf))));
+            return Poll::Ready(Ok(NntpInput::Block(buf)));
         }
 
         // continue
@@ -256,10 +302,10 @@ impl NntpCodec {
 
     // read_article is a small wrapper around read_block that returns
     // an Article struct with the BytesMut and some article metadata.
-    fn read_article(&mut self) -> Poll<Option<Result<NntpInput, io::Error>>> {
-        match self.read_block(true) {
-            Poll::Ready(Some(Ok(NntpInput::Block(buf)))) => {
-                let msgid = self.get_msgid();
+    fn poll_read_article(&mut self) -> Poll<io::Result<NntpInput>> {
+        match self.poll_read_block(true) {
+            Poll::Ready(Ok(NntpInput::Block(buf))) => {
+                let msgid = self.msgid.take().unwrap_or("".to_string());
                 let article = Article {
                     hash:     HashFeed::hash_str(&msgid),
                     msgid:    msgid,
@@ -270,16 +316,99 @@ impl NntpCodec {
                     pathhost: None,
                 };
                 self.arttype_scanner.reset();
-                Poll::Ready(Some(Ok(NntpInput::Article(article))))
+                Poll::Ready(Ok(NntpInput::Article(article)))
             },
-            data => data,
+            other => other,
         }
     }
 
-    fn nntp_sink_poll_ready(&mut self, cx: &mut Context, flush: bool) -> Poll<Result<(), io::Error>> {
-        if !self.wr.is_empty() {
-            trace!("writing; remaining={}", self.wr.len());
+    fn poll_read(&mut self, cx: &mut Context) -> Poll<io::Result<NntpInput>> {
+        // first, check the notification channel.
+        if let Some(watcher) = self.watcher.as_mut() {
+            let n = {
+                let fut = watcher.recv();
+                pin_utils::pin_mut!(fut);
+                match fut.poll(cx) {
+                    Poll::Ready(item) => {
+                        match item {
+                            Some(Notification::ExitNow) => {
+                                return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
+                            },
+                            Some(Notification::None) => None,
+                            other => other,
+                        }
+                    },
+                    Poll::Pending => None,
+                }
+            };
+            if n.is_some() {
+                self.notification = n;
+            }
+        }
 
+        // read as much data as we can.
+        let sock_closed = match self.fill_read_buf(cx) {
+            Poll::Ready(Ok(())) => true,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => false,
+        };
+
+        // Now if we have no input yet process the notifications.
+        if self.rd.len() == 0 && self.rd_mode == CodecMode::ReadLine {
+            if let Some(notification) = self.notification.take() {
+                return Poll::Ready(Ok(NntpInput::Notification(notification)));
+            }
+        }
+
+        // Then process the data.
+        if self.rd.len() > 0 {
+            let res = match self.rd_mode {
+                CodecMode::ReadLine => self.poll_read_line(),
+                CodecMode::ReadBlock => self.poll_read_block(false),
+                CodecMode::ReadArticle => self.poll_read_article(),
+            };
+            match res {
+                Poll::Pending => {
+                    // we read some data, so reset the timer.
+                    self.reset_rd_timer();
+                },
+                res => {
+                    // we got a full line/block/article.
+                    return res;
+                },
+            }
+        }
+
+        // see if the other side closed the socket.
+        if sock_closed {
+            if self.rd.len() > 0 {
+                // We were still reading a line, or a block, and hit EOF
+                // before the end. That's unexpected.
+                return Poll::Ready(Err(ioerr!(UnexpectedEof, "UnexpectedEof")));
+            }
+            // EOF.
+            return Poll::Ready(Ok(NntpInput::Eof));
+        }
+
+        // check the timer.
+        if let Some(timeout) = self.rd_timer.as_mut() {
+            pin_utils::pin_mut!(timeout);
+            return match timeout.poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(()) => {
+                    Poll::Ready(Err(ioerr!(TimedOut, "TimedOut")))
+                },
+            }
+        }
+        Poll::Pending
+    }
+
+    fn poll_write(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
+        if !self.wr.is_empty() {
+            //
+            // See if we can write more data to the socket.
+            //
+            trace!("writing; remaining={}", self.wr.len());
             let socket = &mut self.socket;
             pin_utils::pin_mut!(socket);
             match socket.poll_write(cx, &self.wr) {
@@ -295,228 +424,165 @@ impl NntpCodec {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {},
             }
-        }
 
-        if self.wr.is_empty() {
-            if flush {
-                let socket = &mut self.socket;
-                pin_utils::pin_mut!(socket);
-                match socket.poll_flush(cx) {
-                    Poll::Ready(Ok(_)) => {
-                        self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
-                        return Poll::Ready(Ok(()));
-                    },
-                    Poll::Ready(Err(e)) => {
-                        self.wr_timeout.reset(calc_delay(WRITE_TIMEOUT));
-                        return Poll::Ready(Err(e));
-                    },
-                    Poll::Pending => {},
-                }
-            } else {
-                return Poll::Ready(Ok(()));
+            //
+            // if there is more to write, reset the timer.
+            //
+            if !self.wr.is_empty() {
+                self.reset_wr_timer();
             }
         }
 
-        // check the notification channel.
-        let fut = self.watcher.recv();
-        pin_utils::pin_mut!(fut);
-        match fut.poll(cx) {
-            Poll::Ready(item) => {
-                match item {
-                    Some(Notification::ExitNow) => {
-                        return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
-                    },
-                    Some(Notification::None) => {},
-                    other => self.notification = other,
-                }
-            },
-            Poll::Pending => {},
+        //
+        // if the buffer is empty, flush the underlying socket.
+        //
+        if self.wr.is_empty() {
+            let socket = &mut self.socket;
+            pin_utils::pin_mut!(socket);
+            match socket.poll_flush(cx) {
+                Poll::Ready(Ok(_)) => {
+                    return Poll::Ready(Ok(()));
+                },
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(e));
+                },
+                Poll::Pending => {},
+            }
         }
 
-        // check the timer.
-        let timeout = &mut self.wr_timeout;
-        pin_utils::pin_mut!(timeout);
-        match timeout.poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(()) => {
-                let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
-                Poll::Ready(err)
-            },
-        }
-    }
-
-    fn nntp_sink_start_send(&mut self, item: Bytes) -> Result<(), io::Error> {
-        self.wr = item;
-        Ok(())
-    }
-
-    fn nntp_sink_poll_close(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        match self.nntp_sink_poll_ready(cx, true) {
-            Poll::Ready(Ok(())) => {},
-            other => return other,
-        }
-        self.socket.shutdown(Shutdown::Write)?;
-        Poll::Ready(Ok(()))
-    }
-
-    pub fn set_mode(&mut self, mode: CodecMode) {
-        self.rd_mode = mode.clone();
-    }
-
-    pub fn get_mode(&self) -> CodecMode {
-        self.rd_mode.clone()
-    }
-
-    pub fn set_msgid(&mut self, msgid: impl Into<String>) {
-        self.msgid = Some(msgid.into());
-    }
-
-    pub fn get_msgid(&mut self) -> String {
-        self.msgid.take().unwrap_or("".to_string())
-    }
-
-    pub fn quit(&mut self) {
-        self.rd_mode = CodecMode::Quit;
-    }
-}
-
-/// This is the reading part, we return a stream of NntpInputs. Those can be:
-///
-/// - NntpInput::Connect:               returned once at the start
-/// - NntpInput::Eof:                   end-of-file seen.
-/// - NntpInput::Line(BytesMut):        single command line
-/// - NntpInput::Block(BytesMut):       multiline block
-///
-impl Stream for NntpCodec {
-    type Item = Result<NntpInput, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        // check the notification channel.
-        let n = {
-            let fut = self.watcher.recv();
+        //
+        // now check the notification channel.
+        //
+        if let Some(watcher) = self.watcher.as_mut() {
+            let fut = watcher.recv();
             pin_utils::pin_mut!(fut);
             match fut.poll(cx) {
                 Poll::Ready(item) => {
                     match item {
                         Some(Notification::ExitNow) => {
-                            return Poll::Ready(Some(Err(io::ErrorKind::NotFound.into())));
+                            return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
                         },
-                        Some(Notification::None) => None,
-                        other => other,
+                        Some(Notification::None) => {},
+                        other => self.notification = other,
                     }
                 },
-                Poll::Pending => None,
-            }
-        };
-        if n.is_some() {
-            self.notification = n;
-        }
-
-        let rd_mode = self.get_mode();
-        match rd_mode {
-            CodecMode::Connect => {
-                self.set_mode(CodecMode::ReadLine);
-                return Poll::Ready(Some(Ok(NntpInput::Connect)));
-            },
-            CodecMode::Quit => return Poll::Ready(None),
-            _ => {},
-        }
-
-        // read as much data as we can.
-        let sock_closed = match self.fill_read_buf(cx) {
-            Poll::Ready(Ok(())) => true,
-            Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-            Poll::Pending => false,
-        };
-
-        // Now if we have no input yet process the notifications.
-        if self.rd.len() == 0 {
-            if let Some(notification) = self.notification.take() {
-                return Poll::Ready(Some(Ok(NntpInput::Notification(notification))));
-            }
-        }
-
-        // Then process the data.
-        if self.rd.len() > 0 {
-            let res = match rd_mode {
-                CodecMode::ReadLine => self.read_line(),
-                CodecMode::ReadBlock => self.read_block(false),
-                CodecMode::ReadArticle => self.read_article(),
-                _ => unreachable!(),
-            };
-            match res {
                 Poll::Pending => {},
-                res => {
-                    self.rd_timeout.reset(calc_delay(READ_TIMEOUT));
-                    return res;
+            }
+        }
+
+        //
+        // finally, check the timer.
+        //
+        if let Some(timeout) = self.wr_timer.as_mut() {
+            pin_utils::pin_mut!(timeout);
+            return match timeout.poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(()) => {
+                    let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
+                    Poll::Ready(err)
                 },
             }
         }
+        Poll::Pending
+    }
 
-        // see if the other side closed the socket.
-        if sock_closed {
-            if self.rd_state != State::Eof {
-                // we were still processing data .. this was unexpected!
-                if self.rd.len() > 0 {
-                    // We were still reading a line, or a block, and hit EOF
-                    // before the end. That's unexpected.
-                    self.rd_state = State::Eof;
-                    let err = Err(io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"));
-                    return Poll::Ready(Some(err));
-                }
-
-                // return an end-of-file indication once, the next poll will
-                // return end-of-stream.
-                self.rd_state = State::Eof;
-                return Poll::Ready(Some(Ok(NntpInput::Eof)));
+    // reset the read timer.
+    fn reset_rd_timer(&mut self) {
+        if let Some(ref tmout) = self.rd_tmout {
+            if let Some(ref mut timer) = self.rd_timer {
+                timer.reset(calc_delay(tmout));
+            } else {
+                self.rd_timer = Some(timer::delay_for(tmout.clone()));
             }
-
-            // end stream.
-            return Poll::Ready(None);
-        }
-
-        // check the timer.
-        let timeout = &mut self.rd_timeout;
-        pin_utils::pin_mut!(timeout);
-        match timeout.poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(()) => {
-                let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
-                self.quit();
-                Poll::Ready(Some(err))
-            },
         }
     }
-}
 
-/// The Sink is what writes the buffered data to the socket. We handle
-/// a "Bytes" struct as one item. We do not buffer (yet), only one
-/// item can be in-flight at a time.
-impl Sink<Bytes> for NntpCodec {
-    type Error = io::Error;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        trace!("sink: poll_ready");
-        self.nntp_sink_poll_ready(cx, false)
+    // reset the write timer.
+    fn reset_wr_timer(&mut self) {
+        if let Some(ref tmout) = self.wr_tmout {
+            if let Some(ref mut timer) = self.wr_timer {
+                timer.reset(calc_delay(tmout));
+            } else {
+                self.wr_timer = Some(timer::delay_for(tmout.clone()));
+            }
+        }
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), io::Error> {
-        trace!("sink: start_send");
-        self.nntp_sink_start_send(item)
+    /// Read a line.
+    pub async fn read_line(&mut self) -> io::Result<NntpLine> {
+        self.rd_mode = CodecMode::ReadLine;
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
+            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
+            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
+            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        trace!("sink: poll_flush");
-        self.nntp_sink_poll_ready(cx, true)
+    /// Read a line with timeout.
+    pub async fn read_line_with_timeout(&mut self, d: Duration) -> io::Result<NntpLine> {
+        self.rd_mode = CodecMode::ReadLine;
+        //
+        // This is not very efficient, but we really only call this method once
+        // in a server session, at the initial connect, because we use a lower
+        // timeout for the first command only.
+        //
+        let old_tmout = std::mem::replace(&mut self.rd_tmout, Some(d));
+        self.reset_rd_timer();
+        let res = match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
+            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
+            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
+            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        };
+        self.rd_tmout = old_tmout;
+        self.rd_timer = None;
+        res
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), io::Error>> {
-        trace!("sink: poll_close");
-        self.nntp_sink_poll_close(cx)
+    /// Read a block.
+    pub async fn read_block(&mut self) -> io::Result<BytesMut> {
+        self.rd_mode = CodecMode::ReadBlock;
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Block(buf)) => Ok(buf),
+            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read an article.
+    pub async fn read_article(&mut self, msgid: impl Into<String>) -> io::Result<Article> {
+        self.rd_mode = CodecMode::ReadArticle;
+        self.msgid = Some(msgid.into());
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Article(art)) => Ok(art),
+            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write a buffer.
+    pub async fn write(&mut self, buf: impl Into<Bytes>) -> io::Result<()> {
+        self.reset_wr_timer();
+        self.wr = buf.into();
+        poll_fn(|cx: &mut Context| self.poll_write(cx)).await
+    }
+
+    /// Write a BytesMut. Returns the buffer for re-use.
+    pub async fn write_bytesmut(&mut self, buf: BytesMut) -> io::Result<BytesMut> {
+        self.reset_wr_timer();
+        self.wr = Bytes::from(buf);
+        poll_fn(|cx: &mut Context| self.poll_write(cx)).await?;
+        Ok(BytesMut::from(std::mem::replace(&mut self.wr, Bytes::new())))
     }
 }
 
 // helper
-fn calc_delay(secs: u64) -> Instant {
-    Instant::now().checked_add(Duration::new(secs, 0)).unwrap()
+fn calc_delay(d: &Duration) -> Instant {
+    Instant::now().checked_add(d.clone()).unwrap()
 }

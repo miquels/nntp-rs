@@ -41,6 +41,8 @@ pub enum ArtError {
     EmptyHdr,
     /// Invalid utf-8 in header
     BadUtf8Hdr,
+    /// Weird Message-ID
+    BadMsgId,
     /// nntp and article message-id mismatch
     MsgIdMismatch,
     /// mandatory header is missing

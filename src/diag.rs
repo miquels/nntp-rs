@@ -218,6 +218,7 @@ impl SessionStats {
             &ArtError::DupHdr             => Stats::RejHdrError,
             &ArtError::EmptyHdr           => Stats::RejHdrError,
             &ArtError::BadUtf8Hdr         => Stats::RejHdrError,
+            &ArtError::BadMsgId           => Stats::RejErr,
             &ArtError::MsgIdMismatch      => Stats::RejMsgIdMis,
             &ArtError::MissingHeader      => Stats::RejMissHdrs,
             &ArtError::NoNewsgroups       => Stats::RejMissHdrs,

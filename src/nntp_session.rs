@@ -14,21 +14,12 @@ use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
 use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
-use crate::nntp_codec::{CodecMode, NntpCodec, NntpInput};
-use crate::server::Server;
+use crate::nntp_codec::{NntpCodec, NntpLine};
+use crate::server::{Notification, Server};
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum NntpState {
-    Cmd,
-    Post,
-    Ihave,
-    TakeThis,
-}
-
 pub struct NntpSession {
-    state:           NntpState,
     pub codec:       NntpCodec,
     parser:          CmdParser,
     server:          Server,
@@ -39,6 +30,7 @@ pub struct NntpSession {
     peer_idx:        usize,
     active:          bool,
     stats:           SessionStats,
+    quit:            bool,
 }
 
 pub struct NntpResult {
@@ -63,6 +55,12 @@ impl NntpResult {
     }
 }
 
+impl From<NntpResult> for Bytes {
+    fn from(n: NntpResult) -> Bytes {
+        n.data
+    }
+}
+
 // status for TAKETHIS/IHAVE/POST
 enum ArtAccept {
     // accept and store.
@@ -84,7 +82,6 @@ impl NntpSession {
         server.thr_sessions.fetch_add(1, Ordering::SeqCst);
 
         NntpSession {
-            state:           NntpState::Cmd,
             codec:           codec,
             parser:          CmdParser::new(),
             server:          server,
@@ -95,27 +92,77 @@ impl NntpSession {
             peer_idx:        0,
             active:          false,
             stats:           stats,
+            quit:            false,
         }
-    }
-
-    pub fn set_state(&mut self, state: NntpState) {
-        self.state = state;
     }
 
     fn thispeer(&self) -> &NewsPeer {
         &self.newsfeeds.peers[self.peer_idx]
     }
 
-    /// Initial connect. Here we decide if we want to accept this
-    /// connection, or refuse it.
-    pub async fn on_connect(&mut self) -> NntpResult {
+    pub async fn run(mut self) {
+        //
+        // See if we want to accept this connection.
+        //
+        let msg = match self.on_connect().await {
+            Ok(msg) => msg,
+            Err(msg) => {
+                let _ = self.codec.write(msg).await;
+                return;
+            }
+        };
+        if let Err(e) = self.codec.write(msg).await {
+            self.on_write_error(e);
+            return;
+        }
+
+        //
+        // Command loop.
+        //
+        while !self.quit {
+            let response = match self.codec.read_line().await {
+                Ok(NntpLine::Eof) => break,
+                Ok(NntpLine::Notification(Notification::ExitGraceful)) => {
+                    self.quit = true;
+                    NntpResult::text("400 Server shutting down")
+                },
+                Ok(NntpLine::Notification(_)) => continue,
+                Ok(NntpLine::Line(buf)) => match self.cmd(buf).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        let res = NntpResult::text(format!("400 {}", e));
+                        self.on_generic_error(e);
+                        self.quit = true;
+                        res
+                    }
+                },
+                Err(e) => {
+                    self.quit = true;
+                    match self.on_read_error(e) {
+                        Some(msg) => msg,
+                        None => break,
+                    }
+                },
+            };
+            if let Err(e) = self.codec.write(response.data).await {
+                self.on_write_error(e);
+                break;
+            }
+        }
+
+        // save final stats.
+        self.stats.on_disconnect();
+    }
+
+    // Initial connect. Here we decide if we want to accept this
+    // connection, or refuse it.
+    async fn on_connect(&mut self) -> Result<NntpResult, NntpResult> {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
-                self.codec.quit();
                 info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
                 let msg = format!("502 permission denied to {}", remote);
-                return NntpResult::text(&msg);
+                return Err(NntpResult::text(msg));
             },
             Some(x) => x,
         };
@@ -124,13 +171,12 @@ impl NntpSession {
         let count = self.server.add_connection(&peer.label);
         self.active = true;
         if count > peer.maxconnect as usize && peer.maxconnect > 0 {
-            self.codec.quit();
             info!(
                 "Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
                 peer.label, remote, count, peer.maxconnect
             );
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
-            return NntpResult::text(&msg);
+            return Err(NntpResult::text(msg));
         }
 
         self.stats
@@ -148,12 +194,11 @@ impl NntpSession {
             self.parser.add_cap(Capb::ModeHeadfeed);
         }
         let msg = format!("{} {} hello {}", code, self.config.server.hostname, peer.label);
-        NntpResult::text(&msg)
+        Ok(NntpResult::text(msg))
     }
 
     /// Called when we got an error writing to the socket.
-    /// Log an error, clean up, and exit.
-    pub async fn on_write_error(&self, err: io::Error) {
+    fn on_write_error(&self, err: io::Error) {
         let stats = &self.stats;
         if err.kind() == io::ErrorKind::NotFound {
             info!(
@@ -166,13 +211,11 @@ impl NntpSession {
                 stats.fdno, stats.hostname, stats.ipaddr, err
             );
         }
-        stats.on_disconnect();
     }
 
     /// Called when we got an error reading from the socket.
-    /// Log an error, clean up, and exit.
-    pub async fn on_read_error(&mut self, err: io::Error) -> NntpResult {
-        self.codec.quit();
+    /// Log an error, and perhaps create a reply if appropriate.
+    fn on_read_error(&mut self, err: io::Error) -> Option<NntpResult> {
         let stats = &self.stats;
         if err.kind() == io::ErrorKind::NotFound {
             info!(
@@ -185,93 +228,21 @@ impl NntpSession {
                 stats.fdno, stats.hostname, stats.ipaddr, err
             );
         }
-        stats.on_disconnect();
         match err.kind() {
-            io::ErrorKind::TimedOut => NntpResult::text("400 Timeout - closing connection"),
-            io::ErrorKind::NotFound => NntpResult::text("400 Server shutting down"),
-            _ => NntpResult::empty(),
+            io::ErrorKind::TimedOut => Some(NntpResult::text("400 Timeout - closing connection")),
+            io::ErrorKind::NotFound => Some(NntpResult::text("400 Server shutting down")),
+            _ => None,
         }
     }
 
     /// Called when we got an error handling the command. Could be anything-
     /// failure writing an article, history db corrupt, etc.
-    pub async fn on_generic_error(&mut self, err: io::Error) -> NntpResult {
-        self.codec.quit();
+    pub fn on_generic_error(&mut self, err: io::Error) {
         let stats = &self.stats;
         info!(
             "Error on connection {} from {} {}: {}",
             stats.fdno, stats.hostname, stats.ipaddr, err
         );
-        stats.on_disconnect();
-        NntpResult::text(format!("400 {}", err))
-    }
-
-    /// Called when QUIT is received
-    pub fn on_quit(&self) {
-        self.stats.on_disconnect();
-    }
-
-    /// Called on end-of-file.
-    pub async fn on_eof(&self) -> NntpResult {
-        self.stats.on_disconnect();
-        NntpResult::empty()
-    }
-
-    /// Called when signalled for a graceful exit.
-    pub async fn on_graceful(&mut self) -> NntpResult {
-        self.codec.quit();
-        self.stats.on_disconnect();
-        NntpResult::text("400 Server shutting down")
-    }
-
-    /// Called when a line or block has been received.
-    pub async fn on_input(&mut self, input: NntpInput) -> io::Result<NntpResult> {
-        match input {
-            NntpInput::Line(line) => {
-                // Bit of a hack, but doing this correctly is too much
-                // trouble for now.
-                if self.state == NntpState::Ihave || self.state == NntpState::Post {
-                    self.state = NntpState::Cmd;
-                }
-
-                let state = mem::replace(&mut self.state, NntpState::Cmd);
-                match state {
-                    NntpState::Cmd => self.cmd(line).await,
-                    _ => {
-                        error!("got NntpInput::Line while in state {:?}", state);
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "internal state out of sync",
-                        ));
-                    },
-                }
-            },
-            NntpInput::Article(art) => {
-                self.codec.set_mode(CodecMode::ReadLine);
-                let state = mem::replace(&mut self.state, NntpState::Cmd);
-                match state {
-                    NntpState::Post => self.post_body(art).await,
-                    NntpState::Ihave => self.ihave_body(art).await,
-                    NntpState::TakeThis => self.takethis_body(art).await,
-                    NntpState::Cmd => {
-                        error!("got NntpInput::Article while in state {:?}", self.state);
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "internal state out of sync",
-                        ));
-                    },
-                }
-            },
-            NntpInput::Block(_buf) => {
-                error!("got NntpInput::Block while in state {:?}", self.state);
-                self.codec.set_mode(CodecMode::Quit);
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "internal state out of sync",
-                ));
-            },
-            _ => unreachable!(),
-        }
     }
 
     /// Process NNTP command
@@ -380,27 +351,34 @@ impl NntpSession {
                 self.stats.inc(Stats::Offered);
                 if !commands::is_msgid(&args[0]) {
                     self.stats.inc(Stats::RefBadMsgId);
+                    // Return a 435 instead of 501, so that the remote peer does not
+                    // close the connection. We might be stricter with message-ids and
+                    // we do not want the remote feed to hang on one message.
                     return Ok(NntpResult::text(&format!("435 {} Bad Message-ID", args[0])));
                 }
-                let ok = "335 Send article; end with CRLF DOT CRLF";
-                self.state = NntpState::Ihave;
-                let he = self.server.history.check(args[0]).await?;
-                let r = match he {
-                    Some(HistStatus::NotFound) | None => ok,
+
+                match self.server.history.check(args[0]).await? {
+                    Some(HistStatus::NotFound) | None => {},
                     Some(HistStatus::Tentative) => {
                         self.stats.inc(Stats::RefPreCommit);
-                        "436 Retry later"
+                        return Ok(NntpResult::text("436 Retry later"));
                     },
                     _ => {
                         self.stats.inc(Stats::RefPreCommit);
-                        "435 Duplicate"
+                        return Ok(NntpResult::text("435 Duplicate"));
                     },
-                };
-                if r == ok {
-                    self.codec.set_msgid(args[0]);
-                    self.codec.set_mode(CodecMode::ReadArticle);
                 }
-                return Ok(NntpResult::text(r));
+
+                self.codec.write(NntpResult::text("335 Send article; end with CRLF DOT CRLF")).await?;
+
+                let mut art = self.codec.read_article(args[0]).await?;
+                let status = self.received_article(&mut art, true).await?;
+                let code = match status {
+                    ArtAccept::Accept => 235,
+                    ArtAccept::Defer => 436,
+                    ArtAccept::Reject => 437,
+                };
+                return Ok(NntpResult::text(&format!("{} {}", code, art.msgid)));
             },
             Cmd::Last => {
                 return Ok(NntpResult::text("412 Not in a newsgroup"));
@@ -428,54 +406,24 @@ impl NntpSession {
                 return Ok(NntpResult::text("500 Not implemented"));
             },
             Cmd::Quit => {
-                self.codec.quit();
-                self.on_quit();
+                self.quit = true;
                 return Ok(NntpResult::text("205 Bye"));
             },
             Cmd::Takethis => {
                 self.stats.inc(Stats::Takethis);
                 self.stats.inc(Stats::Offered);
-                if !commands::is_msgid(&args[0]) {
-                    self.stats.inc(Stats::RefBadMsgId);
-                    return Ok(NntpResult::text(&format!("439 {} Bad Message-ID", args[0])));
-                }
-                self.codec.set_mode(CodecMode::ReadArticle);
-                self.codec.set_msgid(args[0]);
-                self.state = NntpState::TakeThis;
-                return Ok(NntpResult::empty());
+                let mut art = self.codec.read_article(args[0]).await?;
+                let status = self.received_article(&mut art, false).await?;
+                let code = match status {
+                    ArtAccept::Accept => 239,
+                    ArtAccept::Defer | ArtAccept::Reject => 439,
+                };
+                return Ok(NntpResult::text(&format!("{} {}", code, art.msgid)));
             },
             _ => {},
         }
 
         Ok(NntpResult::text("500 What?"))
-    }
-
-    /// POST body has been received.
-    async fn post_body(&self, _input: Article) -> io::Result<NntpResult> {
-        Ok(NntpResult::text("441 Posting failed"))
-    }
-
-    /// IHAVE body has been received.
-    async fn ihave_body(&mut self, art: Article) -> io::Result<NntpResult> {
-        let mut art = art;
-        let status = self.received_article(&mut art, true).await?;
-        let code = match status {
-            ArtAccept::Accept => 235,
-            ArtAccept::Defer => 436,
-            ArtAccept::Reject => 437,
-        };
-        Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
-    }
-
-    /// TAKETHIS body has been received.
-    async fn takethis_body(&mut self, art: Article) -> io::Result<NntpResult> {
-        let mut art = art;
-        let status = self.received_article(&mut art, false).await?;
-        let code = match status {
-            ArtAccept::Accept => 239,
-            ArtAccept::Defer | ArtAccept::Reject => 439,
-        };
-        Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
     }
 
     async fn reject_art(&mut self, art: &Article, recv_time: UnixTime, e: ArtError) -> io::Result<ArtAccept> {
@@ -646,12 +594,18 @@ impl NntpSession {
             return Err(ArtError::TooSmall);
         }
 
+        // Make sure the message-id we got from TAKETHIS is valid.
+        // We cannot check this in advance; TAKETHIS must read the whole article first.
+        if !commands::is_msgid(&art.msgid) {
+            return Err(ArtError::BadMsgId);
+        }
+
         let mut parser = HeadersParser::new();
         let buffer = mem::replace(&mut art.data, BytesMut::new());
         match parser.parse(&buffer, false, true) {
             None => {
                 error!("failure parsing header, None returned");
-                panic!("takethis_body: this code should never be reached")
+                panic!("process_headers: this code should never be reached")
             },
             Some(Err(e)) => return Err(e),
             Some(Ok(_)) => {},

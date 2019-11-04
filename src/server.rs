@@ -20,7 +20,7 @@ use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
 use crate::logger;
-use crate::nntp_codec::{NntpCodec, NntpInput};
+use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_session::NntpSession;
 use crate::spool::Spool;
 
@@ -329,7 +329,11 @@ impl Server {
             // set up codec for reader and writer.
             let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
             let fdno = socket.as_raw_fd() as u32;
-            let codec = NntpCodec::new(socket, watcher.clone());
+            let codec = NntpCodec::builder(socket)
+                .watcher(watcher.clone())
+                .read_timeout(nntp_codec::READ_TIMEOUT)
+                .write_timeout(nntp_codec::WRITE_TIMEOUT)
+                .build();
 
             let stats = SessionStats {
                 hostname: peer.to_string(),
@@ -339,45 +343,9 @@ impl Server {
                 ..SessionStats::default()
             };
 
-            // build an nntp session.
-            let mut session = NntpSession::new(peer, codec, self.clone(), stats);
-
-            let task = async move {
-                while let Some(result) = session.codec.next().await {
-                    let response = match result {
-                        Err(e) => {
-                            session.on_read_error(e).await;
-                            break;
-                        },
-                        Ok(input) => {
-                            match input {
-                                NntpInput::Connect => session.on_connect().await,
-                                NntpInput::Eof => session.on_eof().await,
-                                buf @ NntpInput::Line(_) |
-                                buf @ NntpInput::Block(_) |
-                                buf @ NntpInput::Article(_) => {
-                                    match session.on_input(buf).await {
-                                        Ok(res) => res,
-                                        Err(e) => session.on_generic_error(e).await,
-                                    }
-                                },
-                                NntpInput::Notification(n) => {
-                                    match n {
-                                        Notification::ExitGraceful => session.on_graceful().await,
-                                        _ => continue,
-                                    }
-                                },
-                            }
-                        },
-                    };
-                    if let Err(e) = session.codec.send(response.data).await {
-                        session.on_write_error(e).await;
-                        break;
-                    }
-                }
-            };
-
-            tokio::spawn(task);
+            // build and run an nntp session.
+            let session = NntpSession::new(peer, codec, self.clone(), stats);
+            tokio::spawn(session.run());
         }
     }
 
