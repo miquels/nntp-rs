@@ -90,11 +90,11 @@ macro_rules! ioerr {
     (@UnexpectedEof, $arg:expr) => ( _ioerr!(std::io::ErrorKind::UnexpectedEof, $arg) );
     (@$kind:expr, $arg:expr) => ( _ioerr!($kind, $arg) );
 
-    ($kind:ident, $fmt:expr, $($tt:expr),+) => (
-        ioerr!(@$kind, format!($fmt, $($tt),+))
+    ($kind:ident, $fmt:expr, $($tt:tt)+) => (
+        ioerr!(@$kind, format!($fmt, $($tt)+))
     );
-    ($kind:expr, $fmt:expr, $($tt:expr)+) => (
-        ioerr!(@$kind, format!($fmt, $($tt),+))
+    ($kind:expr, $fmt:expr, $($tt:tt)+) => (
+        ioerr!(@$kind, format!($fmt, $($tt)+))
     );
     ($kind:ident, $arg:expr) => (
         ioerr!(@$kind, $arg)
