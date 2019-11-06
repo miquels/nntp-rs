@@ -43,6 +43,7 @@ tokio-net = { version = "0.2.0-alpha.6", features = [ "signal" ] }
 tokio-sync = "0.2.0-alpha.6"
 toml = "0.5.3"
 users = "0.9.1"
+smallvec = "1"
 
 [dev-dependencies]
 env_logger = "0.7.0"

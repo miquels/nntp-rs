@@ -9,6 +9,7 @@ use crate::util::HashFeed;
 
 use bytes::{Bytes, BytesMut};
 use memchr::memchr;
+use smallvec::SmallVec;
 use tokio::future::poll_fn;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -585,4 +586,103 @@ impl NntpCodec {
 // helper
 fn calc_delay(d: &Duration) -> Instant {
     Instant::now().checked_add(d.clone()).unwrap()
+}
+
+/// NNTP response parsing
+pub struct NntpResponse<'a> {
+    /// reply code: 100..599
+    pub code:   u32,
+    /// arguments.
+    pub args:   SmallVec<[&'a str; 5]>,
+    /// short (< 100 chars) version of the response string for diagnostics.
+    pub short: &'a str,
+}
+
+impl<'a> NntpResponse<'a> {
+    /// Parse NNTP response.
+    pub fn parse(r: &'a [u8]) -> io::Result<NntpResponse<'a>> {
+
+        let (resp, short) = NntpResponse::utf8_response(r)?;
+
+        // get code.
+        let mut args = resp.split_ascii_whitespace();
+        let num = args.next().ok_or_else(|| ioerr!(InvalidData, "empty response"))?;
+        let code = match num.parse::<u32>() {
+            Ok(code) if code >= 100 && code <= 599 => code,
+            _ => return Err(ioerr!(InvalidData, "invalid response: {}", short)),
+        };
+
+        // get rest of the args, up to a maximum.
+        let mut v = SmallVec::<[&'a str; 5]>::new();
+        for w in args {
+            if v.len() == v.inline_size() {
+                break;
+            }
+            v.push(w);
+        }
+        let nargs = v.len();
+
+        // now some checks.
+        let ok = match code {
+            // CHECK/TAKETHIS: 1 argument: message-id
+            238|431|438|239|439 => nargs >= 1,
+            // 1 argument: capability-label.
+            401 => nargs >= 1,
+            // ARTICLE,HEAD,BODY,LAST/NEXT/STAT: 2 arguments: n message-id
+            220|221|222|223 => nargs >= 2,
+            // GROUP/LISTGROUP => 4 arguments: number low high group
+            211 => nargs >= 4,
+            // DATE: 1 argument: yyyymmddhhmmss
+            111 => nargs >= 1,
+            _ => true,
+        };
+
+        if !ok {
+            return Err(ioerr!(InvalidData, "invalid response: missing arguments: {}", short));
+        }
+
+        Ok(NntpResponse {
+            code,
+            args: v,
+            short,
+        })
+    }
+
+    /// version of response suitable for diagnostics / logging.
+    pub fn diag_response(r: &'a [u8]) -> &'a str {
+        NntpResponse::utf8_response(r).map(|(_, diag)| diag).unwrap_or("[invalid-utf8]")
+    }
+
+    // decode to utf-8, return the utf-8 string and a limited length version for diagnostics.
+    fn utf8_response(r: &'a [u8]) -> io::Result<(&'a str, &'a str)> {
+
+        // strip trailing \r\n
+        let mut n = r.len();
+        while n > 0 && (r[n-1] == b'\r' || r[n-1] == b'\n') {
+            n -= 1;
+        }
+        let r = &r[..n];
+
+        // decode utf8
+        let resp = match std::str::from_utf8(r) {
+            Ok(resp) => resp,
+            Err(_) => return Err(ioerr!(InvalidData, "[invalid-utf8]")),
+        };
+
+        // length-limited string for logging purposes.
+        let mut lm = if resp.len() > 100 {
+            let mut n = 100;
+            while n < resp.len() && !resp.is_char_boundary(n) {
+                n += 1;
+            }
+            &resp[..n]
+        } else {
+            resp
+        };
+        if lm == "" {
+            lm = "[empty]";
+        }
+
+        Ok((resp, lm))
+    }
 }
