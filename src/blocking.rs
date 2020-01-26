@@ -1,9 +1,7 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use futures::future;
-use tokio_executor::threadpool;
-use tokio_sync::semaphore::{Permit, Semaphore};
+use tokio::task;
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BlockingPool {
@@ -12,45 +10,30 @@ pub(crate) struct BlockingPool {
 
 #[derive(Debug)]
 pub(crate) struct InnerBlockingPool {
-    use_ownpool: AtomicUsize,
+    blocking_type: BlockingType,
     sem:         Semaphore,
 }
 
 #[derive(Clone, Debug)]
 pub enum BlockingType {
-    OwnPool      = 1,
-    SeparatePool = 2,
-    Blocking     = 3,
-    Check        = 42,
+    InPlace,
+    ThreadPool,
+    Blocking,
 }
-
-#[allow(non_upper_case_globals)]
-const OwnPool: usize = BlockingType::OwnPool as usize;
-#[allow(non_upper_case_globals)]
-const SeparatePool: usize = BlockingType::SeparatePool as usize;
-#[allow(non_upper_case_globals)]
-const Blocking: usize = BlockingType::Blocking as usize;
-#[allow(non_upper_case_globals)]
-const Check: usize = BlockingType::Check as usize;
 
 #[allow(non_upper_case_globals)]
 impl BlockingPool {
     pub fn new(btype: Option<BlockingType>, max_threads: usize) -> BlockingPool {
+
         // max nr of blocking threads.
         let max_t = if max_threads == 0 { 128 } else { max_threads };
-
         // method of handling blocking calls.
-        let bt = match btype {
-            Some(BlockingType::OwnPool) => BlockingType::Check,
-            Some(BlockingType::SeparatePool) => BlockingType::SeparatePool,
-            Some(BlockingType::Blocking) => BlockingType::Blocking,
-            Some(BlockingType::Check) | None => BlockingType::Check,
-        };
+        let bt = btype.unwrap_or(BlockingType::ThreadPool);
 
         BlockingPool {
             inner: Arc::new(InnerBlockingPool {
-                use_ownpool: AtomicUsize::new(bt as usize),
-                sem:         Semaphore::new(max_t),
+                blocking_type: bt,
+                sem:           Semaphore::new(max_t),
             }),
         }
     }
@@ -60,52 +43,14 @@ impl BlockingPool {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let pool_type = match self.inner.use_ownpool.load(Ordering::Relaxed) {
-            Check => {
-                match threadpool::blocking(|| 42) {
-                    std::task::Poll::Ready(Err(_)) => {
-                        // cannot use tokio_executor::threadpool::blocking (which does NOT
-                        // run the closure on a threadpool), so use tokio_executor::blocking::run
-                        // which DOES run it on a threadpool.
-                        self.inner.use_ownpool.store(SeparatePool, Ordering::SeqCst);
-                        SeparatePool
-                    },
-                    _ => {
-                        self.inner.use_ownpool.store(OwnPool, Ordering::SeqCst);
-                        OwnPool
-                    },
-                }
-            },
-            x => x,
-        };
+        // limit the number of outstanding requests.
+        let _guard = self.inner.sem.acquire().await;
 
-        let mut permit = Permit::new();
-        if future::poll_fn(|cx| permit.poll_acquire(cx, &self.inner.sem))
-            .await
-            .is_err()
-        {
-            panic!("BlockingPool::spawn_fn: poll_acquire() returned error (cannot happen)");
+        match self.inner.blocking_type {
+            BlockingType::ThreadPool => task::spawn_blocking(func).await.unwrap(),
+            BlockingType::InPlace => task::block_in_place(func),
+            BlockingType::Blocking => func(),
         }
-
-        let res = match pool_type {
-            SeparatePool => tokio_executor::blocking::run(move || func()).await,
-            OwnPool => {
-                let mut func = Some(func);
-                let r = future::poll_fn(move |_| threadpool::blocking(|| (func.take().unwrap())())).await;
-                match r {
-                    Ok(x) => x,
-                    Err(e) => {
-                        permit.release(&self.inner.sem);
-                        panic!("the thread pool has shut down ({:?})", e);
-                    },
-                }
-            },
-            Blocking => func(),
-            _ => unreachable!(),
-        };
-
-        permit.release(&self.inner.sem);
-        res
     }
 }
 

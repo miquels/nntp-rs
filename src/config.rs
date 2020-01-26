@@ -43,7 +43,7 @@ pub struct Config {
     #[serde(default)]
     pub multisingle:    MultiSingle,
     #[serde(default)]
-    pub threadpool: ThreadPool,
+    pub threaded: Threaded,
     #[serde(skip)]
     pub timestamp:  u64,
     #[serde(skip)]
@@ -116,12 +116,12 @@ pub struct MultiSingle {
     pub(crate) core_ids:    Option<Vec<CoreId>>,
 }
 
-/// The (default) threadpool executor.
+/// The (default) threaded executor.
 #[derive(Default,Deserialize,Debug)]
 #[rustfmt::skip]
-pub struct ThreadPool {
-    // can be "own_pool" or "separate_pool"
-    pub blocking_on:        Option<String>,
+pub struct Threaded {
+    // "in_place", "threadpool", "blocking".
+    pub blocking_io:        Option<String>,
     #[serde(skip)]
     pub blocking_type:      Option<BlockingType>,
 }
@@ -160,10 +160,11 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     match cfg.server.runtime.as_ref().map(|s| s.as_str()) {
-        Some("threadpool") | None => {
-            match cfg.threadpool.blocking_on.as_ref().map(|s| s.as_str()) {
-                Some("own_pool") => cfg.threadpool.blocking_type = Some(BlockingType::OwnPool),
-                Some("separate_pool") => cfg.threadpool.blocking_type = Some(BlockingType::SeparatePool),
+        Some("threaded") | None => {
+            match cfg.threaded.blocking_io.as_ref().map(|s| s.as_str()) {
+                Some("in_place") => cfg.threaded.blocking_type = Some(BlockingType::InPlace),
+                Some("threadpool") => cfg.threaded.blocking_type = Some(BlockingType::ThreadPool),
+                Some("blocking") => cfg.threaded.blocking_type = Some(BlockingType::Blocking),
                 Some(b) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,

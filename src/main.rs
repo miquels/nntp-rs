@@ -207,7 +207,7 @@ fn main() -> io::Result<()> {
         },
     }
 
-    let bt = config.threadpool.blocking_type.clone();
+    let bt = config.threaded.blocking_type.clone();
 
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
@@ -304,7 +304,7 @@ fn history_common(
 
 fn history_inspect(config: &config::Config, opts: HistInspectOpts) -> io::Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         hist.inspect(&spool).await.map_err(|e| {
             eprintln!("{}", e);
@@ -315,7 +315,7 @@ fn history_inspect(config: &config::Config, opts: HistInspectOpts) -> io::Result
 
 fn history_expire(config: &config::Config, opts: HistExpireOpts) -> io::Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         hist.expire(&spool, config.history.remember.clone(), true, true)
             .await
@@ -328,7 +328,7 @@ fn history_expire(config: &config::Config, opts: HistExpireOpts) -> io::Result<(
 
 fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -> io::Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let he = hist.lookup(&opts.msgid).await.map_err(|e| {
             eprintln!("{}", e);
@@ -352,7 +352,7 @@ fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -
 // Read an article from the spool.
 fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         // For now, lookup goes through the history file. We might add
         // lookup by "storage token" or hash.

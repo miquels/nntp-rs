@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BytesMut, buf::ext::BufMutExt};
 use libc;
 use parking_lot::Mutex;
 
@@ -258,11 +258,11 @@ impl DSpool {
 
     // Read an article.
     // SpoolBackend::read() forwards to this method.
-    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: &mut BytesMut) -> io::Result<()> {
+    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: BytesMut) -> io::Result<BytesMut> {
         let (head, loc, mut file) = self.open(art_loc, &part)?;
 
         let (start, len) = match part {
-            ArtPart::Stat => return Ok(()),
+            ArtPart::Stat => return Ok(buf),
             ArtPart::Head => (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len),
             ArtPart::Article => (loc.pos + DARTHEAD_SIZE as u32, head.art_len),
             ArtPart::Body => {
@@ -280,12 +280,12 @@ impl DSpool {
         if head.store_type == 1 {
             buf.reserve((len + len / 50) as usize);
             let reader = CrlfXlat::new(reader);
-            read_to_bufmut(reader, &mut buf)?;
+            buf = read_to_bufmut(reader, buf)?;
         } else {
             buf.reserve(len as usize);
-            read_to_bufmut(reader, &mut buf)?;
+            buf = read_to_bufmut(reader, buf)?;
         }
-        Ok(())
+        Ok(buf)
     }
 
     // Finds the most recently modified spoolfile in the directory.
@@ -530,7 +530,7 @@ impl SpoolBackend for DSpool {
         Backend::Diablo
     }
 
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()> {
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: BytesMut) -> io::Result<BytesMut> {
         self.do_read(art_loc, part, buf)
     }
 
@@ -620,21 +620,10 @@ impl<T: Read> Read for CrlfXlat<T> {
 }
 
 // helper function.
-fn read_to_bufmut(mut reader: impl Read, buf: &mut BytesMut) -> io::Result<()> {
-    loop {
-        if buf.remaining_mut() == 0 {
-            buf.reserve(4096);
-        }
-        let sz = unsafe {
-            let sz = reader.read(buf.bytes_mut())?;
-            buf.advance_mut(sz);
-            sz
-        };
-        if sz == 0 {
-            break;
-        }
-    }
-    Ok(())
+fn read_to_bufmut(mut reader: impl Read, buf: BytesMut) -> io::Result<BytesMut> {
+    let mut writer = buf.writer();
+    io::copy(&mut reader, &mut writer)?;
+    Ok(writer.into_inner())
 }
 
 // Mini statvfs implementation.

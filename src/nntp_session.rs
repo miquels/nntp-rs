@@ -40,10 +40,10 @@ pub struct NntpResult {
 impl NntpResult {
     pub fn text(s: impl AsRef<str>) -> NntpResult {
         let s = s.as_ref();
-        let mut b = Bytes::with_capacity(s.len() + 2);
-        b.extend_from_slice(s.as_bytes());
-        b.extend_from_slice(&b"\r\n"[..]);
-        NntpResult { data: b }
+        let mut b = BytesMut::with_capacity(s.len() + 2);
+        b.put(s.as_bytes());
+        b.put(&b"\r\n"[..]);
+        NntpResult { data: b.freeze() }
     }
 
     pub fn bytes(b: Bytes) -> NntpResult {
@@ -272,8 +272,8 @@ impl NntpSession {
         let (cmd, args) = match self.parser.parse(line) {
             Err(e) => {
                 let mut b = BytesMut::with_capacity(e.len() + 2);
-                b.put(e);
-                b.put("\r\n");
+                b.put(e.as_bytes());
+                b.put(&b"\r\n"[..]);
                 return Ok(NntpResult::bytes(b.freeze()));
             },
             Ok(v) => v,
@@ -291,7 +291,7 @@ impl NntpSession {
                     Cmd::Stat => (223u32, ArtPart::Stat),
                     _ => unreachable!(),
                 };
-                let buf = BytesMut::from(format!("{} 0 {}\r\n", code, args[0]));
+                let buf = BytesMut::from(format!("{} 0 {}\r\n", code, args[0]).as_bytes());
                 return self.read_article(part, args[0], buf).await;
             },
             Cmd::Capabilities => {

@@ -1,20 +1,21 @@
+use std::future::Future;
 use std::io;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
 use crate::server::Notification;
 use crate::util::HashFeed;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Bytes, BytesMut, Buf};
+use futures::future::poll_fn;
 use memchr::memchr;
 use smallvec::SmallVec;
-use tokio::future::poll_fn;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::sync::watch;
-use tokio::timer::{self, Delay};
+use tokio::time::{self, Delay, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
 pub const READ_TIMEOUT: u64 = 630;
@@ -404,15 +405,15 @@ impl NntpCodec {
         Poll::Pending
     }
 
-    fn poll_write(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
-        if !self.wr.is_empty() {
+    fn poll_write(&mut self, cx: &mut Context, buf: &mut impl Buf) -> Poll<io::Result<()>> {
+        if buf.remaining() > 0 {
             //
             // See if we can write more data to the socket.
             //
             trace!("writing; remaining={}", self.wr.len());
             let socket = &mut self.socket;
             pin_utils::pin_mut!(socket);
-            match socket.poll_write(cx, &self.wr) {
+            match socket.poll_write(cx, buf.bytes()) {
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -420,7 +421,7 @@ impl NntpCodec {
                     )));
                 },
                 Poll::Ready(Ok(n)) => {
-                    let _ = self.wr.split_to(n);
+                    buf.advance(n);
                 },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {},
@@ -429,7 +430,7 @@ impl NntpCodec {
             //
             // if there is more to write, reset the timer.
             //
-            if !self.wr.is_empty() {
+            if buf.remaining() > 0 {
                 self.reset_wr_timer();
             }
         }
@@ -437,7 +438,7 @@ impl NntpCodec {
         //
         // if the buffer is empty, flush the underlying socket.
         //
-        if self.wr.is_empty() {
+        if buf.remaining() == 0 {
             let socket = &mut self.socket;
             pin_utils::pin_mut!(socket);
             match socket.poll_flush(cx) {
@@ -493,7 +494,7 @@ impl NntpCodec {
             if let Some(ref mut timer) = self.rd_timer {
                 timer.reset(calc_delay(tmout));
             } else {
-                self.rd_timer = Some(timer::delay_for(tmout.clone()));
+                self.rd_timer = Some(time::delay_for(tmout.clone()));
             }
         }
     }
@@ -504,7 +505,7 @@ impl NntpCodec {
             if let Some(ref mut timer) = self.wr_timer {
                 timer.reset(calc_delay(tmout));
             } else {
-                self.wr_timer = Some(timer::delay_for(tmout.clone()));
+                self.wr_timer = Some(time::delay_for(tmout.clone()));
             }
         }
     }
@@ -567,19 +568,17 @@ impl NntpCodec {
         }
     }
 
-    /// Write a buffer.
+    /// Write a buffer that can be turned into a `Bytes` struct.
     pub async fn write(&mut self, buf: impl Into<Bytes>) -> io::Result<()> {
         self.reset_wr_timer();
-        self.wr = buf.into();
-        poll_fn(|cx: &mut Context| self.poll_write(cx)).await
+        let mut buf = buf.into();
+        poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
     }
 
-    /// Write a BytesMut. Returns the buffer for re-use.
-    pub async fn write_bytesmut(&mut self, buf: BytesMut) -> io::Result<BytesMut> {
+    /// Write a buffer that impl's the `Buf` trait.
+    pub async fn write_buf(&mut self, buf: &mut impl Buf) -> io::Result<()> {
         self.reset_wr_timer();
-        self.wr = Bytes::from(buf);
-        poll_fn(|cx: &mut Context| self.poll_write(cx)).await?;
-        Ok(BytesMut::from(std::mem::replace(&mut self.wr, Bytes::new())))
+        poll_fn(move |cx: &mut Context| self.poll_write(cx, buf)).await
     }
 }
 

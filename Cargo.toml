@@ -9,14 +9,14 @@ debug = true
 
 [dependencies]
 arc-swap = "0.4.3"
-bytes = "0.4.12"
+bytes = "0.5"
 chrono = "0.4.9"
 clap = "2.33.0"
 core_affinity = "0.5.9"
 crossbeam-channel = "0.3.9"
 crossbeam-queue = "0.1.2"
 dns-lookup = "1.0.1"
-futures-preview = "0.3.0-alpha.19"
+futures = "0.3"
 fs2 = "0.4.3"
 jemallocator = "0.3.0"
 ipnet = "2.0.0"
@@ -37,10 +37,7 @@ serde_derive = "1.0.101"
 serde_json = "1.0"
 structopt = "0.3.3"
 syslog = "4.0.1"
-tokio = "0.2.0-alpha.6"
-tokio-executor = "0.2.0-alpha.6"
-tokio-net = { version = "0.2.0-alpha.6", features = [ "signal" ] }
-tokio-sync = "0.2.0-alpha.6"
+tokio = { version = "0.2", features = [ "full" ] }
 toml = "0.5.3"
 users = "0.9.1"
 smallvec = "1"

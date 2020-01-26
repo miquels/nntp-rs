@@ -408,7 +408,7 @@ impl Connection {
                     // send TAKETHIS command and body.
                     let cmd = format!("TAKETHIS {}\r\n", item.msgid);
                     self.codec.write(cmd).await?;
-                    let buf = self.codec.write_bytesmut(buf).await?;
+                    self.codec.write_buf(&mut buf).await?;
 
                     // re-use buffer.
                     buf.truncate(0);

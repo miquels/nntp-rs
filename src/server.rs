@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
@@ -10,10 +11,9 @@ use std::time::Duration;
 use num_cpus;
 use parking_lot::Mutex;
 use tokio;
-use tokio::prelude::*;
-use tokio::runtime::current_thread;
+use tokio::stream::StreamExt;
 use tokio::sync::{mpsc, watch};
-use tokio_net::signal;
+use tokio::signal::unix::{signal, SignalKind};
 
 use crate::bind_socket;
 use crate::config;
@@ -114,14 +114,13 @@ impl Server {
                 }
 
                 // tokio runtime for this thread alone.
-                let mut runtime = current_thread::Runtime::new().unwrap();
-                trace!("current_thread::runtime on {:?}", thread::current().id());
+                let mut runtime = tokio::runtime::Builder::new().basic_scheduler().build().unwrap();
+                trace!("runtime::basic_scheduler on {:?}", thread::current().id());
 
                 runtime.block_on(async move {
-                    let reactor_handle = tokio_net::driver::Handle::default();
 
                     for listener in listener_set.into_iter() {
-                        let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                        let listener = tokio::net::TcpListener::from_std(listener)
                             .expect("cannot convert from net2 listener to tokio listener");
                         tokio::spawn(server.clone().run(listener, watcher.clone()));
                     }
@@ -136,7 +135,7 @@ impl Server {
 
                     // now busy-wait until all connections are closed.
                     while server.thr_sessions.load(Ordering::SeqCst) > 0 {
-                        let _ = tokio::timer::delay_for(Duration::from_millis(100)).await;
+                        let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
                     }
                 })
             });
@@ -153,15 +152,14 @@ impl Server {
 
     // run the server on the default threadpool executor.
     pub fn run_threadpool(&mut self, listeners: Vec<TcpListener>) -> io::Result<()> {
-        let reactor_handle = tokio_net::driver::Handle::default();
-        let runtime = tokio::runtime::Runtime::new()?;
+        let mut runtime = tokio::runtime::Runtime::new()?;
 
         runtime.block_on(async move {
             let (notifier, watcher, task) = self.notification_setup();
             tokio::spawn(task);
 
             for listener in listeners.into_iter() {
-                let listener = tokio::net::TcpListener::from_std(listener, &reactor_handle)
+                let listener = tokio::net::TcpListener::from_std(listener)
                     .expect("cannot convert from net2 listener to tokio listener");
                 tokio::spawn(self.clone().run(listener, watcher.clone()));
             }
@@ -181,7 +179,7 @@ impl Server {
     ) {
         // tokio::watch::channel is SPMC, so front it with a MPSC channel
         // so that we have, in effect, a MPMC channel.
-        let (mut notifier_master, watcher) = watch::channel(Notification::None);
+        let (notifier_master, watcher) = watch::channel(Notification::None);
         let (notifier, mut notifier_receiver) = mpsc::channel::<Notification>(16);
 
         let notifier2 = notifier.clone();
@@ -191,7 +189,7 @@ impl Server {
         let task = async move {
             tokio::spawn(async move {
                 while let Some(notification) = notifier_receiver.next().await {
-                    if let Err(_) = notifier_master.send(notification).await {
+                    if let Err(_) = notifier_master.broadcast(notification) {
                         break;
                     }
                 }
@@ -200,8 +198,8 @@ impl Server {
             // Forward control-c
             let mut tx1 = notifier.clone();
             tokio::spawn(async move {
-                let mut ctrl_c = signal::ctrl_c().unwrap();
-                while let Some(_) = ctrl_c.next().await {
+                let mut sig_int = signal(SignalKind::interrupt()).unwrap();
+                while let Some(_) = sig_int.next().await {
                     info!("received SIGINT");
                     let _ = tx1.send(Notification::ExitGraceful).await;
                 }
@@ -210,7 +208,7 @@ impl Server {
             // Forward SIGTERM
             let mut tx2 = notifier.clone();
             tokio::spawn(async move {
-                let mut sig_term = signal::unix::signal(signal::unix::SignalKind::terminate()).unwrap();
+                let mut sig_term = signal(SignalKind::terminate()).unwrap();
                 while let Some(_) = sig_term.next().await {
                     info!("received SIGTERM");
                     let _ = tx2.send(Notification::ExitGraceful).await;
@@ -220,7 +218,7 @@ impl Server {
             // Catch SIGUSR1
             let server = server.clone();
             tokio::spawn(async move {
-                let mut sig_term = signal::unix::signal(signal::unix::SignalKind::user_defined1()).unwrap();
+                let mut sig_term = signal(SignalKind::user_defined1()).unwrap();
                 while let Some(_) = sig_term.next().await {
                     info!("received USR1");
                     let config = config::get_config();
@@ -251,7 +249,7 @@ impl Server {
     {
         let server = self.clone();
         thread::spawn(move || {
-            let mut runtime = current_thread::Runtime::new().unwrap();
+            let mut runtime = tokio::runtime::Builder::new().basic_scheduler().build().unwrap();
             runtime.block_on(async move {
                 tokio::spawn(task);
                 server.wait(notifier, watcher).await;
@@ -289,7 +287,7 @@ impl Server {
                 let _ = notifier.send(Notification::ExitNow).await;
             }
             waited += 1;
-            let _ = tokio::timer::delay_for(Duration::from_millis(100)).await;
+            let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
             if waited == 100 || waited % 600 == 0 {
                 warn!("still waiting!");
             }
@@ -303,7 +301,7 @@ impl Server {
     }
 
     // This is run for every TCP listener socket.
-    async fn run(self, listener: tokio::net::TcpListener, watcher: watch::Receiver<Notification>) {
+    async fn run(self, mut listener: tokio::net::TcpListener, watcher: watch::Receiver<Notification>) {
         use futures::future::Either;
         use futures::stream;
 
@@ -318,7 +316,7 @@ impl Server {
             let socket = match item {
                 Either::Left(Ok(s)) => s,
                 Either::Left(Err(_)) => {
-                    tokio::timer::delay_for(Duration::from_millis(50));
+                    tokio::time::delay_for(Duration::from_millis(50)).await;
                     continue;
                 },
                 Either::Right(Notification::ExitGraceful) => break,

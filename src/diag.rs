@@ -96,12 +96,11 @@ impl SessionStats {
     }
 
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
-        // XXX FIXME, run via a BlockingPool, or use the "trustdns" resolver crate.
-        let host = tokio_executor::blocking::run(move || {
+        let host = tokio::task::spawn_blocking(move || {
             let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
             dns_lookup::lookup_addr(&ipaddr).unwrap_or(ipaddr_str)
         })
-        .await;
+        .await.unwrap();
         self.hostname = host;
         self.label = label;
         info!(

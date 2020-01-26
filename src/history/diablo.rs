@@ -214,7 +214,7 @@ impl DHistory {
                     if e.kind() != io::ErrorKind::NotConnected {
                         return Err(e);
                     }
-                    tokio::timer::delay_for(Duration::from_millis(5)).await;
+                    tokio::time::delay_for(Duration::from_millis(5)).await;
                 },
             }
         }

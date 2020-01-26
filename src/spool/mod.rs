@@ -38,7 +38,7 @@ pub trait SpoolBackend: Send + Sync {
     fn get_type(&self) -> Backend;
 
     /// Read one article from the spool.
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: &mut BytesMut) -> io::Result<()>;
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: BytesMut) -> io::Result<BytesMut>;
 
     /// Write an article to the spool.
     fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc>;
@@ -420,7 +420,7 @@ impl Spool {
         &self,
         art_loc: ArtLoc,
         part: ArtPart,
-        mut buf: BytesMut,
+        buf: BytesMut,
     ) -> Result<BytesMut, io::Error>
     {
         let inner = self.inner.clone();
@@ -437,10 +437,7 @@ impl Spool {
                     },
                     Some(be) => &be.backend,
                 };
-                match be.read(&art_loc, part, &mut buf) {
-                    Ok(()) => Ok(buf),
-                    Err(e) => Err(e),
-                }
+                be.read(&art_loc, part, buf)
             })
             .await
     }

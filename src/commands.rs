@@ -140,6 +140,10 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
     unsafe { str::from_utf8_unchecked(&buf[..idx]) }
 }
 
+fn put_str(bytes_mut: &mut BytesMut, s: impl AsRef<str>) {
+    bytes_mut.put(s.as_ref().as_bytes())
+}
+
 /// NNTP Command parser.
 pub struct CmdParser {
     caps:       usize,
@@ -232,8 +236,8 @@ impl CmdParser {
     }
 
     pub fn help(&self) -> Bytes {
-        let mut out = BytesMut::with_capacity(1024);
-        out.put("100 Legal commands\r\n");
+        let mut out = BytesMut::with_capacity(4096);
+        put_str(&mut out, "100 Legal commands\r\n");
 
         let mut cmds: Vec<&CmdDef> = self.cmd_map.values().collect();
         cmds.sort_unstable_by(|a, b| a.name.cmp(b.name));
@@ -254,25 +258,25 @@ impl CmdParser {
                 s = s.replace("%R", "message-ID");
                 s = s.replace("%M", "message-ID");
             }
-            out.put(format!("  {} {}\r\n", cmd.name, s));
+            put_str(&mut out, format!("  {} {}\r\n", cmd.name, s));
         }
-        out.put(".\r\n");
+        put_str(&mut out, ".\r\n");
         out.freeze()
     }
 
     pub fn capabilities(&self) -> Bytes {
         let mut out = BytesMut::with_capacity(1024);
-        out.put("101 Capability list:\r\n");
-        out.put("VERSION: 2\r\n");
-        out.put("IMPLEMENTATION: NNTP-RS 0.1\r\n");
+        put_str(&mut out, "101 Capability list:\r\n");
+        put_str(&mut out, "VERSION: 2\r\n");
+        put_str(&mut out, "IMPLEMENTATION: NNTP-RS 0.1\r\n");
         if (self.caps & Capb::Authinfo as usize) > 0 {
-            out.put("AUTHINFO\r\n");
+            put_str(&mut out, "AUTHINFO\r\n");
         }
         if (self.caps & Capb::Hdr as usize) > 0 {
-            out.put("HDR\r\n");
+            put_str(&mut out, "HDR\r\n");
         }
         if (self.caps & Capb::Ihave as usize) > 0 {
-            out.put("IHAVE\r\n");
+            put_str(&mut out, "IHAVE\r\n");
         }
 
         let mut v = Vec::new();
@@ -292,34 +296,34 @@ impl CmdParser {
             v.push("NEWSGROUPS");
         }
         if v.len() > 0 {
-            out.put(format!("LIST {}\r\n", v.join(" ")));
+            put_str(&mut out, format!("LIST {}\r\n", v.join(" ")));
         }
 
         if (self.caps & Capb::Reader as usize) > 0 {
-            out.put("MODE-READER\r\n");
+            put_str(&mut out, "MODE-READER\r\n");
         }
         if (self.caps & Capb::NewNews as usize) > 0 {
-            out.put("NEWNEWS\r\n");
+            put_str(&mut out, "NEWNEWS\r\n");
         }
         if (self.caps & Capb::Over as usize) > 0 {
-            out.put("OVER\r\n");
+            put_str(&mut out, "OVER\r\n");
         }
         if (self.caps & Capb::Post as usize) > 0 {
-            out.put("POST\r\n");
+            put_str(&mut out, "POST\r\n");
         }
         if (self.caps & Capb::Reader as usize) > 0 {
-            out.put("READER\r\n");
+            put_str(&mut out, "READER\r\n");
         }
         if (self.caps & Capb::Sasl as usize) > 0 {
-            out.put("SASL\r\n");
+            put_str(&mut out, "SASL\r\n");
         }
         if (self.caps & Capb::StartTls as usize) > 0 {
-            out.put("STARTTLS\r\n");
+            put_str(&mut out, "STARTTLS\r\n");
         }
         if (self.caps & Capb::Streaming as usize) > 0 {
-            out.put("STREAMING\r\n");
+            put_str(&mut out, "STREAMING\r\n");
         }
-        out.put(".\r\n");
+        put_str(&mut out, ".\r\n");
         out.freeze()
     }
 }

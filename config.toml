@@ -35,8 +35,8 @@ remember = 7
 #threads_per_core = 2
 #cores="0,2,4-7"
 
-[threadpool]
-#blocking = "separate_pool"
+[threaded]
+#blocking_io = "threadpool"
 
 # [spool.0]
 # backend = "diablo"
