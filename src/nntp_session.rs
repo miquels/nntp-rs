@@ -4,9 +4,10 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
+use crate::buffer::Buffer;
 use crate::commands::{self, Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
 use crate::diag::{SessionStats, Stats};
@@ -291,7 +292,7 @@ impl NntpSession {
                     Cmd::Stat => (223u32, ArtPart::Stat),
                     _ => unreachable!(),
                 };
-                let buf = BytesMut::from(format!("{} 0 {}\r\n", code, args[0]).as_bytes());
+                let buf = Buffer::from(format!("{} 0 {}\r\n", code, args[0]));
                 return self.read_article(part, args[0], buf).await;
             },
             Cmd::Capabilities => {
@@ -706,7 +707,7 @@ impl NntpSession {
         Ok((headers, body, v))
     }
 
-    async fn read_article(&self, part: ArtPart, msgid: &str, buf: BytesMut) -> io::Result<NntpResult> {
+    async fn read_article(&self, part: ArtPart, msgid: &str, buf: Buffer) -> io::Result<NntpResult> {
         let result = match self.server.history.lookup(msgid).await {
             Err(_) => return Ok(NntpResult::text("430 Not found")),
             Ok(None) => return Ok(NntpResult::text("430 Not found")),
@@ -726,7 +727,7 @@ impl NntpSession {
                 if part == ArtPart::Head {
                     buf.extend_from_slice(b".\r\n");
                 }
-                Ok(NntpResult::bytes(buf.freeze()))
+                Ok(NntpResult::bytes(buf.to_bytes()))
             },
             Err(_) => Ok(NntpResult::text("430 Not found")),
         }

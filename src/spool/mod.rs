@@ -16,6 +16,7 @@ mod diablo;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::{BlockingPool, BlockingType};
+use crate::buffer::Buffer;
 use crate::config;
 use crate::util::{self, HashFeed, MatchResult, UnixTime};
 
@@ -38,7 +39,7 @@ pub trait SpoolBackend: Send + Sync {
     fn get_type(&self) -> Backend;
 
     /// Read one article from the spool.
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: BytesMut) -> io::Result<BytesMut>;
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer>;
 
     /// Write an article to the spool.
     fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc>;
@@ -420,8 +421,8 @@ impl Spool {
         &self,
         art_loc: ArtLoc,
         part: ArtPart,
-        buf: BytesMut,
-    ) -> Result<BytesMut, io::Error>
+        buffer: Buffer,
+    ) -> io::Result<Buffer>
     {
         let inner = self.inner.clone();
         self.pool
@@ -437,7 +438,7 @@ impl Spool {
                     },
                     Some(be) => &be.backend,
                 };
-                be.read(&art_loc, part, buf)
+                be.read(&art_loc, part, buffer)
             })
             .await
     }

@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use bytes::{BytesMut, buf::ext::BufMutExt};
+use bytes::BufMut;
 use libc;
 use parking_lot::Mutex;
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolBackend, SpoolDef};
+use crate::buffer::Buffer;
 use crate::util::byteorder::*;
 use crate::util::UnixTime;
 
@@ -258,11 +259,11 @@ impl DSpool {
 
     // Read an article.
     // SpoolBackend::read() forwards to this method.
-    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buf: BytesMut) -> io::Result<BytesMut> {
+    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buffer: Buffer) -> io::Result<Buffer> {
         let (head, loc, mut file) = self.open(art_loc, &part)?;
 
         let (start, len) = match part {
-            ArtPart::Stat => return Ok(buf),
+            ArtPart::Stat => return Ok(Buffer::new()),
             ArtPart::Head => (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len),
             ArtPart::Article => (loc.pos + DARTHEAD_SIZE as u32, head.art_len),
             ArtPart::Body => {
@@ -278,14 +279,14 @@ impl DSpool {
         let reader = file.try_clone()?.take(len as u64);
 
         if head.store_type == 1 {
-            buf.reserve((len + len / 50) as usize);
+            buffer.reserve((len + len / 50) as usize);
             let reader = CrlfXlat::new(reader);
-            buf = read_to_bufmut(reader, buf)?;
+            read_to_buffer(reader, 0, &mut buffer)?;
         } else {
-            buf.reserve(len as usize);
-            buf = read_to_bufmut(reader, buf)?;
+            buffer.reserve(len as usize);
+            read_to_buffer(reader, len as usize, &mut buffer)?;
         }
-        Ok(buf)
+        Ok(buffer)
     }
 
     // Finds the most recently modified spoolfile in the directory.
@@ -530,8 +531,8 @@ impl SpoolBackend for DSpool {
         Backend::Diablo
     }
 
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buf: BytesMut) -> io::Result<BytesMut> {
-        self.do_read(art_loc, part, buf)
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer> {
+        self.do_read(art_loc, part, buffer)
     }
 
     fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
@@ -620,10 +621,18 @@ impl<T: Read> Read for CrlfXlat<T> {
 }
 
 // helper function.
-fn read_to_bufmut(mut reader: impl Read, buf: BytesMut) -> io::Result<BytesMut> {
-    let mut writer = buf.writer();
-    io::copy(&mut reader, &mut writer)?;
-    Ok(writer.into_inner())
+fn read_to_buffer(mut reader: impl Read, len: usize, buffer: &mut Buffer) -> io::Result<()> {
+    let mut done = 0;
+    loop {
+        let mut slices = buffer.get_ioslices_mut();
+        let sz = reader.read_vectored(&mut slices)?;
+        unsafe { buffer.advance_mut(sz) };
+        done += sz;
+        if sz == 0 || (len > 0 && done == len) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 // Mini statvfs implementation.
