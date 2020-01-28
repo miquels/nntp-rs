@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use bytes::BufMut;
 use libc;
 use parking_lot::Mutex;
 
@@ -276,15 +275,14 @@ impl DSpool {
             },
         };
         file.seek(SeekFrom::Start(start as u64))?;
-        let reader = file.try_clone()?.take(len as u64);
 
         if head.store_type == 1 {
-            buffer.reserve((len + len / 50) as usize);
+            let reader = file.try_clone()?.take(len as u64);
             let reader = CrlfXlat::new(reader);
-            read_to_buffer(reader, 0, &mut buffer)?;
+            buffer.reserve((len + len / 50) as usize);
+            buffer.read_all(reader)?;
         } else {
-            buffer.reserve(len as usize);
-            read_to_buffer(reader, len as usize, &mut buffer)?;
+            buffer.read_exact(file, len as usize)?;
         }
         Ok(buffer)
     }
@@ -618,21 +616,23 @@ impl<T: Read> Read for CrlfXlat<T> {
         self.inner.consume(in_idx);
         Ok(out_idx)
     }
-}
 
-// helper function.
-fn read_to_buffer(mut reader: impl Read, len: usize, buffer: &mut Buffer) -> io::Result<()> {
-    let mut done = 0;
-    loop {
-        let mut slices = buffer.get_ioslices_mut();
-        let sz = reader.read_vectored(&mut slices)?;
-        unsafe { buffer.advance_mut(sz) };
-        done += sz;
-        if sz == 0 || (len > 0 && done == len) {
-            break;
+    fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut]) -> io::Result<usize> {
+        // debug!("XXX read_vectored starts, #bufs: {}", bufs.len());
+        let mut done = 0;
+        for idx in 0 .. bufs.len() {
+            let l = bufs[idx].len();
+            if l != 0 {
+                let n = self.read(&mut bufs[idx][..])?;
+                done += n;
+                if n < l {
+                    break;
+                }
+            }
         }
+        // debug!("XXX read_vectored done, read {}", done);
+        Ok(done)
     }
-    Ok(())
 }
 
 // Mini statvfs implementation.

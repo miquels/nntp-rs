@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, IoSlice, IoSliceMut as StdIoSliceMut, Write};
+use std::io::{self, IoSlice, IoSliceMut as StdIoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::slice;
 use std::sync::Arc;
@@ -64,6 +64,29 @@ impl BufPool {
         trace!("BUFPOOL.put({}): saved", v.len());
         pool.get_mut(&len).unwrap().push_front(v);
     }
+
+    fn put_vec(&self, vec: &mut Vec<Vec<u8>>) {
+        if vec.len() == 0 {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        let pool = &mut inner.pool;
+
+        for v in vec.drain(..) {
+            let len = v.len();
+            if len != v.capacity() ||
+                (len != 128 && len != 256 && len != 512 && len % 1024 != 0) {
+                    trace!("BUFPOOL.put({}): dropped", v.len());
+                    continue;
+            }
+
+            if !pool.contains_key(&len) {
+                pool.insert(len, VecDeque::new());
+            }
+            trace!("BUFPOOL.put({}): saved", v.len());
+            pool.get_mut(&len).unwrap().push_front(v);
+        }
+    }
 }
 
 /// A `Buf` and `BufMut` with non-contiguous backing storage.
@@ -86,11 +109,7 @@ pub struct Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        for d in self.data.drain(..) {
-            if d.len() > 0 {
-                BUFPOOL.put(d);
-            }
-        }
+        BUFPOOL.put_vec(&mut self.data);
     }
 }
 
@@ -129,29 +148,63 @@ impl Buffer {
         self.rd_offset = 0;
         self.wr_offset = 0;
         self.capacity = 0;
-        for d in self.data.drain(..) {
-            BUFPOOL.put(d);
-        }
+        BUFPOOL.put_vec(&mut self.data);
+    }
+
+    /// total length of all data in this Buffer.
+    pub fn len(&self) -> usize {
+        self.wr_offset
     }
 
     /// Get a Vec of IoSlices to use with `read_vectored()`.
-    pub fn get_ioslices_mut(&mut self) -> Vec<StdIoSliceMut<'_>> {
-        let mut slices = Vec::with_capacity(self.data.len());
-        if self.wr_offset == self.capacity {
-            self.add_block();
+    pub fn get_ioslices_mut(&mut self, len: usize) -> Vec<StdIoSliceMut<'_>> {
+
+        // make sure we have enough capacity.
+        let mut len = len;
+        if len == 0 {
+            if self.capacity < self.wr_offset + 4096 {
+                self.add_block();
+            }
+            len = self.capacity - self.wr_offset;
+        } else {
+            while self.capacity - self.wr_offset < len {
+                self.add_block();
+            }
         }
-        let mut idx = self.wr_offset / self.block_sz;
-        let mut off = self.wr_offset - (idx * self.block_sz);
-        let len = self.data.len();
-        let mut data_ref = &mut self.data[idx..];
-        while idx < len {
+
+        // get index and offset for start and end.
+        let mut wr_idx = self.wr_offset / self.block_sz;
+        let mut wr_off = self.wr_offset - (wr_idx * self.block_sz);
+        let end_idx = (self.wr_offset + len) / self.block_sz;
+        let end_off = (self.wr_offset + len) - (end_idx * self.block_sz);
+
+        // No more than 1024 slices at a time.
+        let num = std::cmp::min(self.data.len() - wr_idx, 1024);
+        let max = wr_idx + num;
+        let mut slices = Vec::with_capacity(num);
+
+        // mutable reference to all entries that we're splitting up later.
+        let mut data_ref = &mut self.data[wr_idx..];
+
+        while wr_idx < max && wr_idx <= end_idx {
+
+            // get a mutable reference to the next entry in the Vec.
             let (head, tail) = data_ref.split_first_mut().unwrap();
             data_ref = tail;
-            let data = &mut head[off..];
-            //println!("XXX get_ioslices_mut idx {} off {} data.len() {}", idx, off, data.len());
-            slices.push(StdIoSliceMut::new(data));
-            idx += 1;
-            off = 0;
+
+            // the last entry might have a shorter length.
+            let data = if wr_idx == end_idx {
+                &mut head[wr_off..end_off]
+            } else {
+                &mut head[wr_off..]
+            };
+
+            //println!("XXX get_ioslices_mut idx {} off {} data.len() {}", wr_idx, wr_off, data.len());
+            if data.len() > 0 {
+                slices.push(StdIoSliceMut::new(data));
+            }
+            wr_idx += 1;
+            wr_off = 0;
         }
         slices
     }
@@ -179,13 +232,49 @@ impl Buffer {
 
     /// Write all data in this `Buffer` to a file.
     pub fn write_all(&mut self, mut file: impl Write) -> io::Result<()> {
-        //println!("XXX write_all");
         while self.remaining() > 0 {
             let mut slices = self.get_ioslices();
             let done = file.write_vectored(&mut slices)?;
+            if done == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
             self.advance(done);
         }
         self.clear();
+        Ok(())
+    }
+
+    /// Read an exact number of bytes.
+    ///
+    /// The memory needed is allocated up front. More memory might be allocated
+    /// than what is needed, since we allocate in blocks.
+    pub fn read_exact(&mut self, mut reader: impl Read, len: usize) -> io::Result<()> {
+        let mut done = 0;
+        loop {
+            let mut slices = self.get_ioslices_mut(len - done);
+            let sz = reader.read_vectored(&mut slices)?;
+            if sz == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            self.advance_mut_safe(sz);
+            done += sz;
+            if done == len {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read until end-of-file.
+    pub fn read_all(&mut self, mut reader: impl Read) -> io::Result<()> {
+        loop {
+            let mut slices = self.get_ioslices_mut(0);
+            let sz = reader.read_vectored(&mut slices)?;
+            if sz == 0 {
+                break;
+            }
+            self.advance_mut_safe(sz);
+        }
         Ok(())
     }
 
@@ -222,6 +311,16 @@ impl Buffer {
             buf.extend_from_slice(&self.data[idx][..]);
         }
         buf
+    }
+
+    /// Like `advance_mut()`, but no need to use `unsafe`.
+    pub fn advance_mut_safe(&mut self, cnt: usize) {
+        // If we have less remaining bytes than the amount we are being
+        // asked to advance the write cursor, that must be a bug.
+        if cnt > self.capacity - self.wr_offset {
+            panic!("advance_mut: write cursor would be advanced beyond buffer");
+        }
+        self.wr_offset += cnt;
     }
 
     // add one block of capacity.
@@ -287,12 +386,7 @@ impl BufMut for Buffer {
     // The API says this must be "unsafe", but it's actually safe as we
     // don't have any uninitialized memory.
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        // If we have less remaining bytes than the amount we are being
-        // asked to advance the write cursor, that must be a bug.
-        if cnt > self.capacity - self.wr_offset {
-            panic!("write cursor would be advanced beyond buffer");
-        }
-        self.wr_offset += cnt;
+        self.advance_mut_safe(cnt)
     }
 
     // basically infinite data.
@@ -311,7 +405,6 @@ impl Buf for Buffer {
         if self.rd_offset > self.wr_offset {
             // "It is recommended for implementations of advance to
             // panic if cnt > self.remaining()"
-            println!("XXX advance({}): rd_offset {}, wr_offset {}", cnt, self.rd_offset, self.wr_offset);
             panic!("read position advanced beyond end of buffer");
         }
 
