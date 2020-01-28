@@ -4,7 +4,7 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::BytesMut;
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::buffer::Buffer;
@@ -45,23 +45,12 @@ impl NntpResult {
         NntpResult { data }
     }
 
-    pub fn bytes(b: Bytes) -> NntpResult {
-        NntpResult { data: Buffer::from(b) }
-    }
-
-    pub fn buffer(b: Buffer) -> NntpResult {
-        NntpResult { data: b }
+    pub fn buffer(b: impl Into<Buffer>) -> NntpResult {
+        NntpResult { data: b.into() }
     }
 
     pub fn empty() -> NntpResult {
         NntpResult { data: Buffer::new() }
-    }
-}
-
-impl From<NntpResult> for Bytes {
-    fn from(n: NntpResult) -> Bytes {
-        let mut n = n;
-        n.data.to_bytes()
     }
 }
 
@@ -307,7 +296,7 @@ impl NntpSession {
                 if args.len() > 0 && !self.parser.is_keyword(args[0]) {
                     return Ok(NntpResult::text("501 invalid keyword"));
                 }
-                return Ok(NntpResult::bytes(self.parser.capabilities()));
+                return Ok(NntpResult::buffer(self.parser.capabilities()));
             },
             Cmd::Check => {
                 self.stats.inc(Stats::Check);
@@ -353,7 +342,7 @@ impl NntpSession {
                 return Ok(NntpResult::text("503 Not implemented"));
             },
             Cmd::Help => {
-                return Ok(NntpResult::bytes(self.parser.help()));
+                return Ok(NntpResult::buffer(self.parser.help()));
             },
             Cmd::Ihave => {
                 self.stats.inc(Stats::Ihave);
