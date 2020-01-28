@@ -119,11 +119,11 @@ impl Buffer {
 
     /// Create new buffer, default block size.
     pub fn new() -> Buffer {
-        Buffer::with_size(Self::DEFAULT_BLOCKSIZE)
+        Buffer::with_block_size(Self::DEFAULT_BLOCKSIZE)
     }
 
     /// Create new Buffer, define block size.
-    pub fn with_size(block_size: usize) -> Buffer {
+    pub fn with_block_size(block_size: usize) -> Buffer {
         let block_size = if block_size == 0 { Self::DEFAULT_BLOCKSIZE } else { block_size };
         Buffer {
             block_sz:   block_size,
@@ -136,7 +136,7 @@ impl Buffer {
 
     /// Create new Buffer with a pre-allocated capacity.
     pub fn with_capacity(block_size: usize, capacity: usize) -> Buffer {
-        let mut buf = Buffer::with_size(block_size);
+        let mut buf = Buffer::with_block_size(block_size);
         while buf.capacity < capacity {
             buf.add_block();
         }
@@ -323,6 +323,11 @@ impl Buffer {
         self.wr_offset += cnt;
     }
 
+    /// Add a string to the buffer.
+    pub fn put_str(&mut self, s: impl AsRef<str>) {
+        self.extend_from_slice(s.as_ref().as_bytes());
+    }
+
     // add one block of capacity.
     fn add_block(&mut self) {
         let block_sz = self.block_sz;
@@ -461,7 +466,7 @@ impl Buf for Buffer {
 
 impl From<&[u8]> for Buffer {
     fn from(src: &[u8]) -> Self {
-        let mut buffer = Buffer::new();
+        let mut buffer = Buffer::with_block_size(1024);
         buffer.extend_from_slice(src);
         buffer
     }
@@ -482,6 +487,18 @@ impl From<&str> for Buffer {
 impl From<String> for Buffer {
     fn from(src: String) -> Self {
         Buffer::from(src.as_str().as_bytes())
+    }
+}
+
+impl From<bytes::Bytes> for Buffer {
+    fn from(src: bytes::Bytes) -> Self {
+        let mut buffer = if src.len() <= 1024 {
+            Buffer::with_block_size(1024)
+        } else {
+            Buffer::new()
+        };
+        buffer.extend_from_slice(&src[..]);
+        buffer
     }
 }
 

@@ -576,9 +576,10 @@ impl NntpCodec {
     }
 
     /// Write a buffer that impl's the `Buf` trait.
-    pub async fn write_buf(&mut self, buf: &mut impl Buf) -> io::Result<()> {
+    pub async fn write_buf(&mut self, buf: impl Buf) -> io::Result<()> {
         self.reset_wr_timer();
-        poll_fn(move |cx: &mut Context| self.poll_write(cx, buf)).await
+        let mut buf = buf;
+        poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
     }
 }
 

@@ -4,7 +4,7 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::buffer::Buffer;
@@ -35,29 +35,38 @@ pub struct NntpSession {
 }
 
 pub struct NntpResult {
-    pub data: Bytes,
+    pub data: Buffer,
 }
 
 impl NntpResult {
     pub fn text(s: impl AsRef<str>) -> NntpResult {
-        let s = s.as_ref();
-        let mut b = BytesMut::with_capacity(s.len() + 2);
-        b.put(s.as_bytes());
-        b.put(&b"\r\n"[..]);
-        NntpResult { data: b.freeze() }
+        let mut data = Buffer::from(s.as_ref());
+        data.put_str("\r\n");
+        NntpResult { data }
     }
 
     pub fn bytes(b: Bytes) -> NntpResult {
+        NntpResult { data: Buffer::from(b) }
+    }
+
+    pub fn buffer(b: Buffer) -> NntpResult {
         NntpResult { data: b }
     }
 
     pub fn empty() -> NntpResult {
-        NntpResult::bytes(Bytes::new())
+        NntpResult { data: Buffer::new() }
     }
 }
 
 impl From<NntpResult> for Bytes {
     fn from(n: NntpResult) -> Bytes {
+        let mut n = n;
+        n.data.to_bytes()
+    }
+}
+
+impl From<NntpResult> for Buffer {
+    fn from(n: NntpResult) -> Buffer {
         n.data
     }
 }
@@ -108,11 +117,11 @@ impl NntpSession {
         let msg = match self.on_connect().await {
             Ok(msg) => msg,
             Err(msg) => {
-                let _ = self.codec.write(msg).await;
+                let _ = self.codec.write_buf(msg.data).await;
                 return;
             }
         };
-        if let Err(e) = self.codec.write(msg).await {
+        if let Err(e) = self.codec.write_buf(msg.data).await {
             self.on_write_error(e);
             return;
         }
@@ -145,7 +154,7 @@ impl NntpSession {
                     }
                 },
             };
-            if let Err(e) = self.codec.write(response.data).await {
+            if let Err(e) = self.codec.write_buf(response.data).await {
                 self.on_write_error(e);
                 break;
             }
@@ -272,10 +281,9 @@ impl NntpSession {
 
         let (cmd, args) = match self.parser.parse(line) {
             Err(e) => {
-                let mut b = BytesMut::with_capacity(e.len() + 2);
-                b.put(e.as_bytes());
-                b.put(&b"\r\n"[..]);
-                return Ok(NntpResult::bytes(b.freeze()));
+                let mut b = Buffer::from(e);
+                b.put_str("\r\n");
+                return Ok(NntpResult::buffer(b))
             },
             Ok(v) => v,
         };
@@ -370,7 +378,7 @@ impl NntpSession {
                     },
                 }
 
-                self.codec.write(NntpResult::text("335 Send article; end with CRLF DOT CRLF")).await?;
+                self.codec.write_buf(Buffer::from("335 Send article; end with CRLF DOT CRLF")).await?;
 
                 let mut art = self.codec.read_article(args[0]).await?;
                 let status = self.received_article(&mut art, true).await?;
@@ -727,7 +735,7 @@ impl NntpSession {
                 if part == ArtPart::Head {
                     buf.extend_from_slice(b".\r\n");
                 }
-                Ok(NntpResult::bytes(buf.to_bytes()))
+                Ok(NntpResult::buffer(buf))
             },
             Err(_) => Ok(NntpResult::text("430 Not found")),
         }
