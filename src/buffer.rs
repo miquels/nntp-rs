@@ -115,7 +115,7 @@ impl Drop for Buffer {
 
 impl Buffer {
     // Default blocksize.
-    pub const DEFAULT_BLOCKSIZE: usize = 128; // 128*1024;
+    pub const DEFAULT_BLOCKSIZE: usize = 128*1024;
 
     /// Create new buffer, default block size.
     pub fn new() -> Buffer {
