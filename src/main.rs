@@ -1,40 +1,20 @@
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate serde_derive;
-
-pub mod article;
-pub mod arttype;
-pub mod blocking;
-pub mod commands;
-pub mod config;
-pub mod dconfig;
-pub mod diag;
-#[macro_use]
-pub mod errors;
-pub mod history;
-pub mod hostcache;
-pub mod logger;
-pub mod newsfeeds;
-pub mod nntp_codec;
-pub mod nntp_session;
-pub mod server;
-pub mod spool;
-pub mod util;
 
 use std::io;
-use std::net::{SocketAddr, TcpListener};
 use std::panic;
 use std::process::exit;
 use std::thread;
 
-use logger::LogTarget;
-use net2::unix::UnixTcpBuilderExt;
 use structopt::StructOpt;
 
-use blocking::BlockingType;
-use history::History;
-use spool::Spool;
+use nntp_rs::blocking::BlockingType;
+use nntp_rs::config;
+use nntp_rs::history::{self, History};
+use nntp_rs::logger::{self, LogTarget};
+use nntp_rs::server;
+use nntp_rs::spool::{self, Spool};
+use nntp_rs::util;
 
 // use jemalloc instead of system malloc.
 #[global_allocator]
@@ -170,7 +150,7 @@ fn main() -> io::Result<()> {
         .unwrap();
     let mut listeners = Vec::new();
     for addr in &addrs {
-        let listener = bind_socket(&addr)
+        let listener = util::bind_socket(&addr)
             .map_err(|e| {
                 eprintln!("nntp-rs: listen socket: bind to {}: {}", addr, e);
                 exit(1);
@@ -382,7 +362,7 @@ fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
         };
 
         // find it
-        let buffer = crate::util::Buffer::new();
+        let buffer = util::Buffer::new();
         let buf = spool.read(loc, part, buffer).await.map_err(|e| {
             eprintln!("spool_read {}: {}", opts.msgid, e);
             e
@@ -410,35 +390,6 @@ fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
 
         Ok(())
     })
-}
-
-
-/// Create a socket, set SO_REUSEPORT on it, bind it to an address,
-/// and start listening for connections.
-pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {
-    let builder = if addr.is_ipv6() {
-        // create IPv6 socket and make it v6-only.
-        let b = net2::TcpBuilder::new_v6()
-            .map_err(|e| ioerr!(Other, "creating IPv6 socket: {}", e))?;
-        b.only_v6(true).map_err(|e| ioerr!(e.kind(), "setting socket to only_v6: {}", e))?;
-        b
-    } else {
-        net2::TcpBuilder::new_v4()
-            .map_err(|e| ioerr!(e.kind(), "creating IPv4 socket: {}", e))?
-    };
-    // reuse_addr to make sure we can restart quickly.
-    let builder = builder.reuse_address(true)
-        .map_err(|e| ioerr!(e.kind(), "setting SO_REUSEADDR on socket: {}", e))?;
-    // reuse_port to be able to have multiple sockets listening on the same port.
-    let builder = builder.reuse_port(true)
-        .map_err(|e| ioerr!(e.kind(), "setting SO_REUSEPORT on socket: {}", e))?;
-    let builder = builder
-        .bind(addr)
-        .map_err(|e| ioerr!(e.kind(), "binding socket to {}: {}", addr, e))?;
-    let listener = builder
-        .listen(128)
-        .map_err(|e| ioerr!(e.kind(), "listening on socket: {}", e))?;
-    Ok(listener)
 }
 
 fn handle_panic() {

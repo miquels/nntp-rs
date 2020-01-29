@@ -15,7 +15,7 @@ use tokio::stream::StreamExt;
 use tokio::sync::{mpsc, watch};
 use tokio::signal::unix::{signal, SignalKind};
 
-use crate::bind_socket;
+use crate::util::bind_socket;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
