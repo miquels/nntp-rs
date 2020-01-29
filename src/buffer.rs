@@ -114,17 +114,13 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    // Default blocksize.
-    pub const DEFAULT_BLOCKSIZE: usize = 128*1024;
-
-    /// Create new buffer, default block size.
+    /// Create new buffer.
     pub fn new() -> Buffer {
-        Buffer::with_block_size(Self::DEFAULT_BLOCKSIZE)
+        Buffer::with_block_size(0)
     }
 
-    /// Create new Buffer, define block size.
+    /// Create new Buffer, but start off with a minimal block size.
     pub fn with_block_size(block_size: usize) -> Buffer {
-        let block_size = if block_size == 0 { Self::DEFAULT_BLOCKSIZE } else { block_size };
         Buffer {
             block_sz:   block_size,
             rd_offset:  0,
@@ -132,15 +128,6 @@ impl Buffer {
             capacity:   0,
             data:       Vec::new(),
         }
-    }
-
-    /// Create new Buffer with a pre-allocated capacity.
-    pub fn with_capacity(block_size: usize, capacity: usize) -> Buffer {
-        let mut buf = Buffer::with_block_size(block_size);
-        while buf.capacity < capacity {
-            buf.add_block();
-        }
-        buf
     }
 
     /// clear buffers.
@@ -163,20 +150,18 @@ impl Buffer {
         let mut len = len;
         if len == 0 {
             if self.capacity < self.wr_offset + 4096 {
-                self.add_block();
+                self.add_capacity();
             }
             len = self.capacity - self.wr_offset;
         } else {
             while self.capacity - self.wr_offset < len {
-                self.add_block();
+                self.add_capacity();
             }
         }
 
         // get index and offset for start and end.
-        let mut wr_idx = self.wr_offset / self.block_sz;
-        let mut wr_off = self.wr_offset - (wr_idx * self.block_sz);
-        let end_idx = (self.wr_offset + len) / self.block_sz;
-        let end_off = (self.wr_offset + len) - (end_idx * self.block_sz);
+        let (mut wr_idx, mut wr_off) = self.get_pos(self.wr_offset);
+        let (end_idx, end_off) = self.get_pos(self.wr_offset + len);
 
         // No more than 1024 slices at a time.
         let num = std::cmp::min(self.data.len() - wr_idx, 1024);
@@ -213,8 +198,7 @@ impl Buffer {
     pub fn get_ioslices(&self) -> Vec<IoSlice> {
 
         //println!("XXX get_ioslices");
-        let mut idx = self.rd_offset / self.block_sz;
-        let mut off = self.rd_offset - (idx * self.block_sz);
+        let (mut idx, mut off) = self.get_pos(self.rd_offset);
 
         // No more than 1024 slices at a time.
         let num = std::cmp::min(self.data.len() - idx, 1024);
@@ -285,10 +269,9 @@ impl Buffer {
         let mut extend = extend;
         while extend.len() > 0 {
             if self.capacity - self.wr_offset < extend.len() {
-                self.add_block();
+                self.add_capacity();
             }
-            let idx = self.wr_offset / self.block_sz;
-            let off = self.wr_offset - (idx * self.block_sz);
+            let (idx, off) = self.get_pos(self.wr_offset);
             let data = &mut self.data[idx][off..];
             let amount = std::cmp::min(data.len(), extend.len());
             (&mut data[..amount]).copy_from_slice(&extend[..amount]);
@@ -297,10 +280,22 @@ impl Buffer {
         }
     }
 
-    /// Max sure at least `size` bytes are available for use with `get_ioslices_mut()`.
+    /// Make sure at least `size` bytes are available for use with `get_ioslices_mut()`.
     pub fn reserve(&mut self, size: usize) {
+        if self.data.len() == 0 {
+            if size > 8192 {
+                self.block_sz = 128 * 1024;
+            } else if size > 1024 {
+                self.block_sz = 8192;
+            }
+        }
+        if self.data.len() == 1 {
+            if self.block_sz < 8192 && self.wr_offset + size > 8192 {
+                self.block_sz = 8192;
+            }
+        }
         while self.capacity - self.wr_offset < size {
-            self.add_block();
+            self.add_capacity();
         }
     }
 
@@ -328,12 +323,55 @@ impl Buffer {
         self.extend_from_slice(s.as_ref().as_bytes());
     }
 
-    // add one block of capacity.
-    fn add_block(&mut self) {
-        let block_sz = self.block_sz;
-        let data = BUFPOOL.get(block_sz);
-        self.data.push(data);
-        self.capacity += block_sz;
+    // Add capacity.
+    //
+    // Initial block_size is self.block_sz.
+    //
+    // Anytime we do an add_capacity() after that, block_size is made larger
+    // until it is the maximum size.
+    //
+    // As long as the previous block_size <= 8192, we copy the data from
+    // the old block to the new block and drop the old block.
+    //
+    // With larger block sizes, we actually add blocks.
+    //
+    fn add_capacity(&mut self) {
+
+        let block_sz = if self.data.len() == 0 {
+            self.block_sz
+        } else if self.block_sz < 1024 {
+            1024
+        } else if self.block_sz < 8 * 1024 {
+            8192
+        } else {
+            128 * 1024
+        };
+
+        let mut data = BUFPOOL.get(block_sz);
+
+        if self.data.len() == 1 && self.block_sz <= 8192 {
+            // extend the first block.
+            data[..self.wr_offset].copy_from_slice(&self.data[0][..self.wr_offset]);
+            let old_data = std::mem::replace(&mut self.data[0], data);
+            BUFPOOL.put(old_data);
+            self.capacity = block_sz;
+        } else {
+            // add a new block.
+            self.data.push(data);
+            self.block_sz = block_sz;
+            self.capacity += block_sz;
+        }
+    }
+
+    // get index of data block, and offset.
+    fn get_pos(&self, offset: usize) -> (usize, usize) {
+        let mut cnt = 0;
+        let mut idx = 0;
+        while cnt + self.data[idx].len() < offset {
+            cnt += self.data[idx].len();
+            idx += 1;
+        }
+        (idx, offset - cnt)
     }
 }
 
@@ -351,14 +389,13 @@ impl Buffer {
 //
 macro_rules! do_bytes_mut {
     ($this:expr, $wr_offset:expr) => ({
-        let block_sz = $this.block_sz;
         if $wr_offset == $this.capacity {
-            $this.add_block();
+            $this.add_capacity();
         }
-        let idx = $wr_offset / block_sz;
-        let off = $wr_offset - (idx * block_sz);
+        let (idx, off) = $this.get_pos($wr_offset);
 
         // This is safe, as the memory is actually initialized.
+        let block_sz = $this.data[idx].len();
         let ptr = $this.data[idx].as_mut_ptr() as *mut MaybeUninit<u8>;
         unsafe {
             &mut slice::from_raw_parts_mut(ptr, block_sz)[off..]
@@ -402,10 +439,8 @@ impl BufMut for Buffer {
 
 impl Buf for Buffer {
     fn advance(&mut self, cnt: usize) {
-        let block_sz = self.block_sz;
-        let old_idx = self.rd_offset / block_sz;
 
-        // do the actual advancing.
+        // advance buffer read pointer.
         self.rd_offset += cnt;
         if self.rd_offset > self.wr_offset {
             // "It is recommended for implementations of advance to
@@ -413,14 +448,15 @@ impl Buf for Buffer {
             panic!("read position advanced beyond end of buffer");
         }
 
-        // drop buffers we do not need anymore.
-        let cur_idx = self.rd_offset / block_sz;
-        if cur_idx > old_idx {
-            for idx in old_idx .. cur_idx - 1 {
-                let v = std::mem::replace(&mut self.data[idx], Vec::new());
-                BUFPOOL.put(v);
-            }
-        }
+        // drop buffers we do not need anymore. XXX TODO
+        // let (old_idx, _, _) = self.get_pos(rd_offset - cnt);
+        // let (cur_idx, _, _) = self.get_pos(rd_offset);
+        // if cur_idx > old_idx {
+        //     for idx in old_idx .. cur_idx - 1 {
+        //         let v = std::mem::replace(&mut self.data[idx], Vec::new());
+        //         BUFPOOL.put(v);
+        //     }
+        // }
     }
 
     fn bytes(&self) -> &[u8] {
@@ -428,13 +464,10 @@ impl Buf for Buffer {
             return &[];
         }
 
-        let block_sz = self.block_sz;
-        let rd_idx = self.rd_offset / block_sz;
-        let rd_off = self.rd_offset - (rd_idx * block_sz);
-        let wr_idx = self.wr_offset / block_sz;
+        let (rd_idx, rd_off) = self.get_pos(self.rd_offset);
+        let (wr_idx, wr_off) = self.get_pos(self.wr_offset);
 
         if rd_idx == wr_idx {
-            let wr_off = self.wr_offset - (wr_idx * block_sz);
             &self.data[rd_idx][rd_off..wr_off]
         } else {
             &self.data[rd_idx][rd_off..]
@@ -445,11 +478,9 @@ impl Buf for Buffer {
 
         let mut rd_offset = self.rd_offset;
         let mut dst_idx = 0;
-        let block_sz = self.block_sz;
 
         while dst_idx < dst.len() && rd_offset < self.wr_offset {
-            let idx = rd_offset / block_sz;
-            let off = rd_offset - (idx * block_sz);
+            let (idx, off) = self.get_pos(rd_offset);
             let data = &self.data[idx][off..];
             dst[dst_idx] = IoSlice::new(data);
             rd_offset += data.len();
@@ -492,13 +523,7 @@ impl From<String> for Buffer {
 
 impl From<bytes::Bytes> for Buffer {
     fn from(src: bytes::Bytes) -> Self {
-        let mut buffer = if src.len() <= 1024 {
-            Buffer::with_block_size(1024)
-        } else {
-            Buffer::new()
-        };
-        buffer.extend_from_slice(&src[..]);
-        buffer
+        Buffer::from(&src[..])
     }
 }
 
