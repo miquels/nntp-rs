@@ -7,7 +7,7 @@ use std::sync::{atomic::Ordering, Arc};
 use bytes::BytesMut;
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
-use crate::buffer::Buffer;
+use crate::util::Buffer;
 use crate::commands::{self, Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
 use crate::diag::{SessionStats, Stats};

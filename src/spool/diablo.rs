@@ -12,7 +12,7 @@ use libc;
 use parking_lot::Mutex;
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolBackend, SpoolDef};
-use crate::buffer::Buffer;
+use crate::util::Buffer;
 use crate::util::byteorder::*;
 use crate::util::UnixTime;
 

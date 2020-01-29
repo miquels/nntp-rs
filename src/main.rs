@@ -6,7 +6,6 @@ extern crate serde_derive;
 pub mod article;
 pub mod arttype;
 pub mod blocking;
-pub mod buffer;
 pub mod commands;
 pub mod config;
 pub mod dconfig;
@@ -383,7 +382,7 @@ fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
         };
 
         // find it
-        let buffer = crate::buffer::Buffer::new();
+        let buffer = crate::util::Buffer::new();
         let buf = spool.read(loc, part, buffer).await.map_err(|e| {
             eprintln!("spool_read {}: {}", opts.msgid, e);
             e

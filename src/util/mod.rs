@@ -1,5 +1,6 @@
 //! A bunch of helper and utility functions.
 
+mod buffer;
 pub(crate) mod byteorder;
 pub(crate) mod clock;
 mod datetime;
@@ -11,6 +12,7 @@ mod mmap;
 mod wildmat;
 mod wildmat_fn;
 
+pub use self::buffer::*;
 pub use self::byteorder::*;
 pub use self::clock::*;
 pub use self::datetime::*;

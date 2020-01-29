@@ -16,7 +16,7 @@ mod diablo;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::{BlockingPool, BlockingType};
-use crate::buffer::Buffer;
+use crate::util::Buffer;
 use crate::config;
 use crate::util::{self, HashFeed, MatchResult, UnixTime};
 
