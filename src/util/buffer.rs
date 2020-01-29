@@ -11,6 +11,10 @@ use bytes::{Buf, BufMut, BytesMut};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+const BLOCK_SZ_1: usize = 1024;
+const BLOCK_SZ_2: usize = 8192;
+const BLOCK_SZ_MAX: usize = 128 * 1024;
+
 static BUFPOOL: Lazy<BufPool> = Lazy::new(|| BufPool::new());
 
 struct BufPool {
@@ -153,7 +157,6 @@ impl BufPool {
 /// a very good pool allocator itself.
 ///
 pub struct Buffer {
-    block_sz:   usize,
     rd_offset:  usize,
     wr_offset:  usize,
     capacity:   usize,
@@ -167,15 +170,9 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Create new buffer.
+    /// Create new Buffer.
     pub fn new() -> Buffer {
-        Buffer::with_block_size(0)
-    }
-
-    /// Create new Buffer, but start off with a minimal block size.
-    pub fn with_block_size(block_size: usize) -> Buffer {
         Buffer {
-            block_sz:   block_size,
             rd_offset:  0,
             wr_offset:  0,
             capacity:   0,
@@ -183,7 +180,7 @@ impl Buffer {
         }
     }
 
-    /// clear buffers.
+    /// Clear this buffer.
     pub fn clear(&mut self) {
         self.rd_offset = 0;
         self.wr_offset = 0;
@@ -197,19 +194,26 @@ impl Buffer {
     }
 
     /// Get a Vec of IoSlices to use with `read_vectored()`.
+    ///
+    /// If len == 0, we guarantee that the total amount of memory is
+    /// at least 4K, and maximum 128K, unless you called `reserve` first.
+    ///
+    /// If len > 0, the total amount of memory is `len` exact.
+    ///
+    /// More than 128M is not possible. Each IoSlice is max. 128K,
+    /// and the number of IOSlices is max. 1024.
     pub fn get_ioslices_mut(&mut self, len: usize) -> Vec<StdIoSliceMut<'_>> {
 
         // make sure we have enough capacity.
         let mut len = len;
         if len == 0 {
-            if self.capacity < self.wr_offset + 4096 {
-                self.add_capacity();
-            }
+            // if len == 0, just reserve 4K, then get the actual amount
+            // available (which is probably a lot more).
+            self.reserve(4096);
             len = self.capacity - self.wr_offset;
         } else {
-            while self.capacity - self.wr_offset < len {
-                self.add_capacity();
-            }
+            // if len > 0 we want the exact amount.
+            self.reserve(len);
         }
 
         // get index and offset for start and end.
@@ -237,7 +241,6 @@ impl Buffer {
                 &mut head[wr_off..]
             };
 
-            //println!("XXX get_ioslices_mut idx {} off {} data.len() {}", wr_idx, wr_off, data.len());
             if data.len() > 0 {
                 slices.push(StdIoSliceMut::new(data));
             }
@@ -250,7 +253,6 @@ impl Buffer {
     /// Get a Vec of IoSlices to use with `write_vectored()`.
     pub fn get_ioslices(&self) -> Vec<IoSlice> {
 
-        //println!("XXX get_ioslices");
         let (mut idx, mut off) = self.get_pos(self.rd_offset);
 
         // No more than 1024 slices at a time.
@@ -318,15 +320,14 @@ impl Buffer {
     /// Add data to this buffer.
     pub fn extend_from_slice(&mut self, extend: &[u8]) {
 
-        //println!("XXX extend_from_slice {}", extend.len());
+        self.reserve(extend.len());
+
         let mut extend = extend;
         while extend.len() > 0 {
-            if self.capacity - self.wr_offset < extend.len() {
-                self.add_capacity();
-            }
             let (idx, off) = self.get_pos(self.wr_offset);
             let data = &mut self.data[idx][off..];
             let amount = std::cmp::min(data.len(), extend.len());
+            assert!(amount > 0);
             (&mut data[..amount]).copy_from_slice(&extend[..amount]);
             self.wr_offset += amount;
             extend = &extend[amount..];
@@ -335,20 +336,10 @@ impl Buffer {
 
     /// Make sure at least `size` bytes are available for use with `get_ioslices_mut()`.
     pub fn reserve(&mut self, size: usize) {
-        if self.data.len() == 0 {
-            if size > 8192 {
-                self.block_sz = 128 * 1024;
-            } else if size > 1024 {
-                self.block_sz = 8192;
+        if size > 0 {
+            while self.capacity - self.wr_offset < size {
+                self.do_reserve(size);
             }
-        }
-        if self.data.len() == 1 {
-            if self.block_sz < 8192 && self.wr_offset + size > 8192 {
-                self.block_sz = 8192;
-            }
-        }
-        while self.capacity - self.wr_offset < size {
-            self.add_capacity();
         }
     }
 
@@ -376,33 +367,31 @@ impl Buffer {
         self.extend_from_slice(s.as_ref().as_bytes());
     }
 
-    // Add capacity.
-    //
-    // Initial block_size is self.block_sz.
-    //
-    // Anytime we do an add_capacity() after that, block_size is made larger
-    // until it is the maximum size.
-    //
-    // As long as the previous block_size <= 8192, we copy the data from
-    // the old block to the new block and drop the old block.
-    //
-    // With larger block sizes, we actually add blocks.
-    //
-    fn add_capacity(&mut self) {
+    // Add capacity, max one block.
+    #[inline]
+    fn do_reserve(&mut self, resv: usize) {
 
-        let block_sz = if self.data.len() == 0 {
-            self.block_sz
-        } else if self.block_sz < 1024 {
-            1024
-        } else if self.block_sz < 8 * 1024 {
-            8192
+        // do we need more?
+        let avail = self.capacity - self.wr_offset;
+        if avail >= resv {
+            return;
+        }
+
+        // what is the _minimum_ capacity we need.
+        let cap = self.capacity + (resv - avail);
+
+        // based on that, calculate the next block size.
+        let block_sz = if cap < BLOCK_SZ_1 {
+            BLOCK_SZ_1
+        } else if cap < BLOCK_SZ_2 {
+            BLOCK_SZ_2
         } else {
-            128 * 1024
+            BLOCK_SZ_MAX
         };
 
         let mut data = BUFPOOL.get(block_sz);
 
-        if self.data.len() == 1 && self.block_sz <= 8192 {
+        if self.data.len() == 1 && self.data[0].len() <BLOCK_SZ_MAX {
             // extend the first block.
             data[..self.wr_offset].copy_from_slice(&self.data[0][..self.wr_offset]);
             let old_data = std::mem::replace(&mut self.data[0], data);
@@ -411,20 +400,33 @@ impl Buffer {
         } else {
             // add a new block.
             self.data.push(data);
-            self.block_sz = block_sz;
             self.capacity += block_sz;
         }
     }
 
     // get index of data block, and offset.
+    #[inline]
     fn get_pos(&self, offset: usize) -> (usize, usize) {
+        //
+        // Right now, if we have more than 1 element in self.data, the block
+        // size of all of them is the same, that is BLOCK_SZ_MAX. So we
+        // simply use that, since for block #0 it doesn't matter.
+        //
+        let idx = offset / BLOCK_SZ_MAX;
+        let off = offset - (idx * BLOCK_SZ_MAX);
+        (idx, off)
+
+        // HOWEVER, if we have different blocksizes, we might need to
+        // calculate idx and off like this:
+        /*
         let mut cnt = 0;
         let mut idx = 0;
-        while cnt + self.data[idx].len() < offset {
+        while cnt + self.data[idx].len() <= offset {
             cnt += self.data[idx].len();
             idx += 1;
         }
         (idx, offset - cnt)
+        */
     }
 }
 
@@ -442,9 +444,7 @@ impl Buffer {
 //
 macro_rules! do_bytes_mut {
     ($this:expr, $wr_offset:expr) => ({
-        if $wr_offset == $this.capacity {
-            $this.add_capacity();
-        }
+        $this.reserve(4096);
         let (idx, off) = $this.get_pos($wr_offset);
 
         // This is safe, as the memory is actually initialized.
@@ -550,7 +550,7 @@ impl Buf for Buffer {
 
 impl From<&[u8]> for Buffer {
     fn from(src: &[u8]) -> Self {
-        let mut buffer = Buffer::with_block_size(1024);
+        let mut buffer = Buffer::new();
         buffer.extend_from_slice(src);
         buffer
     }
@@ -577,6 +577,20 @@ impl From<String> for Buffer {
 impl From<bytes::Bytes> for Buffer {
     fn from(src: bytes::Bytes) -> Self {
         Buffer::from(&src[..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_buffer() {
+        let mut b = Buffer::new();
+        for i in 0 .. 50000 {
+            b.put_str("xyzzyxyzzy");
+        }
+        assert!(b.len() == 500000);
     }
 }
 
