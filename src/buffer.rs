@@ -3,6 +3,8 @@ use std::io::{self, IoSlice, IoSliceMut as StdIoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::slice;
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use bytes::buf::IoSliceMut;
 use bytes::{Buf, BufMut, BytesMut};
@@ -15,18 +17,59 @@ struct BufPool {
     inner:  Arc<Mutex<BufPoolInner>>,
 }
 
+struct PoolEntry {
+    data:   Vec<u8>,
+    when:   Instant,
+}
+
 struct BufPoolInner {
-    pool: HashMap<usize, VecDeque<Vec<u8>>>,
+    pool: HashMap<usize, VecDeque<PoolEntry>>,
+    now: Instant,
 }
 
 impl BufPool {
     fn new() -> BufPool {
         let inner = BufPoolInner {
-            pool: HashMap::new()
+            pool: HashMap::new(),
+            now: Instant::now(),
         };
+        BufPool::cleaner();
         BufPool {
             inner:  Arc::new(Mutex::new(inner)),
         }
+    }
+
+    fn cleaner() {
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(1000));
+            loop {
+                // Every second, run this loop.
+                thread::sleep(Duration::from_millis(1000));
+                {
+                    // Get current time. Cache it as well.
+                    let now = Instant::now();
+                    let mut inner = BUFPOOL.inner.lock();
+                    inner.now = now;
+
+                    // Walk over the HashMap containing the VecDeque's.
+                    for m in inner.pool.values_mut() {
+
+                        // Walk over the VecDequeue's.
+                        while !m.is_empty() {
+
+                            // Any entries older than 4-5 seconds get dropped.
+                            let age = now.duration_since(m.back().unwrap().when);
+                            if age > Duration::from_millis(4000) {
+                                let v = m.pop_back().unwrap();
+                                trace!("BUFPOOL.cleaner({}): dropped", v.data.len());
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn get(&self, size: usize) -> Vec<u8> {
@@ -36,7 +79,7 @@ impl BufPool {
         if let Some(queue) = pool.get_mut(&size) {
             if let Some(v) = queue.pop_front() {
                 trace!("BUFPOOL.get({}): from pool", size);
-                return v;
+                return v.data;
             }
         }
         drop(inner);
@@ -56,13 +99,18 @@ impl BufPool {
         }
 
         let mut inner = self.inner.lock();
+        let now = inner.now;
         let pool = &mut inner.pool;
 
         if !pool.contains_key(&len) {
             pool.insert(len, VecDeque::new());
         }
         trace!("BUFPOOL.put({}): saved", v.len());
-        pool.get_mut(&len).unwrap().push_front(v);
+        let entry = PoolEntry {
+            data: v,
+            when: now,
+        };
+        pool.get_mut(&len).unwrap().push_front(entry);
     }
 
     fn put_vec(&self, vec: &mut Vec<Vec<u8>>) {
@@ -70,6 +118,7 @@ impl BufPool {
             return;
         }
         let mut inner = self.inner.lock();
+        let now = inner.now;
         let pool = &mut inner.pool;
 
         for v in vec.drain(..) {
@@ -84,7 +133,11 @@ impl BufPool {
                 pool.insert(len, VecDeque::new());
             }
             trace!("BUFPOOL.put({}): saved", v.len());
-            pool.get_mut(&len).unwrap().push_front(v);
+            let entry = PoolEntry {
+                data: v,
+                when: now,
+            };
+            pool.get_mut(&len).unwrap().push_front(entry);
         }
     }
 }
