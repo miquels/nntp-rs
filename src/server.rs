@@ -114,7 +114,11 @@ impl Server {
                 }
 
                 // tokio runtime for this thread alone.
-                let mut runtime = tokio::runtime::Builder::new().basic_scheduler().build().unwrap();
+                let mut runtime = tokio::runtime::Builder::new()
+                    .basic_scheduler()
+                    .enable_all()
+                    .build()
+                    .unwrap();
                 trace!("runtime::basic_scheduler on {:?}", thread::current().id());
 
                 runtime.block_on(async move {
@@ -150,8 +154,8 @@ impl Server {
         Ok(())
     }
 
-    // run the server on the default threadpool executor.
-    pub fn run_threadpool(&mut self, listeners: Vec<TcpListener>) -> io::Result<()> {
+    // run the server on the default threaded executor.
+    pub fn run_threaded(&mut self, listeners: Vec<TcpListener>) -> io::Result<()> {
         let mut runtime = tokio::runtime::Runtime::new()?;
 
         runtime.block_on(async move {
@@ -249,7 +253,11 @@ impl Server {
     {
         let server = self.clone();
         thread::spawn(move || {
-            let mut runtime = tokio::runtime::Builder::new().basic_scheduler().build().unwrap();
+            let mut runtime = tokio::runtime::Builder::new()
+                .basic_scheduler()
+                .enable_all()
+                .build()
+                .unwrap();
             runtime.block_on(async move {
                 tokio::spawn(task);
                 server.wait(notifier, watcher).await;

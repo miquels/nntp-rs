@@ -244,7 +244,7 @@ fn main() -> io::Result<()> {
     // and start server.
     let mut server = server::Server::new(hist, spool);
     match config.server.runtime.as_ref().map(|s| s.as_str()) {
-        None | Some("threadpool") => server.run_threadpool(listeners),
+        None | Some("threaded") => server.run_threaded(listeners),
         Some("multisingle") => server.run_multisingle(listeners),
         Some(e) => {
             eprintln!("nntp-rs: unknown runtime {}", e);
