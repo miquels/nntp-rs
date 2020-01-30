@@ -67,3 +67,6 @@ criterion = "0.3.1"
 name = "clocksources"
 harness = false
 
+[[bench]]
+name = "nntp_rs"
+harness = false
