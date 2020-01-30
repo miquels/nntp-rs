@@ -320,7 +320,7 @@ impl DSpool {
     //
     // If it does turn out to be a bottleneck we'll have to figure out a
     // way to introduce parallelism again.
-    fn do_write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
+    fn do_write(&self, mut headers: Buffer, mut body: Buffer) -> io::Result<ArtLoc> {
         // lock the writer so we have unique access.
         let mut writer = self.writer.lock();
 
@@ -444,8 +444,8 @@ impl DSpool {
 
         // write header, article, trailing \0.
         fh.write_all(&buf)
-            .and_then(|_| fh.write_all(headers))
-            .and_then(|_| fh.write_all(body))
+            .and_then(|_| headers.write_all(&mut fh))
+            .and_then(|_| body.write_all(&mut fh))
             .and_then(|_| fh.write(b"\0"))
             .map_err(|e| IoError::new(e.kind(), format!("writing to {}: {}", writer.name, e)))?;
 
@@ -533,7 +533,7 @@ impl SpoolBackend for DSpool {
         self.do_read(art_loc, part, buffer)
     }
 
-    fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc> {
+    fn write(&self, headers: Buffer, body: Buffer) -> io::Result<ArtLoc> {
         self.do_write(headers, body)
     }
 

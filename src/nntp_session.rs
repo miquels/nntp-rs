@@ -4,8 +4,6 @@ use std::mem;
 use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
-use bytes::BytesMut;
-
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::util::Buffer;
 use crate::commands::{self, Capb, Cmd, CmdParser};
@@ -245,8 +243,8 @@ impl NntpSession {
     }
 
     /// Process NNTP command
-    async fn cmd(&mut self, input: BytesMut) -> io::Result<NntpResult> {
-        let line = match std::str::from_utf8(&input[..]) {
+    async fn cmd(&mut self, input: Buffer) -> io::Result<NntpResult> {
+        let line = match input.as_utf8_str() {
             Ok(l) => {
                 if !l.ends_with("\r\n") {
                     // allow QUIT even with improper line-ending.
@@ -548,7 +546,7 @@ impl NntpSession {
             },
             Ok(_) => {
                 // store the article.
-                let mut buffer = BytesMut::new();
+                let mut buffer = Buffer::new();
                 headers.header_bytes(&mut buffer);
                 let artloc = match spool.write(spool_no, buffer, body).await {
                     Ok(loc) => loc,
@@ -585,7 +583,7 @@ impl NntpSession {
 
     // parse the received article headers, then see if we want it.
     // Note: modifies/updates the Path: header.
-    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers, BytesMut, Vec<u32>)> {
+    fn process_headers(&self, art: &mut Article) -> ArtResult<(Headers, Buffer, Vec<u32>)> {
         // Check that the article has a minimum size. Sometimes a peer is offering
         // you empty articles because they no longer exist on their spool.
         if art.data.len() < 80 {
@@ -599,7 +597,7 @@ impl NntpSession {
         }
 
         let mut parser = HeadersParser::new();
-        let buffer = mem::replace(&mut art.data, BytesMut::new());
+        let buffer = mem::replace(&mut art.data, Buffer::new());
         match parser.parse(&buffer, false, true) {
             None => {
                 error!("failure parsing header, None returned");

@@ -6,9 +6,9 @@ use std::time::Duration;
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
 use crate::server::Notification;
-use crate::util::HashFeed;
+use crate::util::{Buffer, HashFeed};
 
-use bytes::{Bytes, BytesMut, Buf};
+use bytes::Buf;
 use futures::future::poll_fn;
 use memchr::memchr;
 use smallvec::SmallVec;
@@ -46,15 +46,15 @@ enum CodecMode {
 /// Possible return values from read_line()
 pub enum NntpLine {
     Eof,
-    Line(BytesMut),
+    Line(Buffer),
     Notification(Notification),
 }
 
 // Internal return values from poll_read().
 enum NntpInput {
     Eof,
-    Line(BytesMut),
-    Block(BytesMut),
+    Line(Buffer),
+    Block(Buffer),
     Article(Article),
     Notification(Notification),
 }
@@ -102,7 +102,7 @@ impl NntpCodecBuilder {
         NntpCodec {
             socket:          self.socket,
             watcher:         self.watcher,
-            rd:              BytesMut::new(),
+            rd:              Buffer::new(),
             rd_pos:          0,
             rd_overflow:     false,
             rd_reserve_size: 0,
@@ -111,7 +111,7 @@ impl NntpCodecBuilder {
             rd_mode:         CodecMode::ReadLine,
             rd_tmout:        self.rd_tmout,
             rd_timer:        None,
-            wr:              Bytes::new(),
+            wr:              Buffer::new(),
             wr_tmout:        self.wr_tmout,
             wr_timer:        None,
             arttype_scanner: ArtTypeScanner::new(),
@@ -126,7 +126,7 @@ impl NntpCodecBuilder {
 pub struct NntpCodec {
     socket:          TcpStream,
     watcher:         Option<watch::Receiver<Notification>>,
-    rd:              BytesMut,
+    rd:              Buffer,
     rd_pos:          usize,
     rd_overflow:     bool,
     rd_state:        State,
@@ -135,7 +135,7 @@ pub struct NntpCodec {
     rd_tmout:        Option<Duration>,
     rd_timer:        Option<Delay>,
     rd_mode:         CodecMode,
-    wr:              Bytes,
+    wr:              Buffer,
     wr_tmout:        Option<Duration>,
     wr_timer:        Option<Delay>,
     arttype_scanner: ArtTypeScanner,
@@ -303,7 +303,7 @@ impl NntpCodec {
     }
 
     // read_article is a small wrapper around read_block that returns
-    // an Article struct with the BytesMut and some article metadata.
+    // an Article struct with the Buffer and some article metadata.
     fn poll_read_article(&mut self) -> Poll<io::Result<NntpInput>> {
         match self.poll_read_block(true) {
             Poll::Ready(Ok(NntpInput::Block(buf))) => {
@@ -546,7 +546,7 @@ impl NntpCodec {
     }
 
     /// Read a block.
-    pub async fn read_block(&mut self) -> io::Result<BytesMut> {
+    pub async fn read_block(&mut self) -> io::Result<Buffer> {
         self.rd_mode = CodecMode::ReadBlock;
         self.reset_rd_timer();
         match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
@@ -568,8 +568,8 @@ impl NntpCodec {
         }
     }
 
-    /// Write a buffer that can be turned into a `Bytes` struct.
-    pub async fn write(&mut self, buf: impl Into<Bytes>) -> io::Result<()> {
+    /// Write a buffer that can be turned into a `Buffer` struct.
+    pub async fn write(&mut self, buf: impl Into<Buffer>) -> io::Result<()> {
         self.reset_wr_timer();
         let mut buf = buf.into();
         poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await

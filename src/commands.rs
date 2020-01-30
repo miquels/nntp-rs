@@ -3,9 +3,11 @@
 use std::collections::{HashMap, HashSet};
 use std::str;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::BufMut;
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+use crate::util::Buffer;
 
 /// Capabilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +142,7 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
     unsafe { str::from_utf8_unchecked(&buf[..idx]) }
 }
 
-fn put_str(bytes_mut: &mut BytesMut, s: impl AsRef<str>) {
+fn put_str(bytes_mut: &mut Buffer, s: impl AsRef<str>) {
     bytes_mut.put(s.as_ref().as_bytes())
 }
 
@@ -235,8 +237,8 @@ impl CmdParser {
         Ok((cmd.cmd, args))
     }
 
-    pub fn help(&self) -> Bytes {
-        let mut out = BytesMut::with_capacity(4096);
+    pub fn help(&self) -> Buffer {
+        let mut out = Buffer::new();
         put_str(&mut out, "100 Legal commands\r\n");
 
         let mut cmds: Vec<&CmdDef> = self.cmd_map.values().collect();
@@ -261,11 +263,11 @@ impl CmdParser {
             put_str(&mut out, format!("  {} {}\r\n", cmd.name, s));
         }
         put_str(&mut out, ".\r\n");
-        out.freeze()
+        out
     }
 
-    pub fn capabilities(&self) -> Bytes {
-        let mut out = BytesMut::with_capacity(1024);
+    pub fn capabilities(&self) -> Buffer {
+        let mut out = Buffer::new();
         put_str(&mut out, "101 Capability list:\r\n");
         put_str(&mut out, "VERSION: 2\r\n");
         put_str(&mut out, "IMPLEMENTATION: NNTP-RS 0.1\r\n");
@@ -324,7 +326,7 @@ impl CmdParser {
             put_str(&mut out, "STREAMING\r\n");
         }
         put_str(&mut out, ".\r\n");
-        out.freeze()
+        out
     }
 }
 

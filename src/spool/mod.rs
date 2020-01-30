@@ -9,8 +9,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
-
 mod diablo;
 
 use crate::article::Article;
@@ -42,7 +40,7 @@ pub trait SpoolBackend: Send + Sync {
     fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer>;
 
     /// Write an article to the spool.
-    fn write(&self, headers: &[u8], body: &[u8]) -> io::Result<ArtLoc>;
+    fn write(&self, headers: Buffer, body: Buffer) -> io::Result<ArtLoc>;
 
     /// Get the maximum size of this spool.
     fn get_maxsize(&self) -> u64;
@@ -512,14 +510,14 @@ impl Spool {
     /// NOTE: we stay as close to wireformat as possible. So
     /// - head_only: body is empty.
     /// - !headonly: body includes hdr/body seperator, ends in .\r\n
-    pub async fn write(&self, spoolno: u8, headers: BytesMut, body: BytesMut) -> Result<ArtLoc, io::Error> {
+    pub async fn write(&self, spoolno: u8, headers: Buffer, body: Buffer) -> Result<ArtLoc, io::Error> {
         let inner = self.inner.clone();
         self.pool
             .spawn_fn(move || {
                 use std::thread;
                 trace!("spool writer on thread {:?}", thread::current().id());
                 let spool = &inner.spool.get(&spoolno).unwrap().backend;
-                spool.write(&headers[..], &body[..])
+                spool.write(headers, body)
             })
             .await
     }

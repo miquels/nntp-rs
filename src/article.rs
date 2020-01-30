@@ -5,8 +5,8 @@ use std::str;
 
 use crate::arttype::ArtType;
 use crate::errors::*;
+use crate::util::Buffer;
 
-use bytes::BytesMut;
 use memchr::memchr;
 use once_cell::sync::Lazy;
 
@@ -85,8 +85,8 @@ impl HeaderPos {
 /// Headers parser.
 #[derive(Default, Debug)]
 pub struct HeadersParser {
-    buf:        BytesMut,
-    modbuf:     BytesMut,
+    buf:        Buffer,
+    modbuf:     Buffer,
     hpos:       Vec<HeaderPos>,
     hlen:       usize,
     well_known: [Option<u32>; HeaderName::Other as usize],
@@ -246,11 +246,11 @@ impl HeadersParser {
         Some(Ok(pos as u64))
     }
 
-    /// This method consumes self and the BytesMut with the header data,
+    /// This method consumes self and the Buffer with the header data,
     /// and returns a Header and the remaining data (e.g. the body).
     ///
     /// Note that the body starts with the empty line seperating header and body.
-    pub fn into_headers(mut self, buffer: BytesMut) -> (Headers, BytesMut) {
+    pub fn into_headers(mut self, buffer: Buffer) -> (Headers, Buffer) {
         if !self.ok {
             panic!("HeadersParser::parse() returned error, you can't call into_headers()!");
         }
@@ -366,7 +366,7 @@ impl Headers {
     }
 
     // Count, and perhaps write out the header into the supplied buffer.
-    fn do_header_bytes(&self, buffer: &mut BytesMut, doit: bool) -> usize {
+    fn do_header_bytes(&self, buffer: &mut Buffer, doit: bool) -> usize {
         let mut size = 0;
         for h in &self.0.hpos {
             size += h.header.end - h.header.start;
@@ -395,8 +395,8 @@ impl Headers {
             let len = buffer.len();
             if buffer[len - 2] != b'\r' && buffer[len - 1] == b'\n' {
                 if doit {
-                    buffer[len - 1] = b'\r';
-                    buffer.extend_from_slice(&b"\n"[..]);
+                    buffer.truncate(len - 1);
+                    buffer.put_str("\r\n");
                 }
                 size += 1;
             }
@@ -405,13 +405,13 @@ impl Headers {
     }
 
     /// Write out the header into the supplied buffer.
-    pub fn header_bytes(&self, buffer: &mut BytesMut) {
+    pub fn header_bytes(&self, buffer: &mut Buffer) {
         self.do_header_bytes(buffer, true);
     }
 
     /// Length of the header section.
     pub fn len(&self) -> usize {
-        let mut bm = BytesMut::new();
+        let mut bm = Buffer::new();
         self.do_header_bytes(&mut bm, false)
     }
 
@@ -473,7 +473,7 @@ impl Headers {
 /// Article is a thin wrapper around a bytesmut
 pub struct Article {
     pub arttype:  ArtType,
-    pub data:     BytesMut,
+    pub data:     Buffer,
     pub msgid:    String,
     pub lines:    u32,
     pub len:      usize,
@@ -486,7 +486,7 @@ impl Clone for Article {
     fn clone(&self) -> Article {
         Article {
             arttype:  self.arttype,
-            data:     BytesMut::new(),
+            data:     Buffer::new(),
             msgid:    self.msgid.clone(),
             lines:    self.lines,
             len:      self.len,

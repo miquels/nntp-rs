@@ -363,11 +363,10 @@ fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
 
         // find it
         let buffer = util::Buffer::new();
-        let buf = spool.read(loc, part, buffer).await.map_err(|e| {
+        let mut buf = spool.read(loc, part, buffer).await.map_err(|e| {
             eprintln!("spool_read {}: {}", opts.msgid, e);
             e
         })?;
-        let mut buf = buf.to_bytes_mut();
 
         // Output article
         use std::io::Write;
