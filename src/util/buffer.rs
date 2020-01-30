@@ -1,550 +1,267 @@
-use std::collections::{HashMap, VecDeque};
-use std::io::{self, IoSlice, IoSliceMut as StdIoSliceMut, Read, Write};
-use std::mem::MaybeUninit;
+//! Buffer implementation like Bytes / BytesMut.
+//!
+//! It is way simpler and contains way, way less unsafe code.
+//
+// The unsafe code is needed for efficiency reasons. You do not
+// want to zero-initialize buffers every time you use them.
+//
+// I have experimented with a non-contiguous buffer approach, with
+// a pool of continously re-used blocks that are pre-initialized.
+// That does away with a lot of unsafe code, since the blocks only have to
+// be initialized once. However it turned out that too much code
+// in the server still assumes it can Deref the Buffer as a flat &[u8].
+//
+// The old code is at
+// https://github.com/miquels/nntp-rs/blob/8a70816767e62c62d2462671f76a8e0efa4552eb/src/util/buffer.rs
+//
+use std::default::Default;
+use std::fmt;
+use std::io::{self, Read, Write};
+use std::mem;
+use std::ops::{Deref, DerefMut};
 use std::slice;
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
 
-use bytes::buf::IoSliceMut;
-use bytes::{Buf, BufMut, BytesMut};
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use bytes::{Buf, BufMut};
 
-const BLOCK_SZ_1: usize = 1024;
-const BLOCK_SZ_2: usize = 8192;
-const BLOCK_SZ_MAX: usize = 128 * 1024;
-
-static BUFPOOL: Lazy<BufPool> = Lazy::new(|| BufPool::new());
-
-struct BufPool {
-    inner:  Arc<Mutex<BufPoolInner>>,
-}
-
-struct PoolEntry {
-    data:   Vec<u8>,
-    when:   Instant,
-}
-
-struct BufPoolInner {
-    pool: HashMap<usize, VecDeque<PoolEntry>>,
-    now: Instant,
-}
-
-impl BufPool {
-    fn new() -> BufPool {
-        let inner = BufPoolInner {
-            pool: HashMap::new(),
-            now: Instant::now(),
-        };
-        BufPool::cleaner();
-        BufPool {
-            inner:  Arc::new(Mutex::new(inner)),
-        }
-    }
-
-    fn cleaner() {
-        thread::spawn(|| {
-            thread::sleep(Duration::from_millis(1000));
-            loop {
-                // Every second, run this loop.
-                thread::sleep(Duration::from_millis(1000));
-                {
-                    // Get current time. Cache it as well.
-                    let now = Instant::now();
-                    let mut inner = BUFPOOL.inner.lock();
-                    inner.now = now;
-
-                    // Walk over the HashMap containing the VecDeque's.
-                    for m in inner.pool.values_mut() {
-
-                        // Walk over the VecDequeue's.
-                        while !m.is_empty() {
-
-                            // Any entries older than 4-5 seconds get dropped.
-                            let age = now.duration_since(m.back().unwrap().when);
-                            if age > Duration::from_millis(4000) {
-                                let v = m.pop_back().unwrap();
-                                trace!("BUFPOOL.cleaner({}): dropped", v.data.len());
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    fn get(&self, size: usize) -> Vec<u8> {
-        let mut inner = self.inner.lock();
-        let pool = &mut inner.pool;
-
-        if let Some(queue) = pool.get_mut(&size) {
-            if let Some(v) = queue.pop_front() {
-                trace!("BUFPOOL.get({}): from pool", size);
-                return v.data;
-            }
-        }
-        drop(inner);
-
-        trace!("BUFPOOL.get({}): allocate", size);
-        let mut v = Vec::with_capacity(size);
-        v.resize(size, 0);
-        v
-    }
-
-    fn put(&self, v: Vec<u8>) {
-        let len = v.len();
-        if len != v.capacity() ||
-            (len != 128 && len != 256 && len != 512 && len % 1024 != 0) {
-                trace!("BUFPOOL.put({}): dropped", v.len());
-                return;
-        }
-
-        let mut inner = self.inner.lock();
-        let now = inner.now;
-        let pool = &mut inner.pool;
-
-        if !pool.contains_key(&len) {
-            pool.insert(len, VecDeque::new());
-        }
-        trace!("BUFPOOL.put({}): saved", v.len());
-        let entry = PoolEntry {
-            data: v,
-            when: now,
-        };
-        pool.get_mut(&len).unwrap().push_front(entry);
-    }
-
-    fn put_vec(&self, vec: &mut Vec<Vec<u8>>) {
-        if vec.len() == 0 {
-            return;
-        }
-        let mut inner = self.inner.lock();
-        let now = inner.now;
-        let pool = &mut inner.pool;
-
-        for v in vec.drain(..) {
-            let len = v.len();
-            if len != v.capacity() ||
-                (len != 128 && len != 256 && len != 512 && len % 1024 != 0) {
-                    trace!("BUFPOOL.put({}): dropped", v.len());
-                    continue;
-            }
-
-            if !pool.contains_key(&len) {
-                pool.insert(len, VecDeque::new());
-            }
-            trace!("BUFPOOL.put({}): saved", v.len());
-            let entry = PoolEntry {
-                data: v,
-                when: now,
-            };
-            pool.get_mut(&len).unwrap().push_front(entry);
-        }
-    }
-}
-
-/// A `Buf` and `BufMut` with non-contiguous backing storage.
+/// A buffer structure, like Bytes/BytesMut.
 ///
-/// Backing storage is allocated in fixed-size blocks. This prevents reallocating
-/// when the buffer grows.
-///
-/// We keep a pool of unused blocks around, so that we don't have to initialize
-/// every allocation. If the whole read-into-uninitialized memory situation is
-/// solved we might want to revisit this, as the system allocator is probably
-/// a very good pool allocator itself.
-///
+/// It is not much more than a wrapper around Vec.
 pub struct Buffer {
-    rd_offset:  usize,
-    wr_offset:  usize,
-    capacity:   usize,
-    data:       Vec<Vec<u8>>,
-}
-
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        BUFPOOL.put_vec(&mut self.data);
-    }
+    start_offset:   usize,
+    rd_pos:  usize,
+    data:       Vec<u8>,
 }
 
 impl Buffer {
     /// Create new Buffer.
     pub fn new() -> Buffer {
         Buffer {
-            rd_offset:  0,
-            wr_offset:  0,
-            capacity:   0,
+            start_offset: 0,
+            rd_pos:  0,
             data:       Vec::new(),
         }
     }
 
     /// Clear this buffer.
     pub fn clear(&mut self) {
-        self.rd_offset = 0;
-        self.wr_offset = 0;
-        self.capacity = 0;
-        BUFPOOL.put_vec(&mut self.data);
+        self.start_offset = 0;
+        self.rd_pos = 0;
+        self.data.truncate(0);
+    }
+
+    /// Truncate this buffer.
+    pub fn truncate(&mut self, size: usize) {
+        if size == 0 {
+            self.clear();
+            return;
+        }
+        if size > self.len() {
+            panic!("Buffer::truncate(size): size > self.len()");
+        }
+        if self.rd_pos > size {
+            self.rd_pos = size;
+        }
+        self.data.truncate(size + self.start_offset);
+    }
+
+    /// Split this Buffer in two parts.
+    ///
+    /// The first part remains in this buffer. The second part is
+    /// returned as a new Buffer.
+    pub fn split_off(&mut self, at: usize) -> Buffer {
+
+        if at > self.len() {
+            panic!("Buffer:split_off(size): size > self.len()");
+        }
+        if self.rd_pos > at {
+            self.rd_pos = at;
+        }
+        let mut bnew = Buffer::new();
+
+        // If "header" < 32K and "body" >= 32K, use a start_offset
+        // for "body" and copy "header".
+        if self.start_offset == 0 && at < 32000 && self.len() - at >= 32000 {
+            mem::swap(&mut self.data, &mut bnew.data);
+            bnew.start_offset = at;
+            self.extend_from_slice(&bnew[0..at]);
+            return bnew;
+        }
+
+        bnew.data = self.data.split_off(at + self.start_offset);
+
+        bnew
+    }
+
+    /// Split this Buffer in two parts.
+    ///
+    /// The second part remains in this buffer. The first part is
+    /// returned to the caller.
+    pub fn split_to(&mut self, size: usize) -> Buffer {
+
+        // move self.data to a new Buffer.
+        let mut nbuf = Buffer::new();
+        let start_offset = self.start_offset;
+        mem::swap(&mut self.data, &mut nbuf.data);
+
+        // now copy the end of the data back to self.data.
+        self.extend_from_slice(&nbuf.data[self.start_offset+size..]);
+        self.start_offset = 0;
+
+        // and truncate the new Buffer to the right length.
+        nbuf.start_offset = start_offset;
+        nbuf.data.truncate(start_offset + size);
+
+        nbuf
     }
 
     /// total length of all data in this Buffer.
+    #[inline]
     pub fn len(&self) -> usize {
-        self.wr_offset
-    }
-
-    /// Get a Vec of IoSlices to use with `read_vectored()`.
-    ///
-    /// If len == 0, we guarantee that the total amount of memory is
-    /// at least 4K, and maximum 128K, unless you called `reserve` first.
-    ///
-    /// If len > 0, the total amount of memory is `len` exact.
-    ///
-    /// More than 128M is not possible. Each IoSlice is max. 128K,
-    /// and the number of IOSlices is max. 1024.
-    pub fn get_ioslices_mut(&mut self, len: usize) -> Vec<StdIoSliceMut<'_>> {
-
-        // make sure we have enough capacity.
-        let mut len = len;
-        if len == 0 {
-            // if len == 0, just reserve 4K, then get the actual amount
-            // available (which is probably a lot more).
-            self.reserve(4096);
-            len = self.capacity - self.wr_offset;
-        } else {
-            // if len > 0 we want the exact amount.
-            self.reserve(len);
-        }
-
-        // get index and offset for start and end.
-        let (mut wr_idx, mut wr_off) = self.get_pos(self.wr_offset);
-        let (end_idx, end_off) = self.get_pos(self.wr_offset + len);
-
-        // No more than 1024 slices at a time.
-        let num = std::cmp::min(self.data.len() - wr_idx, 1024);
-        let max = wr_idx + num;
-        let mut slices = Vec::with_capacity(num);
-
-        // mutable reference to all entries that we're splitting up later.
-        let mut data_ref = &mut self.data[wr_idx..];
-
-        while wr_idx < max && wr_idx <= end_idx {
-
-            // get a mutable reference to the next entry in the Vec.
-            let (head, tail) = data_ref.split_first_mut().unwrap();
-            data_ref = tail;
-
-            // the last entry might have a shorter length.
-            let data = if wr_idx == end_idx {
-                &mut head[wr_off..end_off]
-            } else {
-                &mut head[wr_off..]
-            };
-
-            if data.len() > 0 {
-                slices.push(StdIoSliceMut::new(data));
-            }
-            wr_idx += 1;
-            wr_off = 0;
-        }
-        slices
-    }
-
-    /// Get a Vec of IoSlices to use with `write_vectored()`.
-    pub fn get_ioslices(&self) -> Vec<IoSlice> {
-
-        let (mut idx, mut off) = self.get_pos(self.rd_offset);
-
-        // No more than 1024 slices at a time.
-        let num = std::cmp::min(self.data.len() - idx, 1024);
-        let max = idx + num;
-        let mut slices = Vec::with_capacity(num);
-
-        while idx < max {
-            let data = &self.data[idx][off..];
-            slices.push(IoSlice::new(data));
-            idx += 1;
-            off = 0;
-        }
-        slices
+        self.data.len() - self.start_offset
     }
 
     /// Write all data in this `Buffer` to a file.
     pub fn write_all(&mut self, mut file: impl Write) -> io::Result<()> {
-        while self.remaining() > 0 {
-            let mut slices = self.get_ioslices();
-            let done = file.write_vectored(&mut slices)?;
-            if done == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
-            }
-            self.advance(done);
-        }
-        self.clear();
+        file.write_all(self.bytes())?;
+        self.rd_pos = self.len();
         Ok(())
     }
 
     /// Read an exact number of bytes.
     ///
-    /// The memory needed is allocated up front. More memory might be allocated
-    /// than what is needed, since we allocate in blocks.
+    /// NOTE: this function lets `reader` read into potentially
+    /// uninitialized memory. So the reader that is passed in to this
+    /// function must:
+    ///
+    /// - never read from the buffer past to it
+    /// - return the correct number of bytes read (and thus, initialized)
+    ///
     pub fn read_exact(&mut self, mut reader: impl Read, len: usize) -> io::Result<()> {
-        let mut done = 0;
-        loop {
-            let mut slices = self.get_ioslices_mut(len - done);
-            let sz = reader.read_vectored(&mut slices)?;
-            if sz == 0 {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-            self.advance_mut_safe(sz);
-            done += sz;
-            if done == len {
-                break;
+        self.data.reserve(len);
+        let prev_len = self.data.len();
+        unsafe { self.data.set_len(prev_len + len) };
+        match reader.read_exact(&mut self.data[prev_len..]) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                unsafe { self.data.set_len(prev_len) };
+                Err(e)
             }
         }
-        Ok(())
     }
 
     /// Read until end-of-file.
+    ///
+    /// See the remarks on `read_exact` for unsafety.
+    ///
     pub fn read_all(&mut self, mut reader: impl Read) -> io::Result<()> {
+        let mut end_data = self.data.len();
         loop {
-            let mut slices = self.get_ioslices_mut(0);
-            let sz = reader.read_vectored(&mut slices)?;
-            if sz == 0 {
-                break;
+            self.data.reserve(4096);
+            unsafe { self.data.set_len(self.data.capacity()) };
+            match reader.read(&mut self.data[end_data..]) {
+                Ok(n) => {
+                    if n == 0 {
+                        unsafe { self.data.set_len(end_data) };
+                        break;
+                    }
+                    end_data += n;
+                },
+                Err(e) => {
+                    unsafe { self.data.set_len(end_data) };
+                    return Err(e);
+                },
             }
-            self.advance_mut_safe(sz);
         }
         Ok(())
     }
 
     /// Add data to this buffer.
+    #[inline]
     pub fn extend_from_slice(&mut self, extend: &[u8]) {
-
-        self.reserve(extend.len());
-
-        let mut extend = extend;
-        while extend.len() > 0 {
-            let (idx, off) = self.get_pos(self.wr_offset);
-            let data = &mut self.data[idx][off..];
-            let amount = std::cmp::min(data.len(), extend.len());
-            assert!(amount > 0);
-            (&mut data[..amount]).copy_from_slice(&extend[..amount]);
-            self.wr_offset += amount;
-            extend = &extend[amount..];
-        }
+        self.data.extend_from_slice(extend);
     }
 
-    /// Make sure at least `size` bytes are available for use with `get_ioslices_mut()`.
+    /// Make sure at least `size` bytes are available.
+    #[inline]
     pub fn reserve(&mut self, size: usize) {
-        if size > 0 {
-            while self.capacity - self.wr_offset < size {
-                self.do_reserve(size);
-            }
-        }
-    }
-
-    /// Copy this `Buffer` to a `BytesMut`.
-    pub fn to_bytes_mut(&self) -> BytesMut {
-        let mut buf = BytesMut::new();
-        for idx in 0 .. self.data.len() {
-            buf.extend_from_slice(&self.data[idx][..]);
-        }
-        buf
-    }
-
-    /// Like `advance_mut()`, but no need to use `unsafe`.
-    pub fn advance_mut_safe(&mut self, cnt: usize) {
-        // If we have less remaining bytes than the amount we are being
-        // asked to advance the write cursor, that must be a bug.
-        if cnt > self.capacity - self.wr_offset {
-            panic!("advance_mut: write cursor would be advanced beyond buffer");
-        }
-        self.wr_offset += cnt;
+        self.data.reserve(size);
     }
 
     /// Add a string to the buffer.
+    #[inline]
     pub fn put_str(&mut self, s: impl AsRef<str>) {
         self.extend_from_slice(s.as_ref().as_bytes());
     }
 
-    // Add capacity, max one block.
+    /// Return a reference to this Buffer as an UTF-8 string.
     #[inline]
-    fn do_reserve(&mut self, resv: usize) {
-
-        // do we need more?
-        let avail = self.capacity - self.wr_offset;
-        if avail >= resv {
-            return;
-        }
-
-        // what is the _minimum_ capacity we need.
-        let cap = self.capacity + (resv - avail);
-
-        // based on that, calculate the next block size.
-        let block_sz = if cap < BLOCK_SZ_1 {
-            BLOCK_SZ_1
-        } else if cap < BLOCK_SZ_2 {
-            BLOCK_SZ_2
-        } else {
-            BLOCK_SZ_MAX
-        };
-
-        let mut data = BUFPOOL.get(block_sz);
-
-        if self.data.len() == 1 && self.data[0].len() <BLOCK_SZ_MAX {
-            // extend the first block.
-            data[..self.wr_offset].copy_from_slice(&self.data[0][..self.wr_offset]);
-            let old_data = std::mem::replace(&mut self.data[0], data);
-            BUFPOOL.put(old_data);
-            self.capacity = block_sz;
-        } else {
-            // add a new block.
-            self.data.push(data);
-            self.capacity += block_sz;
-        }
+    pub fn as_utf8_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(self.bytes())
     }
-
-    // get index of data block, and offset.
-    #[inline]
-    fn get_pos(&self, offset: usize) -> (usize, usize) {
-        //
-        // Right now, if we have more than 1 element in self.data, the block
-        // size of all of them is the same, that is BLOCK_SZ_MAX. So we
-        // simply use that, since for block #0 it doesn't matter.
-        //
-        let idx = offset / BLOCK_SZ_MAX;
-        let off = offset - (idx * BLOCK_SZ_MAX);
-        (idx, off)
-
-        // HOWEVER, if we have different blocksizes, we might need to
-        // calculate idx and off like this:
-        /*
-        let mut cnt = 0;
-        let mut idx = 0;
-        while cnt + self.data[idx].len() <= offset {
-            cnt += self.data[idx].len();
-            idx += 1;
-        }
-        (idx, offset - cnt)
-        */
-    }
-}
-
-// Can't put this in the impl, because the compiler then complains:
-//
-// 91 |     fn bytes_vectored_mut<'a>(&'a mut self, dst: &mut [IoSliceMut<'a>]) -> usize {
-//    |                           -- lifetime `'a` defined here ...
-// 99 |                 let data = self.do_bytes_mut(wr_offset);
-//    |                            ^^^^------------------------
-//    |                            |
-//    |                            mutable borrow starts here in previous iteration of loop
-//    |                            argument requires that `*self` is borrowed for `'a`
-//
-// So to be DRY, define it as a macro.
-//
-macro_rules! do_bytes_mut {
-    ($this:expr, $wr_offset:expr) => ({
-        $this.reserve(4096);
-        let (idx, off) = $this.get_pos($wr_offset);
-
-        // This is safe, as the memory is actually initialized.
-        let block_sz = $this.data[idx].len();
-        let ptr = $this.data[idx].as_mut_ptr() as *mut MaybeUninit<u8>;
-        unsafe {
-            &mut slice::from_raw_parts_mut(ptr, block_sz)[off..]
-        }
-    })
 }
 
 impl BufMut for Buffer {
-
-    fn bytes_mut(&mut self) -> &mut [MaybeUninit<u8>] {
-        do_bytes_mut!(self, self.wr_offset)
-    }
-
-    fn bytes_vectored_mut<'a>(&'a mut self, dst: &mut [IoSliceMut<'a>]) -> usize {
-
-        let mut wr_offset = self.wr_offset;
-        let mut dst_idx = 0;
-        let cap = self.capacity;
-
-        while dst_idx < dst.len() && wr_offset < cap {
-            let data = do_bytes_mut!(self, wr_offset);
-            wr_offset += data.len();
-            dst[dst_idx] = IoSliceMut::from(data);
-            dst_idx += 1;
-        }
-
-        dst_idx
-    }
-
-    // The API says this must be "unsafe", but it's actually safe as we
-    // don't have any uninitialized memory.
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.advance_mut_safe(cnt)
+        if self.data.len() + cnt > self.data.capacity() {
+            panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
+        }
+        self.data.set_len(self.data.len() + cnt);
     }
 
-    // basically infinite data.
+    fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
+        let len = self.data.len();
+        let mut_len = self.data.capacity() - len;
+        unsafe {
+            self.data.set_len(self.data.capacity());
+            let mut_data = &mut self.data[len..];
+            let ptr = mut_data.as_mut_ptr() as *mut mem::MaybeUninit<u8>;
+            let r = &mut slice::from_raw_parts_mut(ptr, mut_len)[..];
+            self.data.set_len(len);
+            r
+        }
+    }
+
     fn remaining_mut(&self) -> usize {
-        std::usize::MAX - self.wr_offset
+        self.data.capacity() - self.data.len()
     }
 }
 
 impl Buf for Buffer {
     fn advance(&mut self, cnt: usize) {
-
         // advance buffer read pointer.
-        self.rd_offset += cnt;
-        if self.rd_offset > self.wr_offset {
+        self.rd_pos += cnt;
+        if self.rd_pos > self.len() {
             // "It is recommended for implementations of advance to
             // panic if cnt > self.remaining()"
             panic!("read position advanced beyond end of buffer");
         }
-
-        // drop buffers we do not need anymore. XXX TODO
-        // let (old_idx, _, _) = self.get_pos(rd_offset - cnt);
-        // let (cur_idx, _, _) = self.get_pos(rd_offset);
-        // if cur_idx > old_idx {
-        //     for idx in old_idx .. cur_idx - 1 {
-        //         let v = std::mem::replace(&mut self.data[idx], Vec::new());
-        //         BUFPOOL.put(v);
-        //     }
-        // }
     }
 
+    #[inline]
     fn bytes(&self) -> &[u8] {
-        if self.rd_offset >= self.wr_offset {
-            return &[];
+        if self.rd_pos >= self.len() {
+            return &[][..];
         }
-
-        let (rd_idx, rd_off) = self.get_pos(self.rd_offset);
-        let (wr_idx, wr_off) = self.get_pos(self.wr_offset);
-
-        if rd_idx == wr_idx {
-            &self.data[rd_idx][rd_off..wr_off]
-        } else {
-            &self.data[rd_idx][rd_off..]
-        }
+        &self.data[self.start_offset + self.rd_pos..]
     }
 
-    fn bytes_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
-
-        let mut rd_offset = self.rd_offset;
-        let mut dst_idx = 0;
-
-        while dst_idx < dst.len() && rd_offset < self.wr_offset {
-            let (idx, off) = self.get_pos(rd_offset);
-            let data = &self.data[idx][off..];
-            dst[dst_idx] = IoSlice::new(data);
-            rd_offset += data.len();
-            dst_idx += 1;
-        }
-
-        dst_idx
-    }
-
+    #[inline]
     fn remaining(&self) -> usize {
-        self.wr_offset - self.rd_offset
+        self.len() - self.rd_pos
+    }
+}
+
+impl Deref for Buffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+impl DerefMut for Buffer {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.data[self.start_offset + self.rd_pos..]
     }
 }
 
@@ -580,6 +297,26 @@ impl From<bytes::Bytes> for Buffer {
     }
 }
 
+impl Default for Buffer {
+    fn default() -> Self {
+        Buffer::new()
+    }
+}
+
+impl fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let cap = self.data.capacity();
+        let len = self.len();
+        f.debug_struct("Buffer")
+            .field("start_offset", &self.start_offset)
+            .field("rd_pos", &self.rd_pos)
+            .field("len", &len)
+            .field("capacity", &cap)
+            .field("data", &"[data]")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,10 +324,36 @@ mod tests {
     #[test]
     fn test_buffer() {
         let mut b = Buffer::new();
+        b.reserve(4096);
+        b.start_offset = 23;
+        b.data.resize(b.start_offset, 0);
         for i in 0 .. 50000 {
             b.put_str("xyzzyxyzzy");
         }
         assert!(b.len() == 500000);
+        assert!(&b[1000..1010] == &b"xyzzyxyzzy"[..]);
+    }
+
+    #[test]
+    fn test_split() {
+        let mut b = Buffer::new();
+        for i in 0 .. 5000 {
+            b.put_str("xyzzyxyzzy");
+        }
+        assert!(b.len() == 50000);
+        let mut n = b.split_off(5000);
+        assert!(b.len() == 5000);
+        assert!(n.len() == 45000);
+        assert!(&b[1000..1010] == &b"xyzzyxyzzy"[..]);
+        assert!(&n[1000..1010] == &b"xyzzyxyzzy"[..]);
+
+        //n.start_offset = 10;
+        //n.put_str("xyzzyxyzzy");
+        let x = n.split_to(20000);
+        assert!(n.len() == 25000);
+        assert!(x.len() == 20000);
+        assert!(&n[1000..1010] == &b"xyzzyxyzzy"[..]);
+        assert!(&x[1000..1010] == &b"xyzzyxyzzy"[..]);
     }
 }
 
