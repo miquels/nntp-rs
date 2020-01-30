@@ -12,8 +12,17 @@ path = "src/lib.rs"
 name = "nntp-rs-server"
 path = "src/main.rs"
 
+# Include debug info in release builds.
 [profile.release]
 debug = true
+
+# Build dependencies in optimized mode, even for debug builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Build dev-dependencies in non-optimized mode, even for release builds.
+[profile.dev.build-override]
+opt-level = 0
 
 [dependencies]
 arc-swap = "0.4.4"
