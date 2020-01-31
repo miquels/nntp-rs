@@ -17,6 +17,7 @@ pub mod hostcache;
 pub mod logger;
 pub mod newsfeeds;
 pub mod nntp_codec;
+pub mod nntp_feeder;
 pub mod nntp_session;
 pub mod server;
 pub mod spool;
