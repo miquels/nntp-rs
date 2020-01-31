@@ -345,8 +345,9 @@ mod tests {
         assert!(&b[1000..1010] == &b"xyzzyxyzzy"[..]);
         assert!(&n[1000..1010] == &b"xyzzyxyzzy"[..]);
 
-        //n.start_offset = 10;
-        //n.put_str("xyzzyxyzzy");
+        n.start_offset += 10;
+        n.put_str("xyzzyxyzzy");
+
         let x = n.split_to(20000);
         assert!(n.len() == 25000);
         assert!(x.len() == 20000);
