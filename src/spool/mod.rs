@@ -14,8 +14,8 @@ mod diablo;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::{BlockingPool, BlockingType};
-use crate::util::Buffer;
 use crate::config;
+use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchResult, UnixTime};
 
 // Faux spoolno's returned by get_spool.
@@ -415,13 +415,7 @@ impl Spool {
         res
     }
 
-    pub async fn read(
-        &self,
-        art_loc: ArtLoc,
-        part: ArtPart,
-        buffer: Buffer,
-    ) -> io::Result<Buffer>
-    {
+    pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer> {
         let inner = self.inner.clone();
         self.pool
             .spawn_fn(move || {

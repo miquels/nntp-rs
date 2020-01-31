@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tokio::task;
 use tokio::sync::Semaphore;
+use tokio::task;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BlockingPool {
@@ -11,7 +11,7 @@ pub(crate) struct BlockingPool {
 #[derive(Debug)]
 pub(crate) struct InnerBlockingPool {
     blocking_type: BlockingType,
-    sem:         Semaphore,
+    sem:           Semaphore,
 }
 
 #[derive(Clone, Debug)]
@@ -24,7 +24,6 @@ pub enum BlockingType {
 #[allow(non_upper_case_globals)]
 impl BlockingPool {
     pub fn new(btype: Option<BlockingType>, max_threads: usize) -> BlockingPool {
-
         // max nr of blocking threads.
         let max_t = if max_threads == 0 { 128 } else { max_threads };
         // method of handling blocking calls.

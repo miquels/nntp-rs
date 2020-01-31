@@ -11,11 +11,10 @@ use std::time::Duration;
 use num_cpus;
 use parking_lot::Mutex;
 use tokio;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::stream::StreamExt;
 use tokio::sync::{mpsc, watch};
-use tokio::signal::unix::{signal, SignalKind};
 
-use crate::util::bind_socket;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
@@ -23,6 +22,7 @@ use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_session::NntpSession;
 use crate::spool::Spool;
+use crate::util::bind_socket;
 
 #[derive(Clone)]
 pub struct Server {
@@ -122,7 +122,6 @@ impl Server {
                 trace!("runtime::basic_scheduler on {:?}", thread::current().id());
 
                 runtime.block_on(async move {
-
                     for listener in listener_set.into_iter() {
                         let listener = tokio::net::TcpListener::from_std(listener)
                             .expect("cannot convert from net2 listener to tokio listener");

@@ -12,8 +12,8 @@ use libc;
 use parking_lot::Mutex;
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolBackend, SpoolDef};
-use crate::util::Buffer;
 use crate::util::byteorder::*;
+use crate::util::Buffer;
 use crate::util::UnixTime;
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
@@ -620,7 +620,7 @@ impl<T: Read> Read for CrlfXlat<T> {
     fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut]) -> io::Result<usize> {
         // debug!("XXX read_vectored starts, #bufs: {}", bufs.len());
         let mut done = 0;
-        for idx in 0 .. bufs.len() {
+        for idx in 0..bufs.len() {
             let l = bufs[idx].len();
             if l != 0 {
                 let n = self.read(&mut bufs[idx][..])?;
@@ -645,7 +645,7 @@ struct StatVfs {
     // bytes available
     b_avail: u64,
     // bytes in use.
-    b_used: u64,
+    b_used:  u64,
 }
 
 impl StatVfs {

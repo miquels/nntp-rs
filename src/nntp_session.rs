@@ -15,17 +15,17 @@ use crate::spool::ArtPart;
 use crate::util::{Buffer, UnixTime};
 
 pub struct NntpSession {
-    pub codec:       NntpCodec,
-    pub(crate)parser:          CmdParser,
-    pub(crate)server:          Server,
-    pub(crate)remote:          SocketAddr,
-    pub(crate)newsfeeds:       Arc<NewsFeeds>,
-    pub(crate)config:          Arc<Config>,
-    pub(crate)incoming_logger: logger::Incoming,
-    pub(crate)peer_idx:        usize,
-    pub(crate)active:          bool,
-    pub(crate)stats:           SessionStats,
-    pub(crate)quit:            bool,
+    pub codec:                  NntpCodec,
+    pub(crate) parser:          CmdParser,
+    pub(crate) server:          Server,
+    pub(crate) remote:          SocketAddr,
+    pub(crate) newsfeeds:       Arc<NewsFeeds>,
+    pub(crate) config:          Arc<Config>,
+    pub(crate) incoming_logger: logger::Incoming,
+    pub(crate) peer_idx:        usize,
+    pub(crate) active:          bool,
+    pub(crate) stats:           SessionStats,
+    pub(crate) quit:            bool,
 }
 
 pub struct NntpResult {
@@ -102,7 +102,7 @@ impl NntpSession {
             Err(msg) => {
                 let _ = self.codec.write_buf(msg.data).await;
                 return;
-            }
+            },
         };
         if let Err(e) = self.codec.write_buf(msg.data).await {
             self.on_write_error(e);
@@ -120,13 +120,15 @@ impl NntpSession {
                     NntpResult::text("400 Server shutting down")
                 },
                 Ok(NntpLine::Notification(_)) => continue,
-                Ok(NntpLine::Line(buf)) => match self.cmd(buf).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        let res = NntpResult::text(format!("400 {}", e));
-                        self.on_generic_error(e);
-                        self.quit = true;
-                        res
+                Ok(NntpLine::Line(buf)) => {
+                    match self.cmd(buf).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            let res = NntpResult::text(format!("400 {}", e));
+                            self.on_generic_error(e);
+                            self.quit = true;
+                            res
+                        },
                     }
                 },
                 Err(e) => {
@@ -266,7 +268,7 @@ impl NntpSession {
             Err(e) => {
                 let mut b = Buffer::from(e);
                 b.put_str("\r\n");
-                return Ok(NntpResult::buffer(b))
+                return Ok(NntpResult::buffer(b));
             },
             Ok(v) => v,
         };
@@ -361,7 +363,9 @@ impl NntpSession {
                     },
                 }
 
-                self.codec.write_buf(Buffer::from("335 Send article; end with CRLF DOT CRLF")).await?;
+                self.codec
+                    .write_buf(Buffer::from("335 Send article; end with CRLF DOT CRLF"))
+                    .await?;
 
                 let mut art = self.codec.read_article(args[0]).await?;
                 let status = self.received_article(&mut art, true).await?;

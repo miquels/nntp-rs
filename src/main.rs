@@ -28,15 +28,15 @@ pub struct MainOpts {
     pub config: String,
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (info)
-    pub debug: bool,
+    pub debug:  bool,
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (trace)
-    pub trace: bool,
+    pub trace:  bool,
     /// Prettify (json) output
     #[structopt(long)]
     pub pretty: bool,
     #[structopt(subcommand)]
-    pub cmd: Command,
+    pub cmd:    Command,
 }
 
 #[derive(StructOpt, Debug)]
@@ -84,7 +84,7 @@ pub struct HistExpireOpts {
 pub struct HistLookupOpts {
     #[structopt(short, long)]
     /// history file.
-    pub file: Option<String>,
+    pub file:  Option<String>,
     /// Message-Id.
     pub msgid: String,
 }
@@ -93,13 +93,13 @@ pub struct HistLookupOpts {
 pub struct SpoolReadOpts {
     #[structopt(short, long)]
     /// Default is headers only, add this to read the body.
-    pub body: bool,
+    pub body:  bool,
     #[structopt(short, long)]
     /// Dump article in raw wire-format.
-    pub raw: bool,
+    pub raw:   bool,
     #[structopt(short, long)]
     /// history file.
-    pub file: Option<String>,
+    pub file:  Option<String>,
     /// Message-Id.
     pub msgid: String,
 }

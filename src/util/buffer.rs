@@ -27,9 +27,9 @@ use bytes::{Buf, BufMut};
 ///
 /// It is not much more than a wrapper around Vec.
 pub struct Buffer {
-    start_offset:   usize,
-    rd_pos:  usize,
-    data:       Vec<u8>,
+    start_offset: usize,
+    rd_pos:       usize,
+    data:         Vec<u8>,
 }
 
 impl Buffer {
@@ -37,8 +37,8 @@ impl Buffer {
     pub fn new() -> Buffer {
         Buffer {
             start_offset: 0,
-            rd_pos:  0,
-            data:       Vec::new(),
+            rd_pos:       0,
+            data:         Vec::new(),
         }
     }
 
@@ -69,7 +69,6 @@ impl Buffer {
     /// The first part remains in this buffer. The second part is
     /// returned as a new Buffer.
     pub fn split_off(&mut self, at: usize) -> Buffer {
-
         if at > self.len() {
             panic!("Buffer:split_off(size): size > self.len()");
         }
@@ -97,14 +96,13 @@ impl Buffer {
     /// The second part remains in this buffer. The first part is
     /// returned to the caller.
     pub fn split_to(&mut self, size: usize) -> Buffer {
-
         // move self.data to a new Buffer.
         let mut nbuf = Buffer::new();
         let start_offset = self.start_offset;
         mem::swap(&mut self.data, &mut nbuf.data);
 
         // now copy the end of the data back to self.data.
-        self.extend_from_slice(&nbuf.data[self.start_offset+size..]);
+        self.extend_from_slice(&nbuf.data[self.start_offset + size..]);
         self.start_offset = 0;
 
         // and truncate the new Buffer to the right length.
@@ -145,7 +143,7 @@ impl Buffer {
             Err(e) => {
                 unsafe { self.data.set_len(prev_len) };
                 Err(e)
-            }
+            },
         }
     }
 
@@ -327,7 +325,7 @@ mod tests {
         b.reserve(4096);
         b.start_offset = 23;
         b.data.resize(b.start_offset, 0);
-        for i in 0 .. 50000 {
+        for i in 0..50000 {
             b.put_str("xyzzyxyzzy");
         }
         assert!(b.len() == 500000);
@@ -337,7 +335,7 @@ mod tests {
     #[test]
     fn test_split() {
         let mut b = Buffer::new();
-        for i in 0 .. 5000 {
+        for i in 0..5000 {
             b.put_str("xyzzyxyzzy");
         }
         assert!(b.len() == 50000);
@@ -356,4 +354,3 @@ mod tests {
         assert!(&x[1000..1010] == &b"xyzzyxyzzy"[..]);
     }
 }
-

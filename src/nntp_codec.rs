@@ -61,10 +61,10 @@ enum NntpInput {
 
 /// NntpCodec precursor.
 pub struct NntpCodecBuilder {
-    socket:         TcpStream,
-    watcher:        Option<watch::Receiver<Notification>>,
-    rd_tmout:       Option<Duration>,
-    wr_tmout:       Option<Duration>,
+    socket:   TcpStream,
+    watcher:  Option<watch::Receiver<Notification>>,
+    rd_tmout: Option<Duration>,
+    wr_tmout: Option<Duration>,
 }
 
 impl NntpCodecBuilder {
@@ -72,9 +72,9 @@ impl NntpCodecBuilder {
     pub fn new(socket: TcpStream) -> NntpCodecBuilder {
         NntpCodecBuilder {
             socket,
-            watcher:        None,
-            rd_tmout:       None,
-            wr_tmout:       None,
+            watcher: None,
+            rd_tmout: None,
+            wr_tmout: None,
         }
     }
 
@@ -397,10 +397,8 @@ impl NntpCodec {
             pin_utils::pin_mut!(timeout);
             return match timeout.poll(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready(()) => {
-                    Poll::Ready(Err(ioerr!(TimedOut, "TimedOut")))
-                },
-            }
+                Poll::Ready(()) => Poll::Ready(Err(ioerr!(TimedOut, "TimedOut"))),
+            };
         }
         Poll::Pending
     }
@@ -483,7 +481,7 @@ impl NntpCodec {
                     let err = Err(io::Error::new(io::ErrorKind::TimedOut, "TimedOut"));
                     Poll::Ready(err)
                 },
-            }
+            };
         }
         Poll::Pending
     }
@@ -591,9 +589,9 @@ fn calc_delay(d: &Duration) -> Instant {
 /// NNTP response parsing
 pub struct NntpResponse<'a> {
     /// reply code: 100..599
-    pub code:   u32,
+    pub code:  u32,
     /// arguments.
-    pub args:   SmallVec<[&'a str; 5]>,
+    pub args:  SmallVec<[&'a str; 5]>,
     /// short (< 100 chars) version of the response string for diagnostics.
     pub short: &'a str,
 }
@@ -601,7 +599,6 @@ pub struct NntpResponse<'a> {
 impl<'a> NntpResponse<'a> {
     /// Parse NNTP response.
     pub fn parse(r: &'a [u8]) -> io::Result<NntpResponse<'a>> {
-
         let (resp, short) = NntpResponse::utf8_response(r)?;
 
         // get code.
@@ -625,11 +622,11 @@ impl<'a> NntpResponse<'a> {
         // now some checks.
         let ok = match code {
             // CHECK/TAKETHIS: 1 argument: message-id
-            238|431|438|239|439 => nargs >= 1,
+            238 | 431 | 438 | 239 | 439 => nargs >= 1,
             // 1 argument: capability-label.
             401 => nargs >= 1,
             // ARTICLE,HEAD,BODY,LAST/NEXT/STAT: 2 arguments: n message-id
-            220|221|222|223 => nargs >= 2,
+            220 | 221 | 222 | 223 => nargs >= 2,
             // GROUP/LISTGROUP => 4 arguments: number low high group
             211 => nargs >= 4,
             // DATE: 1 argument: yyyymmddhhmmss
@@ -638,27 +635,28 @@ impl<'a> NntpResponse<'a> {
         };
 
         if !ok {
-            return Err(ioerr!(InvalidData, "invalid response: missing arguments: {}", short));
+            return Err(ioerr!(
+                InvalidData,
+                "invalid response: missing arguments: {}",
+                short
+            ));
         }
 
-        Ok(NntpResponse {
-            code,
-            args: v,
-            short,
-        })
+        Ok(NntpResponse { code, args: v, short })
     }
 
     /// version of response suitable for diagnostics / logging.
     pub fn diag_response(r: &'a [u8]) -> &'a str {
-        NntpResponse::utf8_response(r).map(|(_, diag)| diag).unwrap_or("[invalid-utf8]")
+        NntpResponse::utf8_response(r)
+            .map(|(_, diag)| diag)
+            .unwrap_or("[invalid-utf8]")
     }
 
     // decode to utf-8, return the utf-8 string and a limited length version for diagnostics.
     fn utf8_response(r: &'a [u8]) -> io::Result<(&'a str, &'a str)> {
-
         // strip trailing \r\n
         let mut n = r.len();
-        while n > 0 && (r[n-1] == b'\r' || r[n-1] == b'\n') {
+        while n > 0 && (r[n - 1] == b'\r' || r[n - 1] == b'\n') {
             n -= 1;
         }
         let r = &r[..n];

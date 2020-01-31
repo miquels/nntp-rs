@@ -8,15 +8,21 @@ use std::mem;
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
-use crate::util::Buffer;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
-use crate::nntp_session::{ArtAccept, NntpSession, NntpResult};
+use crate::nntp_session::{ArtAccept, NntpResult, NntpSession};
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
+use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
 
 impl NntpSession {
-    pub(crate) async fn reject_art(&mut self, art: &Article, recv_time: UnixTime, e: ArtError) -> io::Result<ArtAccept> {
+    pub(crate) async fn reject_art(
+        &mut self,
+        art: &Article,
+        recv_time: UnixTime,
+        e: ArtError,
+    ) -> io::Result<ArtAccept>
+    {
         let he = HistEnt {
             status:    HistStatus::Rejected,
             time:      recv_time,
@@ -48,7 +54,12 @@ impl NntpSession {
         }
     }
 
-    pub(crate) async fn dontstore_art(&mut self, art: &Article, recv_time: UnixTime) -> io::Result<ArtAccept> {
+    pub(crate) async fn dontstore_art(
+        &mut self,
+        art: &Article,
+        recv_time: UnixTime,
+    ) -> io::Result<ArtAccept>
+    {
         let he = HistEnt {
             status:    HistStatus::Expired,
             time:      recv_time,
@@ -78,7 +89,12 @@ impl NntpSession {
     }
 
     // Received article: see if we want it, find out if it needs to be sent to other peers.
-    pub(crate) async fn received_article(&mut self, mut art: &mut Article, can_defer: bool) -> io::Result<ArtAccept> {
+    pub(crate) async fn received_article(
+        &mut self,
+        mut art: &mut Article,
+        can_defer: bool,
+    ) -> io::Result<ArtAccept>
+    {
         let recv_time = UnixTime::now();
 
         // parse article.
@@ -296,7 +312,13 @@ impl NntpSession {
         Ok((headers, body, v))
     }
 
-    pub(crate) async fn read_article(&self, part: ArtPart, msgid: &str, buf: Buffer) -> io::Result<NntpResult> {
+    pub(crate) async fn read_article(
+        &self,
+        part: ArtPart,
+        msgid: &str,
+        buf: Buffer,
+    ) -> io::Result<NntpResult>
+    {
         let result = match self.server.history.lookup(msgid).await {
             Err(_) => return Ok(NntpResult::text("430 Not found")),
             Ok(None) => return Ok(NntpResult::text("430 Not found")),
@@ -322,4 +344,3 @@ impl NntpSession {
         }
     }
 }
-

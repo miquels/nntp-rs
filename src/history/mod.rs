@@ -68,13 +68,13 @@ struct HistoryInner {
 #[derive(Debug, Clone)]
 pub struct HistEnt {
     /// Present, Expired, etc.
-    pub status: HistStatus,
+    pub status:    HistStatus,
     /// Unixtime when article was received.
-    pub time: UnixTime,
+    pub time:      UnixTime,
     /// Whether this article was received via MODE HEADFEED.
     pub head_only: bool,
     /// Location in the article spool.
-    pub location: Option<spool::ArtLoc>,
+    pub location:  Option<spool::ArtLoc>,
 }
 
 impl HistEnt {

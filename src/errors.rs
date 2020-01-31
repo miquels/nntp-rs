@@ -66,11 +66,11 @@ pub enum ArtError {
 pub type ArtResult<T> = Result<T, ArtError>;
 
 macro_rules! _ioerr {
-    ($kind:expr, $arg:expr) => (
+    ($kind:expr, $arg:expr) => {
         std::io::Error::new($kind, $arg)
-    );
+    };
 }
-    
+
 macro_rules! ioerr {
     (@NotFound, $arg:expr) => ( _ioerr!(std::io::ErrorKind::NotFound, $arg) );
     (@PermissionDenied, $arg:expr) => ( _ioerr!(std::io::ErrorKind::PermissionDenied, $arg) );
@@ -105,4 +105,3 @@ macro_rules! ioerr {
         ioerr!(@$kind, $arg)
     );
 }
-

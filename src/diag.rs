@@ -100,7 +100,8 @@ impl SessionStats {
             let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
             dns_lookup::lookup_addr(&ipaddr).unwrap_or(ipaddr_str)
         })
-        .await.unwrap();
+        .await
+        .unwrap();
         self.hostname = host;
         self.label = label;
         info!(
