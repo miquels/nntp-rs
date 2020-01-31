@@ -15,6 +15,7 @@ use crate::nntp_codec::NntpCodec;
 use crossbeam_queue::ArrayQueue;
 use tokio::prelude::*;
 use tokio::io::{BufReader, AsyncBufReadExt};
+use tokio::pin;
 
 trait BoolExt {
     fn if_true<T>(&self, v: T) -> Option<T>;
@@ -276,7 +277,7 @@ impl Future for Connection {
 
         // First check the notification channel.
         let fut = self.watcher.recv();
-        pin_utils::pin_mut!(fut);
+        pin!(fut);
         match fut.poll(cx) {
             Poll::Ready(item) => {
                 match item {
@@ -288,7 +289,7 @@ impl Future for Connection {
                         if !self.sender_done {
                             self.send_queue.push_front(Item::Quit);
                             let send = &self.send;
-                            pin_utils::pin_mut!(send);
+                            pin!(send);
                             match send.poll(cx) {
                                 Poll::Ready(Ok(())) => self.sender_done = true,
                                 Poll::Ready(Err(e)) => is_err = true,
@@ -305,7 +306,7 @@ impl Future for Connection {
         // Receive replies. This one is called first, since it
         // might queue one or more TAKETHIS commands.
         let recv = &self.recv;
-        pin_utils::pin_mut!(recv);
+        pin!(recv);
         match recv.poll(cx) {
             Poll::Ready(Ok(())) => {
                 // We got the 205 bye response. done.
@@ -319,7 +320,7 @@ impl Future for Connection {
         // Send commands.
         if !self.sender_done {
             let send = &self.send;
-            pin_utils::pin_mut!(send);
+            pin!(send);
             match send.poll(cx) {
                 Poll::Ready(Ok(())) => self.sender_done = true,
                 Poll::Ready(Err(e)) => is_err = true,

@@ -14,6 +14,7 @@ use memchr::memchr;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio::pin;
 use tokio::sync::watch;
 use tokio::time::{self, Delay, Instant};
 
@@ -182,7 +183,7 @@ impl NntpCodec {
 
             // Read data into the buffer if it's available.
             let socket = &mut self.socket;
-            pin_utils::pin_mut!(socket);
+            pin!(socket);
             match socket.poll_read_buf(cx, &mut self.rd) {
                 Poll::Ready(Ok(n)) if n == 0 => return Poll::Ready(Ok(())),
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -329,7 +330,7 @@ impl NntpCodec {
         if let Some(watcher) = self.watcher.as_mut() {
             let n = {
                 let fut = watcher.recv();
-                pin_utils::pin_mut!(fut);
+                pin!(fut);
                 match fut.poll(cx) {
                     Poll::Ready(item) => {
                         match item {
@@ -394,7 +395,7 @@ impl NntpCodec {
 
         // check the timer.
         if let Some(timeout) = self.rd_timer.as_mut() {
-            pin_utils::pin_mut!(timeout);
+            pin!(timeout);
             return match timeout.poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(()) => Poll::Ready(Err(ioerr!(TimedOut, "TimedOut"))),
@@ -410,7 +411,7 @@ impl NntpCodec {
             //
             trace!("writing; remaining={}", self.wr.len());
             let socket = &mut self.socket;
-            pin_utils::pin_mut!(socket);
+            pin!(socket);
             match socket.poll_write(cx, buf.bytes()) {
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
@@ -438,7 +439,7 @@ impl NntpCodec {
         //
         if buf.remaining() == 0 {
             let socket = &mut self.socket;
-            pin_utils::pin_mut!(socket);
+            pin!(socket);
             match socket.poll_flush(cx) {
                 Poll::Ready(Ok(_)) => {
                     return Poll::Ready(Ok(()));
@@ -455,7 +456,7 @@ impl NntpCodec {
         //
         if let Some(watcher) = self.watcher.as_mut() {
             let fut = watcher.recv();
-            pin_utils::pin_mut!(fut);
+            pin!(fut);
             match fut.poll(cx) {
                 Poll::Ready(item) => {
                     match item {
@@ -474,7 +475,7 @@ impl NntpCodec {
         // finally, check the timer.
         //
         if let Some(timeout) = self.wr_timer.as_mut() {
-            pin_utils::pin_mut!(timeout);
+            pin!(timeout);
             return match timeout.poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(()) => {
