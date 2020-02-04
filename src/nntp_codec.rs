@@ -16,10 +16,10 @@ use futures::sink::Sink;
 use memchr::memchr;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
-use tokio::prelude::*;
 use tokio::pin;
-use tokio::sync::watch;
+use tokio::prelude::*;
 use tokio::stream::Stream;
+use tokio::sync::watch;
 use tokio::time::{self, Delay, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
@@ -65,7 +65,7 @@ pub enum NntpInput {
 }
 
 /// NntpCodec precursor.
-pub struct NntpCodecBuilder<S=TcpStream> {
+pub struct NntpCodecBuilder<S = TcpStream> {
     socket:   S,
     watcher:  Option<watch::Receiver<Notification>>,
     rd_tmout: Option<Duration>,
@@ -73,7 +73,6 @@ pub struct NntpCodecBuilder<S=TcpStream> {
 }
 
 impl<S> NntpCodecBuilder<S> {
-
     /// New builder for a NntpCodec.
     pub fn new(socket: S) -> NntpCodecBuilder<S> {
         NntpCodecBuilder {
@@ -103,8 +102,8 @@ impl<S> NntpCodecBuilder<S> {
     }
 
     /// Build the final NntpCodec.
-    pub fn build(self) -> NntpCodec<S> where S: Any {
-
+    pub fn build(self) -> NntpCodec<S>
+    where S: Any {
         // Set TCP_NODELAY if socket is a TcpStream.
         let any = &self.socket as &dyn Any;
         if let Some(tcp) = any.downcast_ref::<TcpStream>() {
@@ -135,7 +134,7 @@ impl<S> NntpCodecBuilder<S> {
 
 /// NntpCodec can read lines/blocks/articles from  a TcpStream, and
 /// write buffers to a TcpStream.
-pub struct NntpCodec<S=TcpStream> {
+pub struct NntpCodec<S = TcpStream> {
     socket:          S,
     watcher:         Option<watch::Receiver<Notification>>,
     rd:              Buffer,
@@ -155,7 +154,8 @@ pub struct NntpCodec<S=TcpStream> {
     msgid:           Option<String>,
 }
 
-impl<S> NntpCodec<S> where S: AsyncRead + AsyncWrite + Unpin + 'static
+impl<S> NntpCodec<S>
+where S: AsyncRead + AsyncWrite + Unpin + 'static
 {
     /// Returns a new NntpCodec. For more control, use builder() or NntpCodecBuilder::new().
     pub fn new(socket: S) -> NntpCodec<S> {
@@ -168,8 +168,12 @@ impl<S> NntpCodec<S> where S: AsyncRead + AsyncWrite + Unpin + 'static
     }
 
     /// Split the codec into a read and a write part.
-    pub fn split(self) -> (NntpCodec<impl AsyncRead + Unpin>, NntpCodec<impl AsyncWrite + Unpin>)
-    {
+    pub fn split(
+        self,
+    ) -> (
+        NntpCodec<impl AsyncRead + Unpin>,
+        NntpCodec<impl AsyncWrite + Unpin>,
+    ) {
         let (rsock, wsock) = tokio::io::split(self.socket);
 
         let r = NntpCodec {
@@ -216,7 +220,10 @@ impl<S> NntpCodec<S> where S: AsyncRead + AsyncWrite + Unpin + 'static
     }
 }
 
-impl<S> NntpCodec<S> where S: AsyncRead, S: Unpin
+impl<S> NntpCodec<S>
+where
+    S: AsyncRead,
+    S: Unpin,
 {
     // fill the read buffer as much as possible.
     fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
@@ -537,7 +544,10 @@ impl<S> NntpCodec<S> where S: AsyncRead, S: Unpin
     }
 }
 
-impl<S> NntpCodec<S> where S: AsyncWrite, S: Unpin
+impl<S> NntpCodec<S>
+where
+    S: AsyncWrite,
+    S: Unpin,
 {
     fn poll_write(&mut self, cx: &mut Context, buf: &mut impl Buf) -> Poll<io::Result<()>> {
         if buf.remaining() > 0 {
@@ -649,13 +659,14 @@ impl<S> NntpCodec<S> where S: AsyncWrite, S: Unpin
     }
 }
 
-impl<S> Stream for NntpCodec<S> where S: AsyncRead, S: Unpin {
+impl<S> Stream for NntpCodec<S>
+where
+    S: AsyncRead,
+    S: Unpin,
+{
     type Item = io::Result<NntpInput>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>, 
-        cx: &mut Context
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = self.as_mut();
         this.reset_rd_timer();
         match this.poll_read(cx) {
@@ -666,15 +677,11 @@ impl<S> Stream for NntpCodec<S> where S: AsyncRead, S: Unpin {
 }
 
 impl<S> Sink<Buffer> for NntpCodec<S>
-where
-    S: AsyncWrite + Unpin,
+where S: AsyncWrite + Unpin
 {
     type Error = io::Error;
 
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         let mut this = self.as_mut();
         if this.wr_bufs.len() == 0 {
             Poll::Ready(Ok(()))
@@ -694,17 +701,11 @@ where
         Ok(())
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         self.poll_ready(cx)
     }
 
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<(), Self::Error>> {
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
         // NOTE: we could call self.socket.shutdown() here, but then
         // we'd need to store the future it returns as state.
         self.poll_flush(cx)

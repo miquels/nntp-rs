@@ -9,19 +9,19 @@ use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::util::Buffer;
 use crate::diag::SessionStats;
 use crate::nntp_codec::{NntpCodec, NntpInput};
 use crate::server::Notification;
 use crate::spool::{ArtLoc, ArtPart, Spool};
+use crate::util::Buffer;
 
 // Aricle to be queued.
 #[derive(Clone)]
 struct OutArticle {
     // Message-Id.
-    msgid:      String,
+    msgid:    String,
     // Location in the article spool.
-    location:   ArtLoc,
+    location: ArtLoc,
 }
 
 // Items in the queue to be sent out on a Connection.
@@ -45,7 +45,7 @@ impl fmt::Display for Item {
 // A peerfeed.
 struct PeerFeed {
     // Name.
-    label:          String,
+    label: String,
 }
 
 impl PeerFeed {
@@ -58,24 +58,24 @@ impl PeerFeed {
 // A connection.
 struct Connection<R, W> {
     // reader / writer.
-    reader:         NntpCodec<R>,
-    writer:         NntpCodec<W>,
+    reader:       NntpCodec<R>,
+    writer:       NntpCodec<W>,
     // Shared peerfeed.
-    peerfeed:       Arc<PeerFeed>,
+    peerfeed:     Arc<PeerFeed>,
     // Max number of outstanding requests.
-    streaming:      usize,
+    streaming:    usize,
     // Items waiting to be sent.
-    send_queue:     VecDeque<Item>,
+    send_queue:   VecDeque<Item>,
     // Sent items, waiting for a reply.
-    recv_queue:     VecDeque<Item>,
+    recv_queue:   VecDeque<Item>,
     // Stats
-    stats:          SessionStats,
+    stats:        SessionStats,
     // Set after we have sent QUIT
-    sender_done:    bool,
+    sender_done:  bool,
     // Notification channel receive side.
-    notification:   mpsc::Receiver<Notification>,
+    notification: mpsc::Receiver<Notification>,
     // Spool.
-    spool:          Spool,
+    spool:        Spool,
 }
 
 impl<R, W> Connection<R, W>
@@ -83,8 +83,12 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    async fn run<T>(peerfeed: Arc<PeerFeed>, codec: NntpCodec<T>, recv: mpsc::Receiver<Notification>, spool: Spool)
-    where
+    async fn run<T>(
+        peerfeed: Arc<PeerFeed>,
+        codec: NntpCodec<T>,
+        recv: mpsc::Receiver<Notification>,
+        spool: Spool,
+    ) where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let (reader, writer) = codec.split();
@@ -111,7 +115,6 @@ where
         let mut xmit_busy = false;
 
         loop {
-
             // see if we need to pull an article from the peerfeed queue.
             let queue_len = self.recv_queue.len() + self.send_queue.len();
             if queue_len < self.streaming {
@@ -199,10 +202,7 @@ where
                 Pin::new(&mut self.writer).start_send(line.into())?;
                 Pin::new(&mut self.writer).start_send(buffer)
             },
-            Item::Quit => {
-                Pin::new(&mut self.writer).start_send("QUIT\r\n".into())
-            },
+            Item::Quit => Pin::new(&mut self.writer).start_send("QUIT\r\n".into()),
         }
     }
 }
-
