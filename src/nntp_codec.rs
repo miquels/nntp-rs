@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -10,12 +12,14 @@ use crate::util::{Buffer, HashFeed};
 
 use bytes::Buf;
 use futures::future::poll_fn;
+use futures::sink::Sink;
 use memchr::memchr;
 use smallvec::SmallVec;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::pin;
 use tokio::sync::watch;
+use tokio::stream::Stream;
 use tokio::time::{self, Delay, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
@@ -51,8 +55,8 @@ pub enum NntpLine {
     Notification(Notification),
 }
 
-// Internal return values from poll_read().
-enum NntpInput {
+// Return values from poll_read().
+pub enum NntpInput {
     Eof,
     Line(Buffer),
     Block(Buffer),
@@ -61,16 +65,17 @@ enum NntpInput {
 }
 
 /// NntpCodec precursor.
-pub struct NntpCodecBuilder {
-    socket:   TcpStream,
+pub struct NntpCodecBuilder<S=TcpStream> {
+    socket:   S,
     watcher:  Option<watch::Receiver<Notification>>,
     rd_tmout: Option<Duration>,
     wr_tmout: Option<Duration>,
 }
 
-impl NntpCodecBuilder {
+impl<S> NntpCodecBuilder<S> {
+
     /// New builder for a NntpCodec.
-    pub fn new(socket: TcpStream) -> NntpCodecBuilder {
+    pub fn new(socket: S) -> NntpCodecBuilder<S> {
         NntpCodecBuilder {
             socket,
             watcher: None,
@@ -98,8 +103,14 @@ impl NntpCodecBuilder {
     }
 
     /// Build the final NntpCodec.
-    pub fn build(self) -> NntpCodec {
-        let _ = self.socket.set_nodelay(true);
+    pub fn build(self) -> NntpCodec<S> where S: Any {
+
+        // Set TCP_NODELAY if socket is a TcpStream.
+        let any = &self.socket as &dyn Any;
+        if let Some(tcp) = any.downcast_ref::<TcpStream>() {
+            let _ = tcp.set_nodelay(true);
+        }
+
         NntpCodec {
             socket:          self.socket,
             watcher:         self.watcher,
@@ -112,7 +123,7 @@ impl NntpCodecBuilder {
             rd_mode:         CodecMode::ReadLine,
             rd_tmout:        self.rd_tmout,
             rd_timer:        None,
-            wr:              Buffer::new(),
+            wr_bufs:         Vec::new(),
             wr_tmout:        self.wr_tmout,
             wr_timer:        None,
             arttype_scanner: ArtTypeScanner::new(),
@@ -124,8 +135,8 @@ impl NntpCodecBuilder {
 
 /// NntpCodec can read lines/blocks/articles from  a TcpStream, and
 /// write buffers to a TcpStream.
-pub struct NntpCodec {
-    socket:          TcpStream,
+pub struct NntpCodec<S=TcpStream> {
+    socket:          S,
     watcher:         Option<watch::Receiver<Notification>>,
     rd:              Buffer,
     rd_pos:          usize,
@@ -136,7 +147,7 @@ pub struct NntpCodec {
     rd_tmout:        Option<Duration>,
     rd_timer:        Option<Delay>,
     rd_mode:         CodecMode,
-    wr:              Buffer,
+    wr_bufs:         Vec<Buffer>,
     wr_tmout:        Option<Duration>,
     wr_timer:        Option<Delay>,
     arttype_scanner: ArtTypeScanner,
@@ -144,17 +155,69 @@ pub struct NntpCodec {
     msgid:           Option<String>,
 }
 
-impl NntpCodec {
+impl<S> NntpCodec<S> where S: AsyncRead + AsyncWrite + Unpin + 'static
+{
     /// Returns a new NntpCodec. For more control, use builder() or NntpCodecBuilder::new().
-    pub fn new(socket: TcpStream) -> NntpCodec {
+    pub fn new(socket: S) -> NntpCodec<S> {
         NntpCodecBuilder::new(socket).build()
     }
 
     /// New builder for a NntpCodec.
-    pub fn builder(socket: TcpStream) -> NntpCodecBuilder {
+    pub fn builder(socket: S) -> NntpCodecBuilder<S> {
         NntpCodecBuilder::new(socket)
     }
 
+    /// Split the codec into a read and a write part.
+    pub fn split(self) -> (NntpCodec<impl AsyncRead + Unpin>, NntpCodec<impl AsyncWrite + Unpin>)
+    {
+        let (rsock, wsock) = tokio::io::split(self.socket);
+
+        let r = NntpCodec {
+            socket:          rsock,
+            watcher:         self.watcher,
+            rd:              self.rd,
+            rd_pos:          self.rd_pos,
+            rd_overflow:     self.rd_overflow,
+            rd_state:        self.rd_state,
+            rd_line_start:   self.rd_line_start,
+            rd_reserve_size: self.rd_reserve_size,
+            rd_tmout:        self.rd_tmout,
+            rd_timer:        self.rd_timer,
+            rd_mode:         self.rd_mode,
+            arttype_scanner: self.arttype_scanner,
+            notification:    self.notification,
+            msgid:           self.msgid,
+            wr_bufs:         Vec::new(),
+            wr_tmout:        None,
+            wr_timer:        None,
+        };
+
+        let w = NntpCodec {
+            socket:          wsock,
+            watcher:         None,
+            rd:              Buffer::new(),
+            rd_pos:          0,
+            rd_overflow:     false,
+            rd_state:        State::Data,
+            rd_line_start:   0,
+            rd_reserve_size: 0,
+            rd_tmout:        None,
+            rd_timer:        None,
+            rd_mode:         CodecMode::ReadLine,
+            arttype_scanner: ArtTypeScanner::new(),
+            notification:    None,
+            msgid:           None,
+            wr_bufs:         self.wr_bufs,
+            wr_tmout:        self.wr_tmout,
+            wr_timer:        self.wr_timer,
+        };
+
+        (r, w)
+    }
+}
+
+impl<S> NntpCodec<S> where S: AsyncRead, S: Unpin
+{
     // fill the read buffer as much as possible.
     fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
         loop {
@@ -404,12 +467,84 @@ impl NntpCodec {
         Poll::Pending
     }
 
+    // reset the read timer.
+    fn reset_rd_timer(&mut self) {
+        if let Some(ref tmout) = self.rd_tmout {
+            if let Some(ref mut timer) = self.rd_timer {
+                timer.reset(calc_delay(tmout));
+            } else {
+                self.rd_timer = Some(time::delay_for(tmout.clone()));
+            }
+        }
+    }
+
+    /// Read a line.
+    pub async fn read_line(&mut self) -> io::Result<NntpLine> {
+        self.rd_mode = CodecMode::ReadLine;
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
+            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
+            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
+            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read a line with timeout.
+    pub async fn read_line_with_timeout(&mut self, d: Duration) -> io::Result<NntpLine> {
+        self.rd_mode = CodecMode::ReadLine;
+        //
+        // This is not very efficient, but we really only call this method once
+        // in a server session, at the initial connect, because we use a lower
+        // timeout for the first command only.
+        //
+        let old_tmout = std::mem::replace(&mut self.rd_tmout, Some(d));
+        self.reset_rd_timer();
+        let res = match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
+            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
+            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
+            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        };
+        self.rd_tmout = old_tmout;
+        self.rd_timer = None;
+        res
+    }
+
+    /// Read a block.
+    pub async fn read_block(&mut self) -> io::Result<Buffer> {
+        self.rd_mode = CodecMode::ReadBlock;
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Block(buf)) => Ok(buf),
+            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Read an article.
+    pub async fn read_article(&mut self, msgid: impl Into<String>) -> io::Result<Article> {
+        self.rd_mode = CodecMode::ReadArticle;
+        self.msgid = Some(msgid.into());
+        self.reset_rd_timer();
+        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
+            Ok(NntpInput::Article(art)) => Ok(art),
+            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl<S> NntpCodec<S> where S: AsyncWrite, S: Unpin
+{
     fn poll_write(&mut self, cx: &mut Context, buf: &mut impl Buf) -> Poll<io::Result<()>> {
         if buf.remaining() > 0 {
             //
             // See if we can write more data to the socket.
             //
-            trace!("writing; remaining={}", self.wr.len());
+            trace!("writing; remaining={}", buf.remaining());
             let socket = &mut self.socket;
             pin!(socket);
             match socket.poll_write(cx, buf.bytes()) {
@@ -487,17 +622,6 @@ impl NntpCodec {
         Poll::Pending
     }
 
-    // reset the read timer.
-    fn reset_rd_timer(&mut self) {
-        if let Some(ref tmout) = self.rd_tmout {
-            if let Some(ref mut timer) = self.rd_timer {
-                timer.reset(calc_delay(tmout));
-            } else {
-                self.rd_timer = Some(time::delay_for(tmout.clone()));
-            }
-        }
-    }
-
     // reset the write timer.
     fn reset_wr_timer(&mut self) {
         if let Some(ref tmout) = self.wr_tmout {
@@ -509,63 +633,6 @@ impl NntpCodec {
         }
     }
 
-    /// Read a line.
-    pub async fn read_line(&mut self) -> io::Result<NntpLine> {
-        self.rd_mode = CodecMode::ReadLine;
-        self.reset_rd_timer();
-        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
-            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
-            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
-            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
-            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Read a line with timeout.
-    pub async fn read_line_with_timeout(&mut self, d: Duration) -> io::Result<NntpLine> {
-        self.rd_mode = CodecMode::ReadLine;
-        //
-        // This is not very efficient, but we really only call this method once
-        // in a server session, at the initial connect, because we use a lower
-        // timeout for the first command only.
-        //
-        let old_tmout = std::mem::replace(&mut self.rd_tmout, Some(d));
-        self.reset_rd_timer();
-        let res = match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
-            Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
-            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
-            Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
-            Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
-            Err(e) => Err(e),
-        };
-        self.rd_tmout = old_tmout;
-        self.rd_timer = None;
-        res
-    }
-
-    /// Read a block.
-    pub async fn read_block(&mut self) -> io::Result<Buffer> {
-        self.rd_mode = CodecMode::ReadBlock;
-        self.reset_rd_timer();
-        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
-            Ok(NntpInput::Block(buf)) => Ok(buf),
-            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Read an article.
-    pub async fn read_article(&mut self, msgid: impl Into<String>) -> io::Result<Article> {
-        self.rd_mode = CodecMode::ReadArticle;
-        self.msgid = Some(msgid.into());
-        self.reset_rd_timer();
-        match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
-            Ok(NntpInput::Article(art)) => Ok(art),
-            Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
-            Err(e) => Err(e),
-        }
-    }
 
     /// Write a buffer that can be turned into a `Buffer` struct.
     pub async fn write(&mut self, buf: impl Into<Buffer>) -> io::Result<()> {
@@ -579,6 +646,68 @@ impl NntpCodec {
         self.reset_wr_timer();
         let mut buf = buf;
         poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
+    }
+}
+
+impl<S> Stream for NntpCodec<S> where S: AsyncRead, S: Unpin {
+    type Item = io::Result<NntpInput>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>, 
+        cx: &mut Context
+    ) -> Poll<Option<Self::Item>> {
+        let mut this = self.as_mut();
+        this.reset_rd_timer();
+        match this.poll_read(cx) {
+            Poll::Ready(x) => Poll::Ready(Some(x)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> Sink<Buffer> for NntpCodec<S>
+where
+    S: AsyncWrite + Unpin,
+{
+    type Error = io::Error;
+
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        let mut this = self.as_mut();
+        if this.wr_bufs.len() == 0 {
+            Poll::Ready(Ok(()))
+        } else {
+            let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
+            let res = this.poll_write(cx, &mut bufs[0]);
+            if bufs[0].len() == 0 {
+                bufs.remove(0);
+            }
+            this.wr_bufs = bufs;
+            res
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Buffer) -> Result<(), Self::Error> {
+        self.as_mut().wr_bufs.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        self.poll_ready(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context
+    ) -> Poll<Result<(), Self::Error>> {
+        // NOTE: we could call self.socket.shutdown() here, but then
+        // we'd need to store the future it returns as state.
+        self.poll_flush(cx)
     }
 }
 
