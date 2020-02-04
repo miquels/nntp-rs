@@ -169,9 +169,9 @@ where
                                 },
                             }
                         },
-                        Ok(_) => {
+                        Ok(input) => {
                             // TODO: log error, return.
-                            panic!("unexpected state");
+                            panic!("Connection::feed: unexpected input state: {:?}", input);
                         },
                     }
                 }

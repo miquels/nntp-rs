@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::fmt::{self, Debug};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -62,6 +63,19 @@ pub enum NntpInput {
     Block(Buffer),
     Article(Article),
     Notification(Notification),
+}
+
+impl Debug for NntpInput {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let name = match self {
+            &NntpInput::Eof => "NntpInput::Eof",
+            &NntpInput::Line(_) => "NntpInput::Line",
+            &NntpInput::Block(_) => "NntpInput::Block",
+            &NntpInput::Article(_) => "NntpInput::Article",
+            &NntpInput::Notification(_) => "NntpInput::Notification",
+        };
+        write!(f, "{}", name)
+    }
 }
 
 /// NntpCodec precursor.
