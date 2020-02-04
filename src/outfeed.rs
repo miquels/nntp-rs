@@ -1,21 +1,19 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::future::Future;
 use std::io;
-use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use futures::sink::{Sink, SinkExt};
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::util::Buffer;
 use crate::diag::SessionStats;
 use crate::nntp_codec::{NntpCodec, NntpInput};
 use crate::server::Notification;
-use crate::spool::{ArtLoc, Spool};
+use crate::spool::{ArtLoc, ArtPart, Spool};
 
 // Aricle to be queued.
 #[derive(Clone)]
@@ -31,6 +29,7 @@ struct OutArticle {
 enum Item {
     Check(OutArticle),
     Takethis(OutArticle),
+    Quit,
 }
 
 impl fmt::Display for Item {
@@ -38,6 +37,7 @@ impl fmt::Display for Item {
         match self {
             &Item::Check(ref art) => write!(f, "CHECK {}", art.msgid),
             &Item::Takethis(ref art) => write!(f, "TAKETHIS {}", art.msgid),
+            &Item::Quit => write!(f, "QUIT"),
         }
     }
 }
@@ -74,6 +74,8 @@ struct Connection<R, W> {
     sender_done:    bool,
     // Notification channel receive side.
     notification:   mpsc::Receiver<Notification>,
+    // Spool.
+    spool:          Spool,
 }
 
 impl<R, W> Connection<R, W>
@@ -81,7 +83,7 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    async fn run<T>(peerfeed: Arc<PeerFeed>, codec: NntpCodec<T>, recv: mpsc::Receiver<Notification>)
+    async fn run<T>(peerfeed: Arc<PeerFeed>, codec: NntpCodec<T>, recv: mpsc::Receiver<Notification>, spool: Spool)
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -96,8 +98,10 @@ where
             sender_done: false,
             streaming: 20,
             notification: recv,
+            spool,
         };
         let _ = tokio::spawn(async move {
+            // TODO: log initial start, final stats.
             conn.feed().await
         });
     }
@@ -122,7 +126,7 @@ where
             if !xmit_busy {
                 if let Some(item) = self.send_queue.pop_front() {
                     self.recv_queue.push_back(item.clone());
-                    self.transmit_item(item).await;
+                    self.transmit_item(item).await?;
                     xmit_busy = true;
                 }
             }
@@ -131,6 +135,7 @@ where
                 res = self.writer.flush(), if xmit_busy => {
                     // Done sending either CHECK or TAKETHIS.
                     if let Err(e) = res {
+                        // TODO: update stats, log, return
                         panic!("transmit: {}", e);
                     }
                     xmit_busy = false;
@@ -139,31 +144,36 @@ where
                     // What did we receive?
                     match res.unwrap() {
                         Err(e) => {
+                        // TODO: update stats, log, return
                             panic!("transmit: {}", e);
                         },
                         Ok(NntpInput::Eof) => {
-                            // XXX handle EOF
-                        },
-                        Ok(NntpInput::Notification(n)) => {
-                            // XXX handle notfication
+                            // TODO handle EOF
                         },
                         Ok(NntpInput::Line(buf)) => {
-                            // Got a reply.
+                            // Got a reply. Find matching command.
                             match self.recv_queue.pop_front() {
                                 None => panic!("recv queue out of sync"),
                                 Some(Item::Check(art)) => {
-                                    // TODO update stats.
+                                    // TODO check status code, update stats.
                                     self.send_queue.push_back(Item::Takethis(art));
                                 },
                                 Some(Item::Takethis(art)) => {
-                                    // TODO update stats.
+                                    // TODO check status code, update stats.
+                                },
+                                Some(Item::Quit) => {
+                                    // TODO check status code, update stats, return.
                                 },
                             }
                         },
                         Ok(_) => {
+                            // TODO: log error, return.
                             panic!("unexpected state");
                         },
                     }
+                }
+                res = self.notification.next() => {
+                    // TODO: handle notification.
                 }
             }
         }
@@ -175,7 +185,23 @@ where
                 let line = format!("CHECK {}\r\n", art.msgid);
                 Pin::new(&mut self.writer).start_send(line.into())
             },
-            Item::Takethis(art) => unimplemented!(),
+            Item::Takethis(art) => {
+                let tmpbuf = Buffer::new();
+                let buffer = match self.spool.read(art.location, ArtPart::Article, tmpbuf).await {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        // check the error and see if it's fatal. If not,
+                        // update stats and return Ok. TODO
+                        return Ok(());
+                    },
+                };
+                let line = format!("TAKETHIS {}\r\n", art.msgid);
+                Pin::new(&mut self.writer).start_send(line.into())?;
+                Pin::new(&mut self.writer).start_send(buffer)
+            },
+            Item::Quit => {
+                Pin::new(&mut self.writer).start_send("QUIT\r\n".into())
+            },
         }
     }
 }
