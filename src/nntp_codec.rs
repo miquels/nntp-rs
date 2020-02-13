@@ -1,7 +1,9 @@
 use std::any::Any;
+use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug};
 use std::future::Future;
 use std::io;
+use std::ops::Range;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -231,6 +233,27 @@ where S: AsyncRead + AsyncWrite + Unpin + 'static
         };
 
         (r, w)
+    }
+
+    /// Send a command and wait for the response.
+    pub async fn command(&mut self, cmd: impl Into<String>) -> io::Result<NntpResponse> {
+        let mut cmd = cmd.into();
+        let is_listgroup = {
+            let b = cmd.as_bytes();
+            if b.len() >= 9 && (b[0] == b'l' || b[0] == b'L') {
+                cmd.to_lowercase().starts_with("listgroup")
+            } else {
+                false
+            }
+        };
+        cmd.push_str("\r\n");
+        self.write(cmd).await?;
+        let mut response = self.read_line().await.and_then(|l| NntpResponse::try_from(l))?;
+        if response.is_multiline(is_listgroup) {
+            response.body = self.read_block().await?.into_bytes();
+            self.rd_mode = CodecMode::ReadLine;
+        }
+        Ok(response)
     }
 }
 
@@ -534,6 +557,16 @@ where
         res
     }
 
+    /// Read a response.
+    pub async fn read_response(&mut self) -> io::Result<NntpResponse> {
+        self.read_line().await?.try_into()
+    }
+
+    /// Read a response with timeout.
+    pub async fn read_response_with_timeout(&mut self, d: Duration) -> io::Result<NntpResponse> {
+        self.read_line_with_timeout(d).await?.try_into()
+    }
+
     /// Read a block.
     pub async fn read_block(&mut self) -> io::Result<Buffer> {
         self.rd_mode = CodecMode::ReadBlock;
@@ -731,31 +764,92 @@ fn calc_delay(d: &Duration) -> Instant {
     Instant::now().checked_add(d.clone()).unwrap()
 }
 
-/// NNTP response parsing
-pub struct NntpResponse<'a> {
-    /// reply code: 100..599
-    pub code:  u32,
-    /// arguments.
-    pub args:  SmallVec<[&'a str; 5]>,
-    /// short (< 100 chars) version of the response string for diagnostics.
-    pub short: &'a str,
+struct NntpArgs<'a> {
+    data:   &'a [u8],
+    pos:    usize,
 }
 
-impl<'a> NntpResponse<'a> {
+fn split_whitespace<'a>(data: &'a str) -> NntpArgs<'a> {
+    NntpArgs {
+        data: data.as_bytes(),
+        pos: 0,
+    }
+}
+
+impl<'a> NntpArgs<'a> {
+    fn is_white(&self, pos: usize) -> bool {
+        let c = self.data[pos];
+        c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
+    }
+}
+
+impl<'a> Iterator for NntpArgs<'a> {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut start = self.pos;
+        while start < self.data.len() && self.is_white(start) {
+            start += 1;
+        }
+        if start == self.data.len() {
+            return None;
+        }
+        let mut end = start;
+        while end < self.data.len() && !self.is_white(end) {
+            end += 1;
+        }
+        self.pos = end;
+        Some(Range::<usize> { start, end })
+    }
+}
+
+/// NNTP response parsing
+pub struct NntpResponse {
+    /// The entire response line.
+    pub line: String,
+    /// reply code: 100..599
+    pub code:  u32,
+    /// body of a multi-line response.
+    pub body: Vec<u8>,
+    // arguments.
+    args:  SmallVec<[Range<usize>; 5]>,
+    // short (< 100 chars) version of the response string for diagnostics.
+    short_len: usize,
+}
+
+impl NntpResponse {
     /// Parse NNTP response.
-    pub fn parse(r: &'a [u8]) -> io::Result<NntpResponse<'a>> {
-        let (resp, short) = NntpResponse::utf8_response(r)?;
+    pub fn parse(rawline: impl Into<Buffer>) -> io::Result<NntpResponse> {
+
+        // decode utf8, strip CRLF.
+        let rawline = rawline.into().into_bytes();
+        let mut line = String::from_utf8(rawline).map_err(|_| ioerr!(InvalidData, "[invalid-utf8]"))?;
+        if line.ends_with("\r\n") {
+            line.truncate(line.len() - 2);
+        }
+
+        // length-limited string for logging purposes.
+        let short_len = if line.len() > 100 {
+            let mut n = 100;
+            while n < line.len() && !line.is_char_boundary(n) {
+                n += 1;
+            }
+            n
+        } else {
+            line.len()
+        };
+        let short = &line[..short_len];
 
         // get code.
-        let mut args = resp.split_ascii_whitespace();
-        let num = args.next().ok_or_else(|| ioerr!(InvalidData, "empty response"))?;
-        let code = match num.parse::<u32>() {
+        let mut args = split_whitespace(&line);
+        let idx = args.next().ok_or_else(|| ioerr!(InvalidData, "empty response"))?;
+        let code = match line[idx].parse::<u32>() {
             Ok(code) if code >= 100 && code <= 599 => code,
             _ => return Err(ioerr!(InvalidData, "invalid response: {}", short)),
         };
 
         // get rest of the args, up to a maximum.
-        let mut v = SmallVec::<[&'a str; 5]>::new();
+        let mut v = SmallVec::<[Range<usize>; 5]>::new();
         for w in args {
             if v.len() == v.inline_size() {
                 break;
@@ -787,45 +881,57 @@ impl<'a> NntpResponse<'a> {
             ));
         }
 
-        Ok(NntpResponse { code, args: v, short })
+        Ok(NntpResponse { code, line, args: v, short_len, body: Vec::new() })
     }
 
-    /// version of response suitable for diagnostics / logging.
-    pub fn diag_response(r: &'a [u8]) -> &'a str {
-        NntpResponse::utf8_response(r)
-            .map(|(_, diag)| diag)
-            .unwrap_or("[invalid-utf8]")
+    /// length-limited response for logging and diagnostics
+    pub fn short(&self) -> &str {
+        &self.line[..self.short_len]
     }
 
-    // decode to utf-8, return the utf-8 string and a limited length version for diagnostics.
-    fn utf8_response(r: &'a [u8]) -> io::Result<(&'a str, &'a str)> {
-        // strip trailing \r\n
-        let mut n = r.len();
-        while n > 0 && (r[n - 1] == b'\r' || r[n - 1] == b'\n') {
-            n -= 1;
+    /// Get nth argument.
+    pub fn arg(&self, idx: usize) -> &str {
+        if idx >= self.args.len() {
+            return "";
         }
-        let r = &r[..n];
+        &self.line[self.args[idx].clone()]
+    }
 
-        // decode utf8
-        let resp = match std::str::from_utf8(r) {
-            Ok(resp) => resp,
-            Err(_) => return Err(ioerr!(InvalidData, "[invalid-utf8]")),
-        };
+    /// Get number of args.
+    pub fn args_len(&self) -> usize {
+        self.args.len()
+    }
 
-        // length-limited string for logging purposes.
-        let mut lm = if resp.len() > 100 {
-            let mut n = 100;
-            while n < resp.len() && !resp.is_char_boundary(n) {
-                n += 1;
-            }
-            &resp[..n]
-        } else {
-            resp
-        };
-        if lm == "" {
-            lm = "[empty]";
+    /// is this a multi-line response?
+    pub fn is_multiline(&self, is_listgroup: bool) -> bool {
+        match self.code {
+            100|101|215|220|221|222|224|225|230|231 => true,
+            211 if is_listgroup => true,
+            _ => false,
         }
+    }
+}
 
-        Ok((resp, lm))
+impl TryFrom<NntpLine> for NntpResponse {
+    type Error = io::Error;
+
+    fn try_from(value: NntpLine) -> io::Result<NntpResponse> {
+        match value {
+            NntpLine::Eof => Err(ioerr!(UnexpectedEof, "Connection closed")),
+            NntpLine::Notification(msg) => Err(ioerr!(InvalidData, "unexpected NntpInput state")),
+            NntpLine::Line(buffer) => NntpResponse::parse(buffer),
+        }
+    }
+}
+
+impl TryFrom<NntpInput> for NntpResponse {
+    type Error = io::Error;
+
+    fn try_from(value: NntpInput) -> io::Result<NntpResponse> {
+        match value {
+            NntpInput::Eof => Err(ioerr!(UnexpectedEof, "Connection closed")),
+            NntpInput::Line(buffer) => NntpResponse::parse(buffer),
+            _ => Err(ioerr!(InvalidData, "unexpected NntpInput state")),
+        }
     }
 }

@@ -196,6 +196,11 @@ impl Buffer {
     pub fn as_utf8_str(&self) -> Result<&str, std::str::Utf8Error> {
         std::str::from_utf8(self.bytes())
     }
+
+    /// Convert this buffer into a Vec<u8>.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
 }
 
 impl BufMut for Buffer {

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::convert::TryFrom;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -6,13 +7,14 @@ use std::sync::Arc;
 
 use futures::sink::{Sink, SinkExt};
 use parking_lot::Mutex;
+use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::diag::SessionStats;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
-use crate::nntp_codec::{NntpCodec, NntpInput};
+use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::server::Notification;
 use crate::spool::{ArtLoc, ArtPart, Spool};
 use crate::util::Buffer;
@@ -309,18 +311,24 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    async fn new<T>(
+    // Create a new connection.
+    async fn new(
         id: u32,
+        label: &str,
+        outhost: &str,
         peer_queue: PeerQueue,
-        codec: NntpCodec<T>,
         recv: mpsc::Receiver<Notification>,
         spool: Spool,
-    ) -> Connection<impl AsyncRead + Unpin + Send, impl AsyncWrite + Unpin + Send>
-    where
-        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    {
+    ) -> io::Result<Connection<impl AsyncRead + Unpin + Send, impl AsyncWrite + Unpin + Send>> {
+
+        // First, connect.
+        let codec = Connection::<R, W>::connect(outhost).await.map_err(|e| {
+            ioerr!(e.kind(), "{}: {}", label, e)
+        })?;
+
+        // Succes. Now return a new Connection.
         let (reader, writer) = codec.split();
-        Connection {
+        Ok(Connection {
             id,
             reader,
             writer,
@@ -332,14 +340,81 @@ where
             streaming: 20,
             notification: recv,
             spool,
-        }
+        })
     }
 
+    // Spawn Self as a separate task.
     async fn run(mut self) {
         let _ = tokio::spawn(async move {
             // TODO: log initial start, final stats.
             let _ = self.feed().await;
         });
+    }
+
+    // Connect to remote peer.
+    async fn connect(outhost: &str) -> io::Result<NntpCodec> {
+
+        // A lookup of the hostname might return multiple addresses.
+        // We're not sure of the order that tokio returns addresses
+        // in, so sort IPv6 before IPv4.
+        let addrs = match tokio::net::lookup_host(outhost).await {
+            Ok(addr_iter) => {
+                let mut addrs: Vec<std::net::SocketAddr> = addr_iter.collect();
+                let mut addr2 = addrs.clone();
+                let v6 = addr2.drain(..).filter(|a| a.is_ipv6());
+                let v4 = addrs.drain(..).filter(|a| a.is_ipv4());
+                let mut addrs = Vec::new();
+                addrs.extend(v6);
+                addrs.extend(v4);
+                addrs
+            },
+            Err(e) => return Err(e),
+        };
+
+        // Try to connect to the peer.
+        let mut last_err = None;
+        for addr in &addrs {
+            let result = async move {
+
+                // Connect.
+                let socket = TcpStream::connect(addr).await.map_err(|e| {
+                    ioerr!(e.kind(), "{}: {}", addr, e)
+                })?;
+
+                // Create codec from socket.
+                let mut codec = NntpCodec::builder(socket)
+                    .read_timeout(30)
+                    .write_timeout(60)
+                    .build();
+
+                // Read initial response code.
+                let resp = codec.read_response().await.map_err(|e| {
+                    ioerr!(e.kind(), "{}: {}", addr, e)
+                })?;
+                if resp.code != 200 {
+                    Err(ioerr!(InvalidData, "{}: initial response {}, expected 200", addr, resp.code))?;
+                }
+
+                // Send MODE STREAM.
+                let resp = codec.command("MODE STREAM").await.map_err(|e| {
+                    ioerr!(e.kind(), "{}: {}", addr, e)
+                })?;
+                if resp.code != 203 {
+                    Err(ioerr!(InvalidData, "{}: MODE STREAM response {}, expected 203", addr, resp.code))?;
+                }
+
+                Ok(codec)
+            }.await;
+
+            // On success, return. Otherwise, save the error.
+            match result {
+                Ok(codec) => return Ok(codec),
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        // Return the last error seen.
+        Err(last_err.unwrap())
     }
 
     // Feeder loop.
@@ -377,15 +452,12 @@ where
                 }
                 res = self.reader.next() => {
                     // What did we receive?
-                    match res.unwrap() {
+                    match res.unwrap().and_then(NntpResponse::try_from) {
                         Err(e) => {
                         // TODO: update stats, log, return
                             panic!("transmit: {}", e);
                         },
-                        Ok(NntpInput::Eof) => {
-                            // TODO handle EOF
-                        },
-                        Ok(NntpInput::Line(buf)) => {
+                        Ok(resp) => {
                             // Got a reply. Find matching command.
                             match self.recv_queue.pop_front() {
                                 None => panic!("recv queue out of sync"),
@@ -394,16 +466,12 @@ where
                                     self.send_queue.push_back(ConnItem::Takethis(art));
                                 },
                                 Some(ConnItem::Takethis(art)) => {
-                                    // TODO check status code, update stats.
+                                    // TODO check status code, send article, update stats.
                                 },
                                 Some(ConnItem::Quit) => {
                                     // TODO check status code, update stats, return.
                                 },
                             }
-                        },
-                        Ok(input) => {
-                            // TODO: log error, return.
-                            panic!("Connection::feed: unexpected input state: {:?}", input);
                         },
                     }
                 }
@@ -414,6 +482,7 @@ where
         }
     }
 
+    // Put the ConnItem in the Sink.
     async fn transmit_item(&mut self, item: ConnItem) -> io::Result<()> {
         match item {
             ConnItem::Check(art) => {
