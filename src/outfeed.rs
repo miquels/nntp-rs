@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
+use tokio::task;
 
 use crate::diag::SessionStats;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
@@ -47,12 +48,12 @@ pub struct MasterFeed {
 }
 
 impl MasterFeed {
-    pub fn new(newsfeeds: Arc<NewsFeeds>, receiver: mpsc::Receiver<FeedItem>) -> MasterFeed {
+    pub fn new(newsfeeds: Arc<NewsFeeds>, receiver: mpsc::Receiver<FeedItem>, spool: Spool) -> MasterFeed {
 
         // Create all the PeerFeeds.
         let mut peerfeeds = HashMap::new();
         for peer in &newsfeeds.peers {
-            let peer_feed = PeerFeed::new(&peer.label, peer, newsfeeds.clone());
+            let peer_feed = PeerFeed::new(&peer.label, peer, newsfeeds.clone(), spool.clone());
             let tx_chan = peer_feed.tx_chan.clone();
             tokio::spawn(async move {
                 peer_feed.run().await
@@ -69,7 +70,8 @@ impl MasterFeed {
 
     // Reconfigure - check the current set of peerfeeds that we feed to to the
     // total list in the newsfeed set. Stop any of them that are not configured anymore.
-    pub fn reconfigure(&mut self) {
+    fn reconfigure(&mut self) {
+        debug!("MasterFeed::reconfigure called");
     }
 
     /// The actual task. This reads from the receiver channel and fans out
@@ -91,10 +93,13 @@ impl MasterFeed {
                     }
                 },
                 // XXX FIXME we need to look at notifications ourself too:
-                // - notification that "newsfeeds" has been reloaded -> reconfigure
                 // - ExitGraceful, need to poll to see if all peerfeeds are gone
                 // - ExitNow, ditto
                 FeedItem::Notification(msg) => {
+                    match msg {
+                        Notification::Reconfigure => self.reconfigure(),
+                        _ => {},
+                    }
                     // Forward to all peerfeeds.
                     for peerfeed in self.peerfeeds.values_mut() {
                         let _ = peerfeed.send(PeerFeedItem::Notification(msg.clone())).await;
@@ -135,7 +140,7 @@ struct PeerFeed {
     // Reference to newsfeed config.
     newsfeeds:      Arc<NewsFeeds>,
     // Peerfeed article queue.
-    queue:          PeerQueue,
+    shared:          PeerFeedShared,
     // Active connections.
     connections:    Vec<mpsc::Sender<Notification>>,
     // For round-robining, the last idle connection that was awakened.
@@ -144,6 +149,8 @@ struct PeerFeed {
     //resend:         DiskReadQueue,
     // Backlog file(s) writer.
     //backlog:        DiskWriteQueue,
+    // Spool instance.
+    spool:  Spool,
     // From newsfeeds::NewsPeer.
     pub outhost:            String,
     pub bindaddress:        String,
@@ -160,16 +167,17 @@ struct PeerFeed {
 impl PeerFeed {
 
     /// Create a new PeerFeed.
-    fn new(label: &str, nfpeer: &NewsPeer, newsfeeds: Arc<NewsFeeds>) -> PeerFeed {
+    fn new(label: &str, nfpeer: &NewsPeer, newsfeeds: Arc<NewsFeeds>, spool: Spool) -> PeerFeed {
         let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(16);
         PeerFeed {
             label:  label.to_string(),
             rx_chan,
             tx_chan: tx_chan.clone(),
             newsfeeds,
-            queue:      PeerQueue::new(tx_chan),
+            shared:      PeerFeedShared::new(tx_chan),
             connections:    Vec::new(),
             last_idle:  0,
+            spool,
             outhost:    nfpeer.outhost.clone(),
             bindaddress: nfpeer.bindaddress.clone(),
             port:       nfpeer.port,
@@ -192,25 +200,38 @@ impl PeerFeed {
                 },
                 PeerFeedItem::Article(art) => {
                     // queue article
-                    let mut pq = self.queue.inner.lock();
-                    if pq.queue.len() > 1000 {
+                    let mut shared = self.shared.lock();
+                    if shared.queue.len() > 1000 {
                         // XXX TODO: full. send half of the queue to the backlog.
                         continue;
                     }
-                    pq.queue.push_back(art);
+                    shared.queue.push_back(art);
 
                     // if we have no connections, or less than maxconn, create a connection here.
-                    // unless a connection is still being set up - we only create one connection
-                    // at a time, so that we don't thunderherd the peer.
-                    // TODO: create connection.
+                    if shared.num_conns < self.maxparallel {
+                        shared.num_conns += 1;
+                        let label = self.label.clone();
+                        let outhost = self.outhost.clone();
+                        let peerfeed = self.shared.clone();
+                        let spool = self.spool.clone();
+
+                        // XXX TODO
+                        task::spawn(async move {
+                            let conn = Connection::new(&label, &outhost, peerfeed, spool);
+                        });
+
+                        // unless a connection is still being set up - we only create one connection
+                        // at a time, so that we don't thunderherd the peer.
+                        // TODO: create connection.
+                    }
 
                     // now notify one of the connections. TODO: use u128.leading_zeros()
-                    if pq.idle_conns != 0 {
+                    if shared.idle_conns != 0 {
                         let mut conn_id = self.last_idle;
                         let max = self.connections.len() as u32;
                         for _ in 0 .. max {
                             conn_id = (conn_id + 1) % max;
-                            if (pq.idle_conns & (1 << conn_id)) != 0 {
+                            if (shared.idle_conns & (1 << conn_id)) != 0 {
                                 // XXX TODO queue depth one
                                 if let Ok(_) = self.connections[conn_id as usize].try_send(Notification::None) {
                                     self.last_idle = conn_id;
@@ -225,33 +246,44 @@ impl PeerFeed {
     }
 }
 
-// Peerfeed article queue and Connection-idle indicator.
+// Data shared between PeerFeed and Connections.
 #[derive(Clone)]
-struct PeerQueue {
-    inner:  Arc<Mutex<PeerQueueInner>>,
+struct PeerFeedShared {
+    inner:  Arc<Mutex<PeerFeedSharedInner>>,
+}
+
+impl PeerFeedShared {
 }
 
 // Peerfeed article queue and Connection-idle indicator.
-struct PeerQueueInner {
+struct PeerFeedSharedInner {
     queue:  VecDeque<PeerArticle>,
+    num_conns:  u32,
     idle_conns: u128,
     tx_chan:        mpsc::Sender<PeerFeedItem>,
 }
 
-impl PeerQueue {
-    fn new(tx_chan: mpsc::Sender<PeerFeedItem>) -> PeerQueue {
-        let inner = PeerQueueInner {
+impl PeerFeedShared {
+    fn new(tx_chan: mpsc::Sender<PeerFeedItem>) -> PeerFeedShared {
+        let inner = PeerFeedSharedInner {
             queue:  VecDeque::new(),
             idle_conns: 0,
+            num_conns: 0,
             tx_chan,
         };
-        PeerQueue {
+        PeerFeedShared {
             inner: Arc::new(Mutex::new(inner)),
         }
     }
 
-    fn pop(&self, conn_id: u32, empty: bool) -> Option<PeerArticle> {
-        let mut inner = self.inner.lock();
+    // Add a connection. Returns an id and a rx channel.
+    fn add_connection(&self) -> (u32, mpsc::Receiver<Notification>) {
+        let (_tx_chan, rx_chan) = mpsc::channel::<Notification>(16);
+        (0, rx_chan)
+    }
+
+    fn get_article(&self, conn_id: u32, empty: bool) -> Option<PeerArticle> {
+        let mut inner = self.lock();
         if let Some(art) = inner.queue.pop_front() {
             return Some(art);
         }
@@ -262,6 +294,10 @@ impl PeerQueue {
             let _ = inner.tx_chan.try_send(PeerFeedItem::Notification(Notification::None));
         }
         None
+    }
+
+    fn lock(&self) -> lock_api::MutexGuard<parking_lot::RawMutex, PeerFeedSharedInner> {
+        self.inner.lock()
     }
 }
 
@@ -283,13 +319,13 @@ impl PeerQueue {
 // Any unreckognized status code in the reply will cause us to close
 // the connection, and put any outstanding request back in the PeerFeed queue.
 //
-struct Connection<R, W> {
+struct Connection {
     id: u32,
     // reader / writer.
-    reader:       NntpCodec<R>,
-    writer:       NntpCodec<W>,
+    reader:       NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
+    writer:       NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
     // Shared peerfeed.
-    peer_queue:   PeerQueue,
+    peerfeed:     PeerFeedShared,
     // Max number of outstanding requests.
     streaming:    usize,
     // Items waiting to be sent.
@@ -306,39 +342,36 @@ struct Connection<R, W> {
     spool:        Spool,
 }
 
-impl<R, W> Connection<R, W>
-where
-    R: AsyncRead + Send + Unpin + 'static,
-    W: AsyncWrite + Send + Unpin + 'static,
-{
+impl Connection {
     // Create a new connection.
     async fn new(
-        id: u32,
         label: &str,
         outhost: &str,
-        peer_queue: PeerQueue,
-        recv: mpsc::Receiver<Notification>,
+        peerfeed: PeerFeedShared,
         spool: Spool,
-    ) -> io::Result<Connection<impl AsyncRead + Unpin + Send, impl AsyncWrite + Unpin + Send>> {
+    ) -> io::Result<Connection> {
 
         // First, connect.
-        let codec = Connection::<R, W>::connect(outhost).await.map_err(|e| {
+        let codec = Connection::connect(outhost).await.map_err(|e| {
             ioerr!(e.kind(), "{}: {}", label, e)
         })?;
 
-        // Succes. Now return a new Connection.
+        // Success. Register a new connection.
+        let (id, notification) = peerfeed.add_connection();
+
+        // Build and return a new Connection struct.
         let (reader, writer) = codec.split();
         Ok(Connection {
             id,
             reader,
             writer,
-            peer_queue,
+            peerfeed,
             send_queue: VecDeque::new(),
             recv_queue: VecDeque::new(),
             stats: SessionStats::default(),
             sender_done: false,
             streaming: 20,
-            notification: recv,
+            notification,
             spool,
         })
     }
@@ -377,7 +410,9 @@ where
             let result = async move {
 
                 // Connect.
+                trace!("Trying to connect to {:?}", addr);
                 let socket = TcpStream::connect(addr).await.map_err(|e| {
+                    trace!("connect {:?}: {}", addr, e);
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
 
@@ -389,16 +424,20 @@ where
 
                 // Read initial response code.
                 let resp = codec.read_response().await.map_err(|e| {
+                    trace!("{:?} read_response: {}", addr, e);
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
+                trace!("<< {}", resp.short());
                 if resp.code != 200 {
                     Err(ioerr!(InvalidData, "{}: initial response {}, expected 200", addr, resp.code))?;
                 }
 
                 // Send MODE STREAM.
+                trace!(">> MODE STREAM");
                 let resp = codec.command("MODE STREAM").await.map_err(|e| {
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
+                trace!("<< {}", resp.short());
                 if resp.code != 203 {
                     Err(ioerr!(InvalidData, "{}: MODE STREAM response {}, expected 203", addr, resp.code))?;
                 }
@@ -425,7 +464,7 @@ where
             // see if we need to pull an article from the peerfeed queue.
             let queue_len = self.recv_queue.len() + self.send_queue.len();
             if queue_len < self.streaming {
-                if let Some(art) = self.peer_queue.pop(self.id, queue_len == 0) {
+                if let Some(art) = self.peerfeed.get_article(self.id, queue_len == 0) {
                     self.send_queue.push_back(ConnItem::Check(art));
                 }
             }

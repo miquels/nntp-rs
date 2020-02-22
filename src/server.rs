@@ -386,9 +386,10 @@ impl Server {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Notification {
     ExitGraceful,
     ExitNow,
+    Reconfigure,
     None,
 }

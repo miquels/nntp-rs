@@ -171,7 +171,7 @@ pub struct NntpCodec<S = TcpStream> {
 }
 
 impl<S> NntpCodec<S>
-where S: AsyncRead + AsyncWrite + Unpin + 'static
+where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 {
     /// Returns a new NntpCodec. For more control, use builder() or NntpCodecBuilder::new().
     pub fn new(socket: S) -> NntpCodec<S> {
@@ -187,13 +187,13 @@ where S: AsyncRead + AsyncWrite + Unpin + 'static
     pub fn split(
         self,
     ) -> (
-        NntpCodec<impl AsyncRead + Unpin>,
-        NntpCodec<impl AsyncWrite + Unpin>,
+        NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
+        NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
     ) {
         let (rsock, wsock) = tokio::io::split(self.socket);
 
         let r = NntpCodec {
-            socket:          rsock,
+            socket:          Box::new(rsock) as Box<dyn AsyncRead + Send + Unpin>,
             watcher:         self.watcher,
             rd:              self.rd,
             rd_pos:          self.rd_pos,
@@ -213,7 +213,7 @@ where S: AsyncRead + AsyncWrite + Unpin + 'static
         };
 
         let w = NntpCodec {
-            socket:          wsock,
+            socket:          Box::new(wsock) as Box<dyn AsyncWrite + Send + Unpin>,
             watcher:         None,
             rd:              Buffer::new(),
             rd_pos:          0,
