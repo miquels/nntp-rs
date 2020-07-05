@@ -72,7 +72,6 @@ impl NntpSession {
 
         // decremented in Drop.
         server.tot_sessions.fetch_add(1, Ordering::SeqCst);
-        server.thr_sessions.fetch_add(1, Ordering::SeqCst);
 
         NntpSession {
             codec:           codec,
@@ -430,6 +429,5 @@ impl Drop for NntpSession {
             self.server.remove_connection(name);
         }
         self.server.tot_sessions.fetch_sub(1, Ordering::SeqCst);
-        self.server.thr_sessions.fetch_sub(1, Ordering::SeqCst);
     }
 }

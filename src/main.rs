@@ -221,15 +221,7 @@ fn main() -> io::Result<()> {
     }
 
     // and start server.
-    let mut server = server::Server::new(hist, spool);
-    match config.server.runtime.as_ref().map(|s| s.as_str()) {
-        None | Some("threaded") => server.run_threaded(listeners),
-        Some("multisingle") => server.run_multisingle(listeners),
-        Some(e) => {
-            eprintln!("nntp-rs: unknown runtime {}", e);
-            exit(1);
-        },
-    }
+    server::Server::start(hist, spool, listeners)
 }
 
 fn run_subcommand(cmd: Command, config: &config::Config, pretty: bool) -> ! {

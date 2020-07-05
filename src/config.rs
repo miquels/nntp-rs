@@ -57,7 +57,8 @@ pub struct Server {
     #[serde(default)]
     pub hostname:       String,
     pub listen:         Option<StringOrVec>,
-    pub runtime:        Option<String>,
+    #[serde(default)]
+    pub runtime:        String,
     pub user:           Option<String>,
     pub group:          Option<String>,
     pub uid:            Option<users::uid_t>,
@@ -159,8 +160,18 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
         }
     }
 
-    match cfg.server.runtime.as_ref().map(|s| s.as_str()) {
-        Some("threaded") | None => {
+    match cfg.server.runtime.as_str() {
+        "" => cfg.server.runtime = "threaded".to_string(),
+        "threaded" => {},
+        "multisingle" => {},
+        r => return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown runtime type: {}", r),
+            )),
+    }
+
+    match cfg.server.runtime.as_str() {
+        "threaded" => {
             match cfg.threaded.blocking_io.as_ref().map(|s| s.as_str()) {
                 Some("in_place") => cfg.threaded.blocking_type = Some(BlockingType::InPlace),
                 Some("threadpool") => cfg.threaded.blocking_type = Some(BlockingType::ThreadPool),

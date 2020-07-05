@@ -88,7 +88,10 @@ impl MasterFeed {
                                 msgid:  art.msgid.clone(),
                                 location: art.location.clone(),
                             };
-                            let _ = peerfeed.send(PeerFeedItem::Article(peer_art)).await;
+                            if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
+                                warn!("MasterFeed::run: internal error: send to PeerFeed({}): {}",
+                                    peername, e);
+                            }
                         }
                     }
                 },
@@ -134,15 +137,19 @@ struct PeerArticle {
 struct PeerFeed {
     // Name.
     label:          String,
-    // Comms channel.
-    tx_chan:        mpsc::Sender<PeerFeedItem>,
+    // The peerfeed listens on this channel for messages from:
+    // - MasterFeed: articles, notifications.
+    // - Connection: notifications.
     rx_chan:        mpsc::Receiver<PeerFeedItem>,
+    // We keep tx_chan around in order to clone it for newly
+    // instantiated Connections so they can send notifications to us.
+    tx_chan:        mpsc::Sender<PeerFeedItem>,
     // Reference to newsfeed config.
     newsfeeds:      Arc<NewsFeeds>,
     // Peerfeed article queue.
     shared:          PeerFeedShared,
     // Active connections.
-    connections:    Vec<mpsc::Sender<Notification>>,
+    connections:    Vec<Option<mpsc::Sender<Notification>>>,
     // For round-robining, the last idle connection that was awakened.
     last_idle: u32,
     // Backlog file(s) reader.
@@ -199,50 +206,84 @@ impl PeerFeed {
                     // XXX TODO handle notification
                 },
                 PeerFeedItem::Article(art) => {
-                    // queue article
-                    let mut shared = self.shared.lock();
-                    if shared.queue.len() > 1000 {
-                        // XXX TODO: full. send half of the queue to the backlog.
-                        continue;
-                    }
-                    shared.queue.push_back(art);
 
-                    // if we have no connections, or less than maxconn, create a connection here.
-                    if shared.num_conns < self.maxparallel {
-                        shared.num_conns += 1;
-                        let label = self.label.clone();
-                        let outhost = self.outhost.clone();
-                        let peerfeed = self.shared.clone();
-                        let spool = self.spool.clone();
+                    let num_conns = {
 
-                        // XXX TODO
-                        task::spawn(async move {
-                            let conn = Connection::new(&label, &outhost, peerfeed, spool);
-                        });
+                        // Isolated scope to access self.shared.
+                        let mut shared = self.shared.lock();
+                        if shared.queue.len() > 1000 {
+                            // XXX TODO: full. send half of the queue to the backlog.
+                            continue;
+                        }
 
-                        // unless a connection is still being set up - we only create one connection
-                        // at a time, so that we don't thunderherd the peer.
-                        // TODO: create connection.
-                    }
+                        // queue article
+                        shared.queue.push_back(art);
 
-                    // now notify one of the connections. TODO: use u128.leading_zeros()
-                    if shared.idle_conns != 0 {
-                        let mut conn_id = self.last_idle;
-                        let max = self.connections.len() as u32;
-                        for _ in 0 .. max {
-                            conn_id = (conn_id + 1) % max;
-                            if (shared.idle_conns & (1 << conn_id)) != 0 {
-                                // XXX TODO queue depth one
-                                if let Ok(_) = self.connections[conn_id as usize].try_send(Notification::None) {
-                                    self.last_idle = conn_id;
-                                    break;
+                        // now notify one of the connections. TODO: use u128.leading_zeros()
+                        if shared.idle_conns != 0 {
+
+                            let mut conn_id = self.last_idle;
+                            let max = self.connections.len() as u32;
+                            for _ in 0 .. max {
+
+                                conn_id = (conn_id + 1) % max;
+                                if (shared.idle_conns & (1 << conn_id)) == 0 {
+                                    continue;
+                                }
+
+                                if let Some(conn) = self.connections[conn_id as usize].as_mut() {
+                                    // XXX TODO queue depth one
+                                    if conn.try_send(Notification::None).is_ok() {
+                                        self.last_idle = conn_id;
+                                        break;
+                                    }
                                 }
                             }
                         }
+
+                        shared.num_conns
+                    };
+
+                    // if we have no connections, or less than maxconn, create a connection here.
+                    if num_conns < self.maxparallel {
+                        self.add_connection().await;
                     }
                 }
             }
         }
+    }
+
+    async fn add_connection(&mut self) {
+        // Find a new connection ID.
+        for idx in 0 .. self.maxparallel {
+            if idx == self.connections.len() {
+                XXXXX
+            }
+        }
+
+        let mut shared = self.shared.lock();
+        shared.num_conns += 1;
+
+        let label = self.label.clone();
+        let outhost = self.outhost.clone();
+        let peerfeed = self.shared.clone();
+        let spool = self.spool.clone();
+        let shared_clone = self.shared.clone();
+
+        // We spawn a new Connection task.
+        task::spawn(async move {
+            match Connection::new(&label, &outhost, peerfeed, spool).await {
+                Ok(conn) => {
+                    // On succes, we start talking nntp.
+                    conn.run();
+                },
+                Err(_) => {
+                    // We failed, too bad.
+                    let mut shared = shared_clone.lock();
+                    shared.num_conns -= 1;
+                }
+            }
+        });
     }
 }
 
@@ -257,9 +298,13 @@ impl PeerFeedShared {
 
 // Peerfeed article queue and Connection-idle indicator.
 struct PeerFeedSharedInner {
+    // A limited size queue that connections can pop articles from.
     queue:  VecDeque<PeerArticle>,
+    // Number of connections.
     num_conns:  u32,
+    // Bitmap of connections that are idle.
     idle_conns: u128,
+    // To send notifications to the PeerFeed.
     tx_chan:        mpsc::Sender<PeerFeedItem>,
 }
 
@@ -389,14 +434,14 @@ impl Connection {
 
         // A lookup of the hostname might return multiple addresses.
         // We're not sure of the order that tokio returns addresses
-        // in, so sort IPv6 before IPv4.
+        // in, so sort IPv6 before IPv4 but otherwise keep the order
+        // intact.
         let addrs = match tokio::net::lookup_host(outhost).await {
             Ok(addr_iter) => {
                 let mut addrs: Vec<std::net::SocketAddr> = addr_iter.collect();
-                let mut addr2 = addrs.clone();
-                let v6 = addr2.drain(..).filter(|a| a.is_ipv6());
-                let v4 = addrs.drain(..).filter(|a| a.is_ipv4());
-                let mut addrs = Vec::new();
+                let v6 = addrs.clone().drain(..).filter(|a| a.is_ipv6());
+                let v4 = addrs.clone().drain(..).filter(|a| a.is_ipv4());
+                addrs.truncate(0);
                 addrs.extend(v6);
                 addrs.extend(v4);
                 addrs

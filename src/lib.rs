@@ -19,7 +19,7 @@ pub mod newsfeeds;
 pub mod nntp_codec;
 pub mod nntp_feeder;
 pub mod nntp_session;
-pub mod outfeed;
+//pub mod outfeed;
 pub mod server;
 pub mod spool;
 pub mod util;

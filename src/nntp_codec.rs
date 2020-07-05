@@ -918,7 +918,7 @@ impl TryFrom<NntpLine> for NntpResponse {
     fn try_from(value: NntpLine) -> io::Result<NntpResponse> {
         match value {
             NntpLine::Eof => Err(ioerr!(UnexpectedEof, "Connection closed")),
-            NntpLine::Notification(msg) => Err(ioerr!(InvalidData, "unexpected NntpInput state")),
+            NntpLine::Notification(_msg) => Err(ioerr!(InvalidData, "unexpected NntpInput state")),
             NntpLine::Line(buffer) => NntpResponse::parse(buffer),
         }
     }
