@@ -11,6 +11,8 @@ use std::time::Duration;
 
 mod diablo;
 
+use serde::Deserialize;
+
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::blocking::{BlockingPool, BlockingType};
@@ -320,7 +322,7 @@ impl Spool {
                     w
                 }
             };
-            debug!("XXX insert {} into spools, weight {}", n, weight);
+            log::debug!("XXX insert {} into spools, weight {}", n, weight);
             spools.insert(
                 n as u8,
                 BackendDef {
@@ -420,7 +422,7 @@ impl Spool {
         self.pool
             .spawn_fn(move || {
                 use std::thread;
-                trace!("spool reader on thread {:?}", thread::current().id());
+                log::trace!("spool reader on thread {:?}", thread::current().id());
                 let be = match inner.spool.get(&art_loc.spool as &u8) {
                     None => {
                         return Err(io::Error::new(
@@ -439,7 +441,7 @@ impl Spool {
     pub fn get_spool(&self, art: &Article, newsgroups: &[&str]) -> Option<u8> {
         // calculate a hash to use with the weights thing below.
         let hash = util::DHash::hash_str(&art.msgid).as_u64();
-        debug!("get_spool: {} hash {}", art.msgid, hash);
+        log::debug!("get_spool: {} hash {}", art.msgid, hash);
 
         for g in &self.inner.groupmap {
             // if newsgroups matches, try this metaspool.
@@ -470,13 +472,13 @@ impl Spool {
             }
             // if no spools otherwise, no match.
             if ms.spool.len() == 0 {
-                debug!("XXX no spools");
+                log::debug!("XXX no spools");
                 continue;
             }
 
             // shortcut for simple case.
             if ms.spool.len() == 1 {
-                debug!("XXX 1 spools");
+                log::debug!("XXX 1 spools");
                 return Some(ms.spool[0]);
             }
 
@@ -486,9 +488,9 @@ impl Spool {
             let x = ((hash % totweight as u64) & 0xffffffff) as u32;
             let mut a = 0;
             for spoolno in &ms.spool {
-                debug!("XXX check spoolno {}", spoolno);
+                log::debug!("XXX check spoolno {}", spoolno);
                 let sp = self.inner.spool.get(spoolno).unwrap();
-                debug!("get_spool: check weight {} <= {} < {}", a, x, a + sp.weight);
+                log::debug!("get_spool: check weight {} <= {} < {}", a, x, a + sp.weight);
                 if x >= a && x < a + sp.weight {
                     return Some(*spoolno);
                 }
@@ -509,7 +511,7 @@ impl Spool {
         self.pool
             .spawn_fn(move || {
                 use std::thread;
-                trace!("spool writer on thread {:?}", thread::current().id());
+                log::trace!("spool writer on thread {:?}", thread::current().id());
                 let spool = &inner.spool.get(&spoolno).unwrap().backend;
                 spool.write(headers, body)
             })

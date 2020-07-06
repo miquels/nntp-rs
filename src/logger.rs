@@ -136,7 +136,7 @@ impl Logger {
                         // every second, check.
                         if let Err(e) = dest.check() {
                             if !is_log {
-                                error!("{}", e);
+                                log::error!("{}", e);
                             }
                         }
                     },
@@ -256,7 +256,7 @@ impl LogDest {
     fn log_line(&mut self, is_log: bool, level: log::Level, line: String) {
         if let Err(e) = self.check() {
             if !is_log {
-                error!("{}", e);
+                log::error!("{}", e);
             }
         }
 

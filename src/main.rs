@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate log;
-
 use std::io;
 use std::panic;
 use std::process::exit;
@@ -213,7 +210,7 @@ fn main() -> io::Result<()> {
         })
         .unwrap();
 
-    info!("Listening on {:?}", addrs);
+    log::info!("Listening on {:?}", addrs);
 
     // install custom panic logger.
     if config.server.log_panics {
@@ -385,7 +382,7 @@ fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
 
 fn handle_panic() {
     // This hook mimics the standard logging hook, it adds some extra
-    // thread-id info, and logs to error!().
+    // thread-id info, and logs to log::error!().
     panic::set_hook(Box::new(|info| {
         let mut msg = "".to_string();
         let mut loc = "".to_string();
@@ -404,9 +401,9 @@ fn handle_panic() {
             None => format!("{:?}", t.id()),
         };
         if msg == "" && loc == "" {
-            error!("thread '{}' panicked", name);
+            log::error!("thread '{}' panicked", name);
         } else {
-            error!("thread '{}' panicked at {}{}", name, msg, loc);
+            log::error!("thread '{}' panicked at {}{}", name, msg, loc);
         }
     }));
 }

@@ -59,11 +59,10 @@ impl Server {
 
         // Start the trust-resolver task and the hostcache task.
         let watcher2 = watcher.clone();
-        let res = threaded_handle.block_on(async move {
-            hostcache::HostCache::resolver_task(watcher2).await
-        });
+        let res =
+            threaded_handle.block_on(async move { hostcache::HostCache::resolver_task(watcher2).await });
         if let Err(e) = res {
-            error!("initializing trust dns resolver: {}", e);
+            log::error!("initializing trust dns resolver: {}", e);
             exit(1);
         }
 
@@ -146,7 +145,7 @@ impl Server {
                     .enable_all()
                     .build()
                     .unwrap();
-                trace!("runtime::basic_scheduler on {:?}", thread::current().id());
+                log::trace!("runtime::basic_scheduler on {:?}", thread::current().id());
 
                 basic_runtime.block_on(async move {
                     let mut tasks = Vec::new();
@@ -185,10 +184,8 @@ impl Server {
     fn notification_setup(
         &self,
         runtime: &runtime::Handle,
-    ) -> (
-        mpsc::Sender<Notification>,
-        watch::Receiver<Notification>,
-    ) {
+    ) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>)
+    {
         // tokio::watch::channel is SPMC, so front it with a MPSC channel
         // so that we have, in effect, a MPMC channel.
         let (notifier_master, watcher) = watch::channel(Notification::None);
@@ -197,7 +194,6 @@ impl Server {
         let rnotifier = notifier.clone();
 
         runtime.spawn(async move {
-
             task::spawn(async move {
                 while let Some(notification) = notifier_receiver.next().await {
                     if let Err(_) = notifier_master.broadcast(notification) {
@@ -211,7 +207,7 @@ impl Server {
             task::spawn(async move {
                 let mut sig_int = signal(SignalKind::interrupt()).unwrap();
                 while let Some(_) = sig_int.next().await {
-                    info!("received SIGINT");
+                    log::info!("received SIGINT");
                     let _ = tx1.send(Notification::ExitGraceful).await;
                 }
             });
@@ -221,7 +217,7 @@ impl Server {
             task::spawn(async move {
                 let mut sig_term = signal(SignalKind::terminate()).unwrap();
                 while let Some(_) = sig_term.next().await {
-                    info!("received SIGTERM");
+                    log::info!("received SIGTERM");
                     let _ = tx2.send(Notification::ExitGraceful).await;
                 }
             });
@@ -231,14 +227,14 @@ impl Server {
             task::spawn(async move {
                 let mut sig_term = signal(SignalKind::user_defined1()).unwrap();
                 while let Some(_) = sig_term.next().await {
-                    info!("received USR1");
+                    log::info!("received USR1");
                     let config = config::get_config();
                     if let Err(e) = server
                         .history
                         .expire(&server.spool, config.history.remember.clone(), false, true)
                         .await
                     {
-                        error!("expire: {}", e);
+                        log::error!("expire: {}", e);
                     }
                 }
             });
@@ -259,7 +255,7 @@ impl Server {
         while let Some(notification) = watcher.next().await {
             match notification {
                 Notification::ExitGraceful => {
-                    info!("received Notification::ExitGraceful");
+                    log::info!("received Notification::ExitGraceful");
                     break;
                 },
                 Notification::ExitNow => {
@@ -273,20 +269,20 @@ impl Server {
         // now busy-wait until all connections are closed.
         while self.tot_sessions.load(Ordering::SeqCst) > 0 {
             if waited == 50 {
-                info!("sending Notification::ExitNow to all remaining sessions");
+                log::info!("sending Notification::ExitNow to all remaining sessions");
                 let _ = notifier.send(Notification::ExitNow).await;
             }
             waited += 1;
             let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
             if waited == 100 || waited % 600 == 0 {
-                warn!("still waiting!");
+                log::warn!("still waiting!");
             }
         }
 
         let incoming_logger = logger::get_incoming_logger();
         incoming_logger.quit();
 
-        info!("exiting.");
+        log::info!("exiting.");
         logger::logger_flush();
     }
 

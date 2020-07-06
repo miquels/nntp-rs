@@ -308,7 +308,7 @@ impl DHistoryInner {
 
         // read DHistHead and validate it.
         let dhh = read_dhisthead_at(&f, 0)?;
-        debug!("{:?} - dhisthead: {:?}", path, &dhh);
+        log::debug!("{:?} - dhisthead: {:?}", path, &dhh);
         if dhh.magic != DHISTHEAD_MAGIC ||
             dhh.version != DHISTHEAD_VERSION2 ||
             dhh.histent_size as usize != DHISTENT_SIZE ||
@@ -522,7 +522,7 @@ impl DHistoryInner {
             if (kept + removed) % 10000 == 0 && last_tm.seconds_elapsed() >= 10 {
                 last_pct = (100 * (rpos - self.data_offset)) / (rsize - self.data_offset);
                 last_tm = UnixTime::now();
-                info!("expire {:?}: {}%", self.path, last_pct);
+                log::info!("expire {:?}: {}%", self.path, last_pct);
             }
         }
 
@@ -531,14 +531,18 @@ impl DHistoryInner {
         wfile.sync_all()?;
 
         if last_pct > 0 && last_pct < 100 {
-            info!("expire {:?}: 100%", self.path);
+            log::info!("expire {:?}: 100%", self.path);
         }
 
         if first || removed > 0 || marked > 0 {
             let i = if first { "" } else { " (incremental)" };
-            info!(
+            log::info!(
                 "expire {:?}{}: removed {} entries, kept {} entries, marked {} entries as expired",
-                self.path, i, removed, kept, marked
+                self.path,
+                i,
+                removed,
+                kept,
+                marked
             );
         }
 
@@ -549,20 +553,20 @@ impl DHistoryInner {
     // oldest. If it has a timestamp _before_ any of the spool_oldest,
     // we need to expire the history file.
     fn need_expire(&self, spool_oldest: &HashMap<u8, UnixTime>) -> bool {
-        debug!("need_expire: spool_oldest: {:?}", spool_oldest);
+        log::debug!("need_expire: spool_oldest: {:?}", spool_oldest);
         // get first entry (actually, second. First is a zero-entry).
         let pos = self.data_offset + DHISTENT_SIZE as u64;
         if let Ok(dhe) = read_dhistent_at(&self.rfile, pos, None) {
-            debug!("need_expire: first history entry: {:?}", dhe);
+            log::debug!("need_expire: first history entry: {:?}", dhe);
             for tm in spool_oldest.values() {
-                debug!("need_expire: check {} < {}", dhe.when(), *tm);
+                log::debug!("need_expire: check {} < {}", dhe.when(), *tm);
                 if dhe.when() < *tm {
-                    debug!("need_expire: true");
+                    log::debug!("need_expire: true");
                     return true;
                 }
             }
         }
-        debug!("need_expire: false");
+        log::debug!("need_expire: false");
         false
     }
 
@@ -578,11 +582,11 @@ impl DHistoryInner {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !force && !self.need_expire(&spool_oldest) {
-            info!("expire {:?}: no expire needed", self.path);
+            log::info!("expire {:?}: no expire needed", self.path);
             return Ok(None);
         }
 
-        info!("expire {:?}: start", self.path);
+        log::info!("expire {:?}: start", self.path);
 
         // open dhistory.new.
         let mut new_path = self.path.clone();
@@ -614,7 +618,7 @@ impl DHistoryInner {
         self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, false)?;
 
         if no_rename {
-            info!("expire {:?}: done, new file is {:?}", self.path, new_path);
+            log::info!("expire {:?}: done, new file is {:?}", self.path, new_path);
             return Ok(None);
         }
 
@@ -630,7 +634,7 @@ impl DHistoryInner {
             e
         })?;
 
-        info!("expire {:?}: done", self.path);
+        log::info!("expire {:?}: done", self.path);
 
         // update, and return new inner.
         new_inner.path = self.path.clone();
@@ -640,12 +644,12 @@ impl DHistoryInner {
 
     // Inspect the history file.
     fn do_inspect(&self, spool: spool::Spool) -> io::Result<()> {
-        info!("inspect {:?}: start.", self.path);
+        log::info!("inspect {:?}: start.", self.path);
 
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !self.need_expire(&spool_oldest) {
-            info!("inspect {:?}: status: no expire needed", self.path);
+            log::info!("inspect {:?}: status: no expire needed", self.path);
         }
 
         // clone filehandle of current file and seek to the first entry.
@@ -705,7 +709,7 @@ impl DHistoryInner {
         }
 
         // now report.
-        info!("inspect {:?}: {} entries total", self.path, idx);
+        log::info!("inspect {:?}: {} entries total", self.path, idx);
         let mut spools = stats.keys().map(|k| *k).collect::<Vec<_>>();
         spools.sort();
         for k in &spools {
@@ -716,10 +720,18 @@ impl DHistoryInner {
             } else {
                 (*k).to_string()
             };
-            info!(
+            log::info!(
                 "spool {:>4}{} present: {:10} remembered: {:10} rejected: {:10} \
                  unknown: {:10} oldest: {:?} newest: {:?} spool_oldest: {:?}",
-                spno, star, s.tot, s.exp, s.rej, s.unk, s.oldest, s.newest, s.spool_oldest
+                spno,
+                star,
+                s.tot,
+                s.exp,
+                s.rej,
+                s.unk,
+                s.oldest,
+                s.newest,
+                s.spool_oldest
             );
         }
         Ok(())

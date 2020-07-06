@@ -92,7 +92,7 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
                                 // ISPAM/ESPAM don't inherit GLOBAL either,
                                 // besides, we ignore them for now.
                                 nf = NewsPeer::new();
-                                warn!("{}: ignoring {} label", info, words[1]);
+                                log::warn!("{}: ignoring {} label", info, words[1]);
                             },
                             _ => {},
                         }
@@ -201,7 +201,7 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
             Err(invalid_data!("{}: {}: data after label", info, words[0]))?;
         }
         match nf.peer_map.get(words[1]) {
-            None => warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
+            None => log::warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
             Some(idx) => {
                 nf.peers[*idx].inhost.push(words[0].to_string());
             },
@@ -437,7 +437,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "delayfeed"|
         "delayinfeed"|
         "setqos"|
-        "settos" => warn!("{}: unsupported keyword, ignoring", words[0]),
+        "settos" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
 
         // actually don't know.
         _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
@@ -472,7 +472,7 @@ fn set_spooldef_item(spool: &mut SpoolDef, spoolpath: &str, words: &[&str]) -> i
         "expiremethod" => {},
 
         // we do not support this, warn and ignore.
-        "minfreefiles" | "compresslvl" => warn!("{}: unsupported keyword, ignoring", words[0]),
+        "minfreefiles" | "compresslvl" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
 
         // we do not support this, error and return.
         "spooldirs" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,
@@ -501,7 +501,9 @@ fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
             let s = parse_string(words)?;
             match s.as_str() {
                 "space" => Err(invalid_data!("{} space: not supported (only weighted)", words[0]))?,
-                "sequential" | "single" => warn!("{} {}: ignoring, always using \"weighted\"", words[0], s),
+                "sequential" | "single" => {
+                    log::warn!("{} {}: ignoring, always using \"weighted\"", words[0], s)
+                },
                 "weighted" => {},
                 _ => Err(invalid_data!("{} {}: unknown allocstrat", words[0], s))?,
             }

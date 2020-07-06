@@ -71,7 +71,7 @@ impl MasterFeed {
     // Reconfigure - check the current set of peerfeeds that we feed to to the
     // total list in the newsfeed set. Stop any of them that are not configured anymore.
     fn reconfigure(&mut self) {
-        debug!("MasterFeed::reconfigure called");
+        log::debug!("MasterFeed::reconfigure called");
     }
 
     /// The actual task. This reads from the receiver channel and fans out
@@ -89,7 +89,7 @@ impl MasterFeed {
                                 location: art.location.clone(),
                             };
                             if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
-                                warn!("MasterFeed::run: internal error: send to PeerFeed({}): {}",
+                                log::warn!("MasterFeed::run: internal error: send to PeerFeed({}): {}",
                                     peername, e);
                             }
                         }
@@ -455,9 +455,9 @@ impl Connection {
             let result = async move {
 
                 // Connect.
-                trace!("Trying to connect to {:?}", addr);
+                log::trace!("Trying to connect to {:?}", addr);
                 let socket = TcpStream::connect(addr).await.map_err(|e| {
-                    trace!("connect {:?}: {}", addr, e);
+                    log::trace!("connect {:?}: {}", addr, e);
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
 
@@ -469,20 +469,20 @@ impl Connection {
 
                 // Read initial response code.
                 let resp = codec.read_response().await.map_err(|e| {
-                    trace!("{:?} read_response: {}", addr, e);
+                    log::trace!("{:?} read_response: {}", addr, e);
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
-                trace!("<< {}", resp.short());
+                log::trace!("<< {}", resp.short());
                 if resp.code != 200 {
                     Err(ioerr!(InvalidData, "{}: initial response {}, expected 200", addr, resp.code))?;
                 }
 
                 // Send MODE STREAM.
-                trace!(">> MODE STREAM");
+                log::trace!(">> MODE STREAM");
                 let resp = codec.command("MODE STREAM").await.map_err(|e| {
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
-                trace!("<< {}", resp.short());
+                log::trace!("<< {}", resp.short());
                 if resp.code != 203 {
                     Err(ioerr!(InvalidData, "{}: MODE STREAM response {}, expected 203", addr, resp.code))?;
                 }

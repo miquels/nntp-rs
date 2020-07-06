@@ -179,9 +179,10 @@ impl WildMatList {
                         }
                     }
                     if newpat.is_none() {
-                        warn!(
+                        log::warn!(
                             "resolving references for {}: reference {} not found",
-                            self.name, x
+                            self.name,
+                            x
                         );
                         newpat = Some(WildPat::Text("".to_string()));
                     }
@@ -201,7 +202,7 @@ impl WildMatList {
             if let WildPat::Reference(idx) = p {
                 let gref = &refs[*idx];
                 if visited[*idx] {
-                    warn!("resolving references for {}: loop at {}", top, gref.name);
+                    log::warn!("resolving references for {}: loop at {}", top, gref.name);
                     break;
                 }
                 visited[*idx] = true;

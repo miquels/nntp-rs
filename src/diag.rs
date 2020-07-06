@@ -104,17 +104,23 @@ impl SessionStats {
         };
         self.hostname = host.unwrap_or(ipaddr_str);
         self.label = label;
-        info!(
+        log::info!(
             "Connection {} from {} {} [{}]",
-            self.fdno, self.hostname, self.ipaddr, self.label
+            self.fdno,
+            self.hostname,
+            self.ipaddr,
+            self.label
         );
     }
 
     pub fn on_disconnect(&self) {
         let elapsed = self.instant.elapsed().as_secs();
-        info!(
+        log::info!(
             "Disconnect {} from {} {} ({} elapsed)",
-            self.fdno, self.hostname, self.ipaddr, elapsed
+            self.fdno,
+            self.hostname,
+            self.ipaddr,
+            elapsed
         );
         self.log_stats();
         if self.stats[Stats::Rejected as usize] > 0 {
@@ -137,7 +143,7 @@ impl SessionStats {
             rate = rate.round();
         }
 
-        info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
+        log::info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
 			self.hostname,
 			self.instant.elapsed().as_secs(),
 			self.stats[Stats::Ihave as usize],
@@ -163,7 +169,7 @@ impl SessionStats {
     }
 
     pub fn log_rejstats(&self) {
-        info!("{} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
+        log::info!("{} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
             self.hostname,
             self.stats[Stats::Rejected as usize],
             self.stats[Stats::RejFailsafe as usize],

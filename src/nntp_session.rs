@@ -154,7 +154,7 @@ impl NntpSession {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
-                info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
+                log::info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
                 let msg = format!("502 permission denied to {}", remote);
                 return Err(NntpResult::text(msg));
             },
@@ -165,9 +165,12 @@ impl NntpSession {
         let count = self.server.add_connection(&peer.label);
         self.active = true;
         if count > peer.maxconnect as usize && peer.maxconnect > 0 {
-            info!(
+            log::info!(
                 "Connect Limit exceeded (from dnewsfeeds) for {} ({}) ({} > {})",
-                peer.label, remote, count, peer.maxconnect
+                peer.label,
+                remote,
+                count,
+                peer.maxconnect
             );
             let msg = format!("502 too many connections from {} (max {})", peer.label, count - 1);
             return Err(NntpResult::text(msg));
@@ -195,14 +198,19 @@ impl NntpSession {
     fn on_write_error(&self, err: io::Error) {
         let stats = &self.stats;
         if err.kind() == io::ErrorKind::NotFound {
-            info!(
+            log::info!(
                 "Forcibly closed connection {} from {} {}",
-                stats.fdno, stats.hostname, stats.ipaddr
+                stats.fdno,
+                stats.hostname,
+                stats.ipaddr
             );
         } else {
-            info!(
+            log::info!(
                 "Write error on connection {} from {} {}: {}",
-                stats.fdno, stats.hostname, stats.ipaddr, err
+                stats.fdno,
+                stats.hostname,
+                stats.ipaddr,
+                err
             );
         }
     }
@@ -212,14 +220,19 @@ impl NntpSession {
     fn on_read_error(&mut self, err: io::Error) -> Option<NntpResult> {
         let stats = &self.stats;
         if err.kind() == io::ErrorKind::NotFound {
-            info!(
+            log::info!(
                 "Forcibly closed connection {} from {} {}",
-                stats.fdno, stats.hostname, stats.ipaddr
+                stats.fdno,
+                stats.hostname,
+                stats.ipaddr
             );
         } else {
-            info!(
+            log::info!(
                 "Read error on connection {} from {} {}: {}",
-                stats.fdno, stats.hostname, stats.ipaddr, err
+                stats.fdno,
+                stats.hostname,
+                stats.ipaddr,
+                err
             );
         }
         match err.kind() {
@@ -233,9 +246,12 @@ impl NntpSession {
     /// failure writing an article, history db corrupt, etc.
     pub fn on_generic_error(&mut self, err: io::Error) {
         let stats = &self.stats;
-        info!(
+        log::info!(
             "Error on connection {} from {} {}: {}",
-            stats.fdno, stats.hostname, stats.ipaddr, err
+            stats.fdno,
+            stats.hostname,
+            stats.ipaddr,
+            err
         );
     }
 

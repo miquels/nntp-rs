@@ -1,8 +1,8 @@
 use std::default::Default;
-/// hashfeed support.
 use std::io;
 
 use md5;
+use serde::Deserialize;
 
 #[derive(Clone, Default, Debug, Deserialize)]
 struct HashEntry {

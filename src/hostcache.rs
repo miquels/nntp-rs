@@ -15,10 +15,13 @@ use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use tokio::task;
 use tokio::stream::StreamExt;
 use tokio::sync::watch;
-use trust_dns_resolver::{TokioAsyncResolver, error::{ResolveError, ResolveErrorKind}};
+use tokio::task;
+use trust_dns_resolver::{
+    error::{ResolveError, ResolveErrorKind},
+    TokioAsyncResolver,
+};
 
 use crate::newsfeeds::NewsFeeds;
 use crate::server::Notification;
@@ -82,7 +85,11 @@ impl HostCache {
 
         // Now walk over all configured hostnames, if it's in the
         // temp hashmap put it back on the list, otherwise add empty entry.
-        let iter = feeds.peers.iter().map(|p| p.inhost.iter().map(move |h| (h, &p.label))).flatten();
+        let iter = feeds
+            .peers
+            .iter()
+            .map(|p| p.inhost.iter().map(move |h| (h, &p.label)))
+            .flatten();
         for (host, label) in iter {
             match hm.remove(host) {
                 Some(Some(entry)) => inner.entries.push(entry),
@@ -116,7 +123,7 @@ impl HostCache {
 
     // Spawn the resolver task.
     pub async fn resolver_task(watcher: watch::Receiver<Notification>) -> Result<(), ResolveError> {
-        debug!("resolver_task: starting");
+        log::debug!("resolver_task: starting");
         {
             // Initialize trust-dns resolver, and start first resolving pass.
             let resolver = TokioAsyncResolver::tokio_from_system_conf().await?;
@@ -138,7 +145,7 @@ impl HostCache {
                     _ => this.resolve(false).await,
                 }
             }
-            debug!("resolver_task: shutting down");
+            log::debug!("resolver_task: shutting down");
         });
         Ok(())
     }
@@ -146,7 +153,6 @@ impl HostCache {
     // Walk over all hostentries that we have, and see if any of them
     // need refreshing. Ignores transient errors.
     async fn resolve(&self, force: bool) {
-
         let (mut generation, mut entries) = {
             let mut inner = self.inner.lock();
             if inner.updating {
@@ -183,14 +189,14 @@ impl HostCache {
                 now = Instant::now();
 
                 // Lookup "hostname".
-                debug!("Refreshing host cache for {}", entry.hostname);
+                log::debug!("Refreshing host cache for {}", entry.hostname);
                 let start = now;
                 let res = resolver.lookup_ip(entry.hostname.as_str()).await;
                 let elapsed = start.elapsed();
                 let elapsed_ms = elapsed.as_millis();
                 if elapsed_ms >= 1500 {
                     let elapsed = (elapsed_ms / 100) as f64 / 10f64;
-                    warn!("resolver: lookup {}: took {} seconds", entry.hostname, elapsed);
+                    log::warn!("resolver: lookup {}: took {} seconds", entry.hostname, elapsed);
                 }
                 let mut entry = entry.clone();
 
@@ -199,7 +205,7 @@ impl HostCache {
                         let addrs: Vec<_> = a.iter().collect();
                         if addrs.len() == 0 {
                             // should not happen. log and handle as transient error.
-                            warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
+                            log::warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
                         } else {
                             entry.addrs = addrs;
                             entry.lastupdate = Some(start);
@@ -208,14 +214,14 @@ impl HostCache {
                     Err(e) => {
                         match e.kind() {
                             // NXDOMAIN or NODATA - normal retry time.
-                            ResolveErrorKind::NoRecordsFound{..} => {
-                                warn!("resolver: lookup {}: host not found", entry.hostname);
+                            ResolveErrorKind::NoRecordsFound { .. } => {
+                                log::warn!("resolver: lookup {}: host not found", entry.hostname);
                                 entry.addrs.truncate(0);
                                 entry.lastupdate = Some(start);
                             },
                             // Transient error, retry soon.
                             _ => {
-                                warn!("resolver: lookup {}: {}", entry.hostname, e);
+                                log::warn!("resolver: lookup {}: {}", entry.hostname, e);
                                 if elapsed >= DNS_MAX_TEMPERROR_SECS {
                                     entry.addrs.truncate(0);
                                 }
@@ -250,7 +256,7 @@ impl HostCache {
                 entries = inner.entries.clone();
             }
         }
-        debug!(".. and return.");
+        log::debug!(".. and return.");
     }
 }
 

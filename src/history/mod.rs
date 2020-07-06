@@ -186,9 +186,10 @@ impl History {
                     if age > PRESTORE_MAX_AGE {
                         // This should never happen, but if it does, log it,
                         // and invalidate the entry.
-                        error!(
+                        log::error!(
                             "cache_lookup: entry for {} in state HistStatus::Writing too old: {}s",
-                            msgid, age
+                            msgid,
+                            age
                         );
                         h.status = HistStatus::NotFound;
                     }
@@ -222,7 +223,7 @@ impl History {
             },
             Err(e) => {
                 // we simply log an error and return not found.
-                warn!("backend_lookup: {}", e);
+                log::warn!("backend_lookup: {}", e);
                 Ok(None)
             },
         }
@@ -313,7 +314,7 @@ impl History {
         {
             let mut partition = self.inner.cache.lock_partition(msgid);
             if partition.store_commit(he.clone()) == false {
-                warn!("cache store_commit {} failed (fallen out of cache)", msgid);
+                log::warn!("cache store_commit {} failed (fallen out of cache)", msgid);
             }
         }
         self.inner.backend.store(msgid.as_bytes(), &he).await
@@ -371,7 +372,7 @@ pub(crate) mod tests {
             Ok(Some(ref e)) => assert!(e.time == he.time),
             Ok(None) => panic!("lookup msgid: None result"),
         }
-        debug!("final result: {:?}", res);
+        log::debug!("final result: {:?}", res);
         res
     }
 

@@ -1,8 +1,3 @@
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde_derive;
-
 pub mod article;
 pub mod arttype;
 pub mod blocking;

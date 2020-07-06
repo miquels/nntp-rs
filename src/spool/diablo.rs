@@ -166,7 +166,7 @@ impl DSpool {
         // minfree must be at least 10MB, if not force it.
         let minfree = {
             if cfg.minfree < 10_000_000 {
-                warn!("spool {}: setting minfree to 10MiB", cfg.spool_no);
+                log::warn!("spool {}: setting minfree to 10MiB", cfg.spool_no);
                 10_000_000
             } else {
                 cfg.minfree
@@ -208,7 +208,7 @@ impl DSpool {
     // XXX TODO: cache a few open filehandles.
     fn open(&self, art_loc: &ArtLoc, part: &ArtPart) -> io::Result<(DArtHead, DArtLocation, fs::File)> {
         let loc = to_location(art_loc);
-        //debug!("art location: {:?}", loc);
+        //log::debug!("art location: {:?}", loc);
         let flnm = format!("D.{:08x}/B.{:04x}", loc.dir, loc.file);
         let mut path = self.path.clone();
         path.push(flnm);
@@ -217,29 +217,29 @@ impl DSpool {
         ReadAhead::article(&part, &loc, &file);
         let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
 
-        //debug!("art header: {:?}", dh);
+        //log::debug!("art header: {:?}", dh);
 
         // lots of sanity checks !
         if dh.magic1 != 0xff || dh.magic2 != 0x99 || dh.version != 1 || dh.head_len != 24 {
-            warn!("read({:?}): bad magic in header", dh);
+            log::warn!("read({:?}): bad magic in header", dh);
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic in header"));
         }
         if dh.store_type != 1 && dh.store_type != 4 {
-            warn!("read({:?}): unsupported store type", dh);
+            log::warn!("read({:?}): unsupported store type", dh);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported store type",
             ));
         }
         if dh.arthdr_len > dh.art_len {
-            warn!("read({:?}): arthdr_len > art_len", dh);
+            log::warn!("read({:?}): arthdr_len > art_len", dh);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid art_len or arthdr_len",
             ));
         }
         if dh.art_len + DARTHEAD_SIZE as u32 > dh.store_len {
-            warn!("read({:?}): art_len + DARTHEAD_SIZE > store_len", dh);
+            log::warn!("read({:?}): art_len + DARTHEAD_SIZE > store_len", dh);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid art_len or store_len",
@@ -247,9 +247,10 @@ impl DSpool {
         }
         // store_len includes \0 after the article, the histfile loc entry doesn't.
         if dh.store_len - 1 > loc.size {
-            warn!(
+            log::warn!(
                 "read({:?}): article on disk larger than in history entry {:?}",
-                dh, loc
+                dh,
+                loc
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid store_len"));
         }
@@ -477,7 +478,7 @@ impl DSpool {
         let d = match fs::read_dir(&self.path) {
             Ok(d) => d,
             Err(e) => {
-                error!("get_oldest({:?}): {}", self.path, e);
+                log::error!("get_oldest({:?}): {}", self.path, e);
                 return Err(e);
             },
         };
@@ -502,7 +503,7 @@ impl DSpool {
                 }
             }
         }
-        warn!(
+        log::warn!(
             "get_oldest({:?}): no spooldirs - skipping history expire",
             self.path
         );
@@ -618,7 +619,7 @@ impl<T: Read> Read for CrlfXlat<T> {
     }
 
     fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut]) -> io::Result<usize> {
-        // debug!("XXX read_vectored starts, #bufs: {}", bufs.len());
+        // log::debug!("XXX read_vectored starts, #bufs: {}", bufs.len());
         let mut done = 0;
         for idx in 0..bufs.len() {
             let l = bufs[idx].len();
@@ -630,7 +631,7 @@ impl<T: Read> Read for CrlfXlat<T> {
                 }
             }
         }
-        // debug!("XXX read_vectored done, read {}", done);
+        // log::debug!("XXX read_vectored done, read {}", done);
         Ok(done)
     }
 }

@@ -150,7 +150,7 @@ impl NntpSession {
             },
             Err(HistError::IoError(e)) => {
                 // I/O error, no incoming.log - we reply with status 400.
-                error!("received_article {}: history lookup: {}", msgid, e);
+                log::error!("received_article {}: history lookup: {}", msgid, e);
                 self.stats.art_error(&art, &ArtError::IOError);
                 Err(e)
             },
@@ -161,7 +161,7 @@ impl NntpSession {
                 let artloc = match spool.write(spool_no, buffer, body).await {
                     Ok(loc) => loc,
                     Err(e) => {
-                        error!("received_article {}: spool write: {}", msgid, e);
+                        log::error!("received_article {}: spool write: {}", msgid, e);
                         self.stats.art_error(&art, &ArtError::IOError);
                         history.store_rollback(msgid);
                         return Err(e);
@@ -175,7 +175,7 @@ impl NntpSession {
                 };
                 match history.store_commit(msgid, he).await {
                     Err(e) => {
-                        error!("received_article {}: history write: {}", msgid, e);
+                        log::error!("received_article {}: history write: {}", msgid, e);
                         self.stats.art_error(&art, &ArtError::IOError);
                         history.store_rollback(msgid);
                         Err(e)
@@ -210,7 +210,7 @@ impl NntpSession {
         let buffer = mem::replace(&mut art.data, Buffer::new());
         match parser.parse(&buffer, false, true) {
             None => {
-                error!("failure parsing header, None returned");
+                log::error!("failure parsing header, None returned");
                 panic!("process_headers: this code should never be reached")
             },
             Some(Err(e)) => return Err(e),
@@ -290,7 +290,7 @@ impl NntpSession {
         if !thispeer.nomismatch {
             let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
             if !is_match {
-                info!(
+                log::info!(
                     "{} {} Path element fails to match aliases: {} in {}",
                     thispeer.label,
                     self.remote.ip(),

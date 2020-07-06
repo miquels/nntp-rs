@@ -329,7 +329,7 @@ where
 
             // State machine.
             while bufpos < buflen {
-                trace!("bufpos {}, buflen {}, state {:?}", bufpos, buflen, self.rd_state);
+                log::trace!("bufpos {}, buflen {}, state {:?}", bufpos, buflen, self.rd_state);
                 match self.rd_state {
                     State::Data => {
                         match memchr(b'\r', &buf[bufpos..buflen]) {
@@ -390,7 +390,7 @@ where
         }
         self.rd_pos = bufpos;
 
-        trace!("final bufpos {}, state {:?}", bufpos, self.rd_state);
+        log::trace!("final bufpos {}, state {:?}", bufpos, self.rd_state);
 
         // are we done?
         if self.rd_state == State::Lf2Seen {
@@ -601,7 +601,7 @@ where
             //
             // See if we can write more data to the socket.
             //
-            trace!("writing; remaining={}", buf.remaining());
+            log::trace!("writing; remaining={}", buf.remaining());
             let socket = &mut self.socket;
             pin!(socket);
             match socket.poll_write(cx, buf.bytes()) {
@@ -765,14 +765,14 @@ fn calc_delay(d: &Duration) -> Instant {
 }
 
 struct NntpArgs<'a> {
-    data:   &'a [u8],
-    pos:    usize,
+    data: &'a [u8],
+    pos:  usize,
 }
 
 fn split_whitespace<'a>(data: &'a str) -> NntpArgs<'a> {
     NntpArgs {
         data: data.as_bytes(),
-        pos: 0,
+        pos:  0,
     }
 }
 
@@ -806,13 +806,13 @@ impl<'a> Iterator for NntpArgs<'a> {
 /// NNTP response parsing
 pub struct NntpResponse {
     /// The entire response line.
-    pub line: String,
+    pub line:  String,
     /// reply code: 100..599
     pub code:  u32,
     /// body of a multi-line response.
-    pub body: Vec<u8>,
+    pub body:  Vec<u8>,
     // arguments.
-    args:  SmallVec<[Range<usize>; 5]>,
+    args:      SmallVec<[Range<usize>; 5]>,
     // short (< 100 chars) version of the response string for diagnostics.
     short_len: usize,
 }
@@ -820,7 +820,6 @@ pub struct NntpResponse {
 impl NntpResponse {
     /// Parse NNTP response.
     pub fn parse(rawline: impl Into<Buffer>) -> io::Result<NntpResponse> {
-
         // decode utf8, strip CRLF.
         let rawline = rawline.into().into_bytes();
         let mut line = String::from_utf8(rawline).map_err(|_| ioerr!(InvalidData, "[invalid-utf8]"))?;
@@ -881,7 +880,13 @@ impl NntpResponse {
             ));
         }
 
-        Ok(NntpResponse { code, line, args: v, short_len, body: Vec::new() })
+        Ok(NntpResponse {
+            code,
+            line,
+            args: v,
+            short_len,
+            body: Vec::new(),
+        })
     }
 
     /// length-limited response for logging and diagnostics
@@ -905,7 +910,7 @@ impl NntpResponse {
     /// is this a multi-line response?
     pub fn is_multiline(&self, is_listgroup: bool) -> bool {
         match self.code {
-            100|101|215|220|221|222|224|225|230|231 => true,
+            100 | 101 | 215 | 220 | 221 | 222 | 224 | 225 | 230 | 231 => true,
             211 if is_listgroup => true,
             _ => false,
         }

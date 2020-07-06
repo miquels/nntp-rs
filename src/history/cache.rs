@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_simple() {
-        debug!("test_simple()");
+        log::debug!("test_simple()");
         let cache = HCache::new();
         let histent = HistEnt {
             status:    HistStatus::Present,
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_full() {
-        debug!("test_full()");
+        log::debug!("test_full()");
         let cache = HCache::new();
         let histent = HistEnt {
             status:    HistStatus::Present,

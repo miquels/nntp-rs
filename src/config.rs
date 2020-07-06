@@ -14,6 +14,7 @@ use core_affinity::{get_core_ids, CoreId};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use regex::{Captures, Regex};
+use serde::Deserialize;
 use users::switch::{set_effective_gid, set_effective_uid};
 use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
@@ -164,10 +165,12 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
         "" => cfg.server.runtime = "threaded".to_string(),
         "threaded" => {},
         "multisingle" => {},
-        r => return Err(io::Error::new(
+        r => {
+            return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown runtime type: {}", r),
-            )),
+            ))
+        },
     }
 
     match cfg.server.runtime.as_str() {

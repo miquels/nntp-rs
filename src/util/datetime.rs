@@ -11,6 +11,7 @@ use chrono::{
 };
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::Deserialize;
 
 use crate::util::clock;
 
