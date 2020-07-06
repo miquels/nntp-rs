@@ -18,6 +18,7 @@ use tokio::task;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
+use crate::hostcache;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_session::NntpSession;
@@ -53,7 +54,18 @@ impl Server {
         let config = config::get_config();
 
         let mut threaded_runtime = Runtime::new().unwrap();
-        let (notifier, watcher) = server.notification_setup(threaded_runtime.handle());
+        let threaded_handle = threaded_runtime.handle();
+        let (notifier, watcher) = server.notification_setup(threaded_handle);
+
+        // Start the trust-resolver task and the hostcache task.
+        let watcher2 = watcher.clone();
+        let res = threaded_handle.block_on(async move {
+            hostcache::HostCache::resolver_task(watcher2).await
+        });
+        if let Err(e) = res {
+            error!("initializing trust dns resolver: {}", e);
+            exit(1);
+        }
 
         match config.server.runtime.as_str() {
             "threaded" => {
@@ -129,20 +141,29 @@ impl Server {
                 }
 
                 // tokio runtime for this thread alone.
-                let basic_runtime = runtime::Builder::new()
+                let mut basic_runtime = runtime::Builder::new()
                     .basic_scheduler()
                     .enable_all()
                     .build()
                     .unwrap();
                 trace!("runtime::basic_scheduler on {:?}", thread::current().id());
 
-                basic_runtime.spawn(async move {
+                basic_runtime.block_on(async move {
+                    let mut tasks = Vec::new();
                     for listener in listeners.into_iter() {
+                        let server = server.clone();
+                        let watcher = watcher.clone();
                         let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
                             eprintln!("cannot convert from net2 listener to tokio listener");
                             exit(1);
                         });
-                        task::spawn(server.clone().run(listener, watcher.clone()));
+                        let task = task::spawn(async move {
+                            server.run(listener, watcher).await;
+                        });
+                        tasks.push(task);
+                    }
+                    for task in tasks.into_iter() {
+                        let _ = task.await;
                     }
                 });
             });

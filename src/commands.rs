@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::str;
 
-use bytes::BufMut;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -143,7 +142,7 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
 }
 
 fn put_str(bytes_mut: &mut Buffer, s: impl AsRef<str>) {
-    bytes_mut.put(s.as_ref().as_bytes())
+    bytes_mut.put_str(s.as_ref());
 }
 
 /// NNTP Command parser.

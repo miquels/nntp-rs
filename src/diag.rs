@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::article::Article;
 use crate::errors::ArtError;
+use crate::hostcache;
 
 #[repr(usize)]
 #[rustfmt::skip]
@@ -96,13 +97,12 @@ impl SessionStats {
     }
 
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
-        let host = tokio::task::spawn_blocking(move || {
-            let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
-            dns_lookup::lookup_addr(&ipaddr).unwrap_or(ipaddr_str)
-        })
-        .await
-        .unwrap();
-        self.hostname = host;
+        let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
+        let host = match hostcache::RESOLVER.reverse_lookup(ipaddr).await {
+            Ok(m) => m.iter().next().map(|name| name.to_utf8()),
+            Err(_) => None,
+        };
+        self.hostname = host.unwrap_or(ipaddr_str);
         self.label = label;
         info!(
             "Connection {} from {} {} [{}]",
