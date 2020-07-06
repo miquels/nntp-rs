@@ -181,58 +181,73 @@ impl HostCache {
         loop {
             // We have a clone of the `entries` Vec. Check for each entry
             // if an update is needed. Store the update in the `updated` map.
-            let mut now = Instant::now();
+            let now = Instant::now();
+            let mut tasks = futures::stream::FuturesUnordered::new();
+            let mut delay_ms = 0;
             for entry in &entries {
                 if updated.contains_key(&entry.hostname) || !needs_update(entry, &now) {
                     continue;
                 }
-                now = Instant::now();
+                let delay = Duration::from_millis(delay_ms);
+                delay_ms += 2;
 
-                // Lookup "hostname".
-                log::debug!("Refreshing host cache for {}", entry.hostname);
-                let start = now;
-                let res = resolver.lookup_ip(entry.hostname.as_str()).await;
-                let elapsed = start.elapsed();
-                let elapsed_ms = elapsed.as_millis();
-                if elapsed_ms >= 1500 {
-                    let elapsed = (elapsed_ms / 100) as f64 / 10f64;
-                    log::warn!("resolver: lookup {}: took {} seconds", entry.hostname, elapsed);
-                }
-                let mut entry = entry.clone();
+                // Run the host lookups in parallel because why not.
+                let task = async move {
+                    // Space a few ms between lookups.
+                    tokio::time::delay_for(delay).await;
 
-                match res {
-                    Ok(a) => {
-                        let addrs: Vec<_> = a.iter().collect();
-                        if addrs.len() == 0 {
-                            // should not happen. log and handle as transient error.
-                            log::warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
-                        } else {
-                            entry.addrs = addrs;
-                            entry.lastupdate = Some(start);
-                        }
-                    },
-                    Err(e) => {
-                        match e.kind() {
-                            // NXDOMAIN or NODATA - normal retry time.
-                            ResolveErrorKind::NoRecordsFound { .. } => {
-                                log::warn!("resolver: lookup {}: host not found", entry.hostname);
-                                entry.addrs.truncate(0);
+                    // Lookup "hostname".
+                    log::debug!("Refreshing host cache for {}", entry.hostname);
+                    let start = Instant::now();
+                    let res = resolver.lookup_ip(entry.hostname.as_str()).await;
+                    let elapsed = start.elapsed();
+                    let elapsed_ms = elapsed.as_millis();
+                    if elapsed_ms >= 1500 {
+                        let elapsed = (elapsed_ms / 100) as f64 / 10f64;
+                        log::warn!("resolver: lookup {}: took {} seconds", entry.hostname, elapsed);
+                    }
+                    let mut entry = entry.clone();
+
+                    match res {
+                        Ok(a) => {
+                            let addrs: Vec<_> = a.iter().collect();
+                            if addrs.len() == 0 {
+                                // should not happen. log and handle as transient error.
+                                log::warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
+                            } else {
+                                entry.addrs = addrs;
                                 entry.lastupdate = Some(start);
-                            },
-                            // Transient error, retry soon.
-                            _ => {
-                                log::warn!("resolver: lookup {}: {}", entry.hostname, e);
-                                if elapsed >= DNS_MAX_TEMPERROR_SECS {
+                            }
+                        },
+                        Err(e) => {
+                            match e.kind() {
+                                // NXDOMAIN or NODATA - normal retry time.
+                                ResolveErrorKind::NoRecordsFound { .. } => {
+                                    log::warn!("resolver: lookup {}: host not found", entry.hostname);
                                     entry.addrs.truncate(0);
-                                }
-                                entry.lastupdate = Some(start);
-                            },
-                        }
-                    },
-                }
-                // Store the updated version in the hashmap.
+                                    entry.lastupdate = Some(start);
+                                },
+                                // Transient error, retry soon.
+                                _ => {
+                                    log::warn!("resolver: lookup {}: {}", entry.hostname, e);
+                                    if elapsed >= DNS_MAX_TEMPERROR_SECS {
+                                        entry.addrs.truncate(0);
+                                    }
+                                    entry.lastupdate = Some(start);
+                                },
+                            }
+                        },
+                    }
+                    entry
+                };
+                tasks.push(task);
+            }
+
+            // Store the updated version in the hashmap.
+            while let Some(entry) = tasks.next().await {
                 updated.insert(entry.hostname.clone(), entry);
             }
+            drop(tasks);
 
             {
                 // All updated entries are now present in `updated`.
@@ -256,7 +271,6 @@ impl HostCache {
                 entries = inner.entries.clone();
             }
         }
-        log::debug!(".. and return.");
     }
 }
 
