@@ -115,7 +115,7 @@ pub struct MultiSingle {
     pub cores:              Option<String>,
     pub threads_per_core:   Option<usize>,
     #[serde(skip)]
-    pub(crate) core_ids:    Option<Vec<CoreId>>,
+    pub core_ids:           Option<Vec<CoreId>>,
 }
 
 /// The (default) threaded executor.

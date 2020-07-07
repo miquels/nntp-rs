@@ -212,9 +212,11 @@ impl DHash {
         DHash::hash(msgid.as_bytes())
     }
 
-    /// Get the hash as a 61 bit value. 61 bits, because we leave out the
-    /// highest bit of h1, and the lower bits of both h1 and h2.
-    // Remind me why we do this again?
+    /// Get the hash as a 61 bit value. 61 bits, because we leave out
+    /// some bits. The highest bit of h1 is always set by Dhash::hash()
+    /// for compat reasons from 20 years ago. And the lowest bits of h1
+    /// and h2 are always set because of a bug in the CRC implementation
+    /// in DHash::hash() which we cannot fix also for compat reasons.
     pub fn as_u64(&self) -> u64 {
         let h1 = ((self.h1 & 0x7ffffff) >> 1) as u64;
         let h2 = (self.h2 >> 1) as u64;

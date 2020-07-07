@@ -7,7 +7,6 @@ use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::thread;
 use std::time::Duration;
 
-use num_cpus;
 use parking_lot::Mutex;
 use tokio::runtime::{self, Runtime};
 use tokio::signal::unix::{signal, SignalKind};
@@ -18,12 +17,12 @@ use tokio::task;
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
-use crate::hostcache;
+use crate::hostcache::HostCache;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_session::NntpSession;
 use crate::spool::Spool;
-use crate::util::bind_socket;
+use crate::util::TcpListenerSets;
 
 #[derive(Clone)]
 pub struct Server {
@@ -44,7 +43,7 @@ impl Server {
         }
     }
 
-    pub fn start(history: History, spool: Spool, listeners: Vec<TcpListener>) -> io::Result<()> {
+    pub fn start(history: History, spool: Spool, listener_sets: TcpListenerSets) -> io::Result<()> {
         let server = Server {
             history,
             spool,
@@ -59,8 +58,7 @@ impl Server {
 
         // Start the trust-resolver task and the hostcache task.
         let watcher2 = watcher.clone();
-        let res =
-            threaded_handle.block_on(async move { hostcache::HostCache::resolver_task(watcher2).await });
+        let res = threaded_handle.block_on(async move { HostCache::resolver_task(watcher2).await });
         if let Err(e) = res {
             log::error!("initializing trust dns resolver: {}", e);
             exit(1);
@@ -69,11 +67,13 @@ impl Server {
         match config.server.runtime.as_str() {
             "threaded" => {
                 let server = server.clone();
+                let mut listener_sets = listener_sets;
+                let listeners = listener_sets.pop().unwrap();
                 threaded_runtime.spawn(server.run_threaded(listeners, watcher.clone()));
             },
             "multisingle" => {
                 let server = server.clone();
-                server.run_multisingle(listeners, watcher.clone());
+                server.run_multisingle(listener_sets, watcher.clone());
             },
             _ => unreachable!(),
         }
@@ -85,53 +85,15 @@ impl Server {
     }
 
     /// Run the server on a bunch of current_thread executors.
-    fn run_multisingle(self, listeners: Vec<TcpListener>, watcher: watch::Receiver<Notification>) {
+    fn run_multisingle(self, mut listener_sets: TcpListenerSets, watcher: watch::Receiver<Notification>) {
         let config = config::get_config();
 
-        // See how many threads we want to start and on what cores.
-        let (num_threads, mut core_ids) = match config.multisingle.core_ids {
-            Some(ref c) => (c.len(), c.to_vec()),
-            None => (num_cpus::get(), Vec::new()),
-        };
+        let mut core_ids = config.multisingle.core_ids.clone().unwrap_or(Vec::new());
 
-        // copy addresses of the listening sockets, then push the first
-        // listener-set on to the listener_sets vector.
-        let addrs = listeners
-            .iter()
-            .map(|l| l.local_addr().unwrap())
-            .collect::<Vec<_>>();
-        let mut listener_sets = Vec::new();
-        listener_sets.push((listeners, core_ids.pop()));
-
-        // create one listener-set per thread, in a seperate setuid-root scope.
-        {
-            // try to switch to root. if we fail, that's ok. either the socket
-            // will bind, or not, and if not, we error on that.
-            let egid = users::get_effective_gid();
-            let _guard = match users::switch::switch_user_group(0, egid) {
-                Ok(g) => Some(g),
-                Err(_) => None,
-            };
-
-            // create a listener-set per thread.
-            for _ in 1..num_threads {
-                let mut v = Vec::new();
-                for addr in &addrs {
-                    let l = bind_socket(&addr)
-                        .map_err(|e| {
-                            eprintln!("nntp-rs: server: fatal: {}", e);
-                            exit(1);
-                        })
-                        .unwrap();
-                    v.push(l);
-                }
-                listener_sets.push((v, core_ids.pop()));
-            }
-        }
-
-        for (listeners, core_id) in listener_sets.into_iter() {
+        while let Some(listeners) = listener_sets.pop() {
             let server = self.clone();
             let watcher = watcher.clone();
+            let core_id = core_ids.pop();
 
             thread::spawn(move || {
                 if let Some(id) = core_id {

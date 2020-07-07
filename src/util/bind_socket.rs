@@ -3,6 +3,36 @@ use std::net::{SocketAddr, TcpListener};
 
 use net2::unix::UnixTcpBuilderExt;
 
+/// A set of TcpListeners (so a set of sets).
+pub struct TcpListenerSets {
+    sets: Vec<Vec<TcpListener>>,
+}
+
+impl TcpListenerSets {
+    /// Start listening an the addresses in `addrs` on multiple sockets
+    /// at the same time (using SO_REUSEADDR).
+    pub fn new(addrs: &[SocketAddr], num_sets: usize) -> io::Result<TcpListenerSets> {
+        let mut sets = Vec::new();
+        for _ in 0..num_sets {
+            let mut listeners = Vec::new();
+            for addr in addrs.iter() {
+                let listener = bind_socket(&addr)?;
+                listeners.push(listener);
+            }
+            sets.push(listeners);
+        }
+        Ok(TcpListenerSets { sets })
+    }
+
+    pub fn pop(&mut self) -> Option<Vec<TcpListener>> {
+        self.sets.pop()
+    }
+
+    pub fn len(&self) -> usize {
+        self.sets.len()
+    }
+}
+
 /// Create a socket, set SO_REUSEPORT on it, bind it to an address,
 /// and start listening for connections.
 pub fn bind_socket(addr: &SocketAddr) -> io::Result<TcpListener> {

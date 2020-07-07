@@ -11,7 +11,7 @@ use nntp_rs::history::{self, History};
 use nntp_rs::logger::{self, LogTarget};
 use nntp_rs::server;
 use nntp_rs::spool::{self, Spool};
-use nntp_rs::util;
+use nntp_rs::util::{self, TcpListenerSets};
 
 // use jemalloc instead of system malloc.
 #[global_allocator]
@@ -139,22 +139,23 @@ fn main() -> io::Result<()> {
         cmd_listenaddrs = Some(config::StringOrVec::Vec(l.to_vec()));
         listenaddrs = &cmd_listenaddrs;
     }
-    let addrs = config::parse_listeners(listenaddrs)
-        .map_err(|e| {
-            eprintln!("nntp-rs: {}", e);
-            exit(1);
-        })
-        .unwrap();
-    let mut listeners = Vec::new();
-    for addr in &addrs {
-        let listener = util::bind_socket(&addr)
-            .map_err(|e| {
-                eprintln!("nntp-rs: listen socket: bind to {}: {}", addr, e);
-                exit(1);
-            })
-            .unwrap();
-        listeners.push(listener);
-    }
+    let addrs = config::parse_listeners(listenaddrs).unwrap_or_else(|e| {
+        eprintln!("nntp-rs: {}", e);
+        exit(1);
+    });
+    let num_sets = match config.server.runtime.as_str() {
+        "multisingle" => {
+            match config.multisingle.core_ids {
+                Some(ref c) => c.len(),
+                None => num_cpus::get(),
+            }
+        },
+        _ => 1,
+    };
+    let listener_sets = TcpListenerSets::new(&addrs, num_sets).unwrap_or_else(|e| {
+        eprintln!("nntp-rs: {}", e);
+        exit(1);
+    });
 
     // switch uids after binding the socket.
     if let Err(e) = config::switch_uids(&config) {
@@ -218,7 +219,7 @@ fn main() -> io::Result<()> {
     }
 
     // and start server.
-    server::Server::start(hist, spool, listeners)
+    server::Server::start(hist, spool, listener_sets)
 }
 
 fn run_subcommand(cmd: Command, config: &config::Config, pretty: bool) -> ! {
