@@ -219,7 +219,11 @@ fn main() -> io::Result<()> {
     }
 
     // and start server.
-    server::Server::start(hist, spool, listener_sets)
+    if let Err(e) = server::Server::start(hist, spool, listener_sets) {
+        log::error!("{}", e);
+        exit(1);
+    }
+    Ok(())
 }
 
 fn run_subcommand(cmd: Command, config: &config::Config, pretty: bool) -> ! {

@@ -52,36 +52,31 @@ impl Server {
         };
         let config = config::get_config();
 
-        let mut threaded_runtime = Runtime::new().unwrap();
-        let threaded_handle = threaded_runtime.handle();
-        let (notifier, watcher) = server.notification_setup(threaded_handle);
+        Runtime::new().unwrap().block_on(async move {
+            let (notifier, watcher) = server.notification_setup();
 
-        // Start the trust-resolver task and the hostcache task.
-        let watcher2 = watcher.clone();
-        let res = threaded_handle.block_on(async move { HostCache::resolver_task(watcher2).await });
-        if let Err(e) = res {
-            log::error!("initializing trust dns resolver: {}", e);
-            exit(1);
-        }
+            // Start the trust-resolver task and the hostcache task.
+            HostCache::resolver_task(watcher.clone())
+                .await
+                .map_err(|e| ioerr!(Other, "initializing trust dns resolver: {}", e))?;
 
-        match config.server.runtime.as_str() {
-            "threaded" => {
-                let server = server.clone();
-                let mut listener_sets = listener_sets;
-                let listeners = listener_sets.pop().unwrap();
-                threaded_runtime.spawn(server.run_threaded(listeners, watcher.clone()));
-            },
-            "multisingle" => {
-                let server = server.clone();
-                server.run_multisingle(listener_sets, watcher.clone());
-            },
-            _ => unreachable!(),
-        }
+            match config.server.runtime.as_str() {
+                "threaded" => {
+                    let server = server.clone();
+                    let mut listener_sets = listener_sets;
+                    let listeners = listener_sets.pop().unwrap();
+                    task::spawn(server.run_threaded(listeners, watcher.clone()));
+                },
+                "multisingle" => {
+                    let server = server.clone();
+                    server.run_multisingle(listener_sets, watcher.clone());
+                },
+                _ => unreachable!(),
+            }
 
-        threaded_runtime.block_on(async move {
             server.wait(notifier, watcher).await;
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Run the server on a bunch of current_thread executors.
@@ -115,6 +110,7 @@ impl Server {
                         let server = server.clone();
                         let watcher = watcher.clone();
                         let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
+                            // Never happens.
                             eprintln!("cannot convert from net2 listener to tokio listener");
                             exit(1);
                         });
@@ -135,6 +131,7 @@ impl Server {
     async fn run_threaded(self, listeners: Vec<TcpListener>, watcher: watch::Receiver<Notification>) {
         for listener in listeners.into_iter() {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
+                // Never happens.
                 eprintln!("cannot convert from net2 listener to tokio listener");
                 exit(1);
             });
@@ -143,66 +140,59 @@ impl Server {
     }
 
     // Set up a notification channel, and forward SIGINT/SIGTERM as notifications.
-    fn notification_setup(
-        &self,
-        runtime: &runtime::Handle,
-    ) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>)
+    fn notification_setup(&self) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>)
     {
         // tokio::watch::channel is SPMC, so front it with a MPSC channel
         // so that we have, in effect, a MPMC channel.
         let (notifier_master, watcher) = watch::channel(Notification::None);
         let (notifier, mut notifier_receiver) = mpsc::channel::<Notification>(16);
-        let server = self.clone();
-        let rnotifier = notifier.clone();
 
-        runtime.spawn(async move {
-            task::spawn(async move {
-                while let Some(notification) = notifier_receiver.next().await {
-                    if let Err(_) = notifier_master.broadcast(notification) {
-                        break;
-                    }
+        task::spawn(async move {
+            while let Some(notification) = notifier_receiver.next().await {
+                if let Err(_) = notifier_master.broadcast(notification) {
+                    break;
                 }
-            });
-
-            // Forward control-c
-            let mut tx1 = notifier.clone();
-            task::spawn(async move {
-                let mut sig_int = signal(SignalKind::interrupt()).unwrap();
-                while let Some(_) = sig_int.next().await {
-                    log::info!("received SIGINT");
-                    let _ = tx1.send(Notification::ExitGraceful).await;
-                }
-            });
-
-            // Forward SIGTERM
-            let mut tx2 = notifier.clone();
-            task::spawn(async move {
-                let mut sig_term = signal(SignalKind::terminate()).unwrap();
-                while let Some(_) = sig_term.next().await {
-                    log::info!("received SIGTERM");
-                    let _ = tx2.send(Notification::ExitGraceful).await;
-                }
-            });
-
-            // Catch SIGUSR1
-            let server = server.clone();
-            task::spawn(async move {
-                let mut sig_term = signal(SignalKind::user_defined1()).unwrap();
-                while let Some(_) = sig_term.next().await {
-                    log::info!("received USR1");
-                    let config = config::get_config();
-                    if let Err(e) = server
-                        .history
-                        .expire(&server.spool, config.history.remember.clone(), false, true)
-                        .await
-                    {
-                        log::error!("expire: {}", e);
-                    }
-                }
-            });
+            }
         });
 
-        (rnotifier, watcher)
+        // Forward control-c
+        let mut tx1 = notifier.clone();
+        task::spawn(async move {
+            let mut sig_int = signal(SignalKind::interrupt()).unwrap();
+            while let Some(_) = sig_int.next().await {
+                log::info!("received SIGINT");
+                let _ = tx1.send(Notification::ExitGraceful).await;
+            }
+        });
+
+        // Forward SIGTERM
+        let mut tx2 = notifier.clone();
+        task::spawn(async move {
+            let mut sig_term = signal(SignalKind::terminate()).unwrap();
+            while let Some(_) = sig_term.next().await {
+                log::info!("received SIGTERM");
+                let _ = tx2.send(Notification::ExitGraceful).await;
+            }
+        });
+
+        // Catch SIGUSR1
+        let server = self.clone();
+        task::spawn(async move {
+            let mut sig_term = signal(SignalKind::user_defined1()).unwrap();
+            while let Some(_) = sig_term.next().await {
+                log::info!("received USR1");
+                let config = config::get_config();
+                if let Err(e) = server
+                    .history
+                    .expire(&server.spool, config.history.remember.clone(), false, true)
+                    .await
+                {
+                    log::error!("expire: {}", e);
+                }
+            }
+        });
+
+        (notifier, watcher)
     }
 
     // wait for all sessions to finish.
