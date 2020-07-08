@@ -8,9 +8,11 @@
 //!
 //! This prevents blocking and lost updates.
 use std::default::Default;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::stream::StreamExt;
+use tokio::stream::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
@@ -41,11 +43,12 @@ impl From<u32> for Notification {
 struct State(Vec<u64>);
 
 /// Send messages on the bus.
-pub struct BusSender {
-    tx:     mpsc::UnboundedSender<Notification>,
+#[derive(Clone)]
+pub struct Sender {
+    tx: mpsc::UnboundedSender<Notification>,
 }
 
-impl BusSender {
+impl Sender {
     /// Send a message on the bus to all listeners.
     pub fn send(&mut self, n: Notification) -> Result<(), ()> {
         self.tx.send(n).map_err(|_| ())
@@ -53,32 +56,40 @@ impl BusSender {
 }
 
 /// Receive messages on the bus.
-pub struct BusReceiver {
+pub struct Receiver {
     state:  State,
     nstate: State,
     subs:   u64,
     rx:     watch::Receiver<State>,
 }
 
-impl BusReceiver {
+impl Receiver {
+    fn next_item(&mut self) -> Option<Notification> {
+        if self.state.0.len() < self.nstate.0.len() {
+            self.state.0.resize(self.nstate.0.len(), 0);
+        }
+        for i in 0..self.state.0.len() {
+            if self.state.0[i] < self.nstate.0[i] {
+                self.state.0[i] = self.nstate.0[i];
+                if self.subs == 0 || (self.subs & (1 << i)) > 0 {
+                    return Some((i as u32).into());
+                }
+            }
+        }
+        None
+    }
+
     /// Receive a message from the bus.
     pub async fn recv(&mut self) -> Option<Notification> {
         loop {
-            for i in 0..self.state.0.len() {
-                if self.state.0[i] < self.nstate.0[i] {
-                    self.state.0[i] = self.nstate.0[i];
-                    if self.subs == 0 || (self.subs & (1 << i)) > 0 {
-                        return Some((i as u32).into());
-                    }
-                }
+            let next = self.next_item();
+            if next.is_some() {
+                return next;
             }
             self.nstate = match self.rx.recv().await {
                 Some(s) => s,
                 None => return None,
             };
-            if self.state.0.len() < self.nstate.0.len() {
-                self.state.0.resize(self.nstate.0.len(), 0);
-            }
         }
     }
 
@@ -89,29 +100,67 @@ impl BusReceiver {
         self.subs |= 1u64 << (n as u32);
     }
 
+    /// Subscribe to all message.
+    ///
+    /// This is the same as subscribing to no messages.
+    pub fn subscribe_all(&mut self) {
+        self.subs = 0;
+    }
+
     /// Unsubscribe from a message.
     pub fn unsubscribe(&mut self, n: Notification) {
         self.subs &= !(1u64 << (n as u32));
     }
 }
 
+impl Stream for Receiver {
+    type Item = Notification;
 
-/// Set up a simple bus. 
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Some(item) = self.as_mut().next_item() {
+            return Poll::Ready(Some(item));
+        }
+        match Pin::new(&mut self.rx).poll_next(cx) {
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(Some(state)) => {
+                self.nstate = state;
+                if let Some(item) = self.next_item() {
+                    return Poll::Ready(Some(item));
+                }
+            },
+            _ => {},
+        }
+        Poll::Pending
+    }
+}
+
+impl Clone for Receiver {
+    fn clone(&self) -> Receiver {
+        let state = self.rx.borrow().clone();
+        Receiver {
+            nstate: state.clone(),
+            state,
+            rx: self.rx.clone(),
+            subs: self.subs,
+        }
+    }
+}
+
+/// Set up a simple bus.
 ///
 /// SIGINT/SIGTERM are forwarded on the bus as notifications.
-pub fn bus() -> (BusSender, BusReceiver) {
-
+pub fn new() -> (Sender, Receiver) {
     // tokio::watch::channel is SPMC. Front it with a MPSC channel
     // so that we have, in effect, an MPMC channel.
     let (notifier_master, watcher) = watch::channel(State::default());
     let (notifier, mut notifier_receiver) = mpsc::unbounded_channel::<Notification>();
 
-    let sender = BusSender{ tx: notifier.clone() };
-    let receiver = BusReceiver {
+    let sender = Sender { tx: notifier.clone() };
+    let receiver = Receiver {
         state:  State::default(),
         nstate: State::default(),
-        subs: 0,
-        rx: watcher,
+        subs:   0,
+        rx:     watcher,
     };
 
     // forward a message from the MPSC channel to all the watchers.
@@ -119,7 +168,7 @@ pub fn bus() -> (BusSender, BusReceiver) {
         let mut state = State::default();
         while let Some(notification) = notifier_receiver.next().await {
             let i = notification as u32 as usize;
-            if state.0.len() < i {
+            if state.0.len() < i + 1 {
                 state.0.resize(i + 1, 0);
             }
             state.0[i] += 1;
@@ -149,16 +198,25 @@ pub fn bus() -> (BusSender, BusReceiver) {
         }
     });
 
+    // Forward SIGHUP
+    let tx = notifier.clone();
+    task::spawn(async move {
+        let mut sig_hup = signal(SignalKind::hangup()).unwrap();
+        while let Some(_) = sig_hup.next().await {
+            log::info!("received SIGHUP");
+            let _ = tx.send(Notification::Reconfigure);
+        }
+    });
+
     // Forward SIGUSR1
     let tx = notifier.clone();
     task::spawn(async move {
         let mut sig_usr1 = signal(SignalKind::user_defined1()).unwrap();
         while let Some(_) = sig_usr1.next().await {
-            log::info!("received USR1");
+            log::info!("received SIGUSR1");
             let _ = tx.send(Notification::Expire);
         }
     });
 
     (sender, receiver)
 }
-

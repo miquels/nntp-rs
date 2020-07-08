@@ -16,15 +16,15 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::stream::StreamExt;
-use tokio::sync::watch;
 use tokio::task;
+use tokio::time::delay_for;
 use trust_dns_resolver::{
     error::{ResolveError, ResolveErrorKind},
     TokioAsyncResolver,
 };
 
+use crate::bus::{self, Notification};
 use crate::newsfeeds::NewsFeeds;
-use crate::server::Notification;
 
 const DNS_REFRESH_SECS: Duration = Duration::from_secs(3600);
 const DNS_MAX_TEMPERROR_SECS: Duration = Duration::from_secs(86400);
@@ -122,7 +122,7 @@ impl HostCache {
     }
 
     // Spawn the resolver task.
-    pub async fn resolver_task(watcher: watch::Receiver<Notification>) -> Result<(), ResolveError> {
+    pub async fn resolver_task(mut bus_recv: bus::Receiver) -> Result<(), ResolveError> {
         log::debug!("resolver_task: starting");
         {
             // Initialize trust-dns resolver, and start first resolving pass.
@@ -136,13 +136,20 @@ impl HostCache {
 
         let this = Self::get().clone();
         task::spawn(async move {
-            let mut strm = watcher.timeout(Duration::from_secs(60));
-            while let Some(item) = strm.next().await {
-                match item {
-                    Ok(Notification::ExitGraceful) => break,
-                    Ok(Notification::ExitNow) => break,
-                    Ok(Notification::Reconfigure) => this.resolve(true).await,
-                    _ => this.resolve(false).await,
+            loop {
+                tokio::select! {
+                    _ = delay_for(Duration::from_secs(60)) => {
+                        this.resolve(false).await;
+                    }
+                    item = bus_recv.recv() => {
+                        match item {
+                            Some(Notification::ExitGraceful) => break,
+                            Some(Notification::ExitNow) => break,
+                            Some(Notification::Reconfigure) => this.resolve(true).await,
+                            Some(_) => {},
+                            None => break,
+                        }
+                    }
                 }
             }
             log::debug!("resolver_task: shutting down");

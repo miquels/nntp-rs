@@ -1,6 +1,7 @@
 pub mod article;
 pub mod arttype;
 pub mod blocking;
+pub mod bus;
 pub mod commands;
 pub mod config;
 pub mod dconfig;
@@ -10,7 +11,6 @@ pub mod errors;
 pub mod history;
 pub mod hostcache;
 pub mod logger;
-pub mod message;
 pub mod newsfeeds;
 pub mod nntp_codec;
 pub mod nntp_feeder;

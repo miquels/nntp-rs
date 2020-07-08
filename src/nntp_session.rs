@@ -3,6 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::{atomic::Ordering, Arc};
 
+use crate::bus::Notification;
 use crate::commands::{self, Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
 use crate::diag::{SessionStats, Stats};
@@ -10,7 +11,7 @@ use crate::history::HistStatus;
 use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpLine};
-use crate::server::{Notification, Server};
+use crate::server::Server;
 use crate::spool::ArtPart;
 use crate::util::{Buffer, UnixTime};
 

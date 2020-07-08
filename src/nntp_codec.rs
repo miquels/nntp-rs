@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
-use crate::server::Notification;
+use crate::bus::{self, Notification};
 use crate::util::{Buffer, HashFeed};
 
 use bytes::Buf;
@@ -22,7 +22,6 @@ use tokio::net::TcpStream;
 use tokio::pin;
 use tokio::prelude::*;
 use tokio::stream::Stream;
-use tokio::sync::watch;
 use tokio::time::{self, Delay, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
@@ -83,7 +82,7 @@ impl Debug for NntpInput {
 /// NntpCodec precursor.
 pub struct NntpCodecBuilder<S = TcpStream> {
     socket:   S,
-    watcher:  Option<watch::Receiver<Notification>>,
+    bus_recv: Option<bus::Receiver>,
     rd_tmout: Option<Duration>,
     wr_tmout: Option<Duration>,
 }
@@ -93,7 +92,7 @@ impl<S> NntpCodecBuilder<S> {
     pub fn new(socket: S) -> NntpCodecBuilder<S> {
         NntpCodecBuilder {
             socket,
-            watcher: None,
+            bus_recv: None,
             rd_tmout: None,
             wr_tmout: None,
         }
@@ -111,9 +110,9 @@ impl<S> NntpCodecBuilder<S> {
         self
     }
 
-    /// Set the watcher we watch for receipt of Notifications.
-    pub fn watcher(mut self, w: watch::Receiver<Notification>) -> Self {
-        self.watcher = Some(w);
+    /// Set the bus receiver we watch for receipt of Notifications.
+    pub fn bus_recv(mut self, b: bus::Receiver) -> Self {
+        self.bus_recv = Some(b);
         self
     }
 
@@ -128,7 +127,7 @@ impl<S> NntpCodecBuilder<S> {
 
         NntpCodec {
             socket:          self.socket,
-            watcher:         self.watcher,
+            bus_recv:        self.bus_recv,
             rd:              Buffer::new(),
             rd_pos:          0,
             rd_overflow:     false,
@@ -152,7 +151,7 @@ impl<S> NntpCodecBuilder<S> {
 /// write buffers to a TcpStream.
 pub struct NntpCodec<S = TcpStream> {
     socket:          S,
-    watcher:         Option<watch::Receiver<Notification>>,
+    bus_recv:        Option<bus::Receiver>,
     rd:              Buffer,
     rd_pos:          usize,
     rd_overflow:     bool,
@@ -194,7 +193,7 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 
         let r = NntpCodec {
             socket:          Box::new(rsock) as Box<dyn AsyncRead + Send + Unpin>,
-            watcher:         self.watcher,
+            bus_recv:        self.bus_recv,
             rd:              self.rd,
             rd_pos:          self.rd_pos,
             rd_overflow:     self.rd_overflow,
@@ -214,7 +213,7 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 
         let w = NntpCodec {
             socket:          Box::new(wsock) as Box<dyn AsyncWrite + Send + Unpin>,
-            watcher:         None,
+            bus_recv:        None,
             rd:              Buffer::new(),
             rd_pos:          0,
             rd_overflow:     false,
@@ -434,9 +433,9 @@ where
 
     fn poll_read(&mut self, cx: &mut Context) -> Poll<io::Result<NntpInput>> {
         // first, check the notification channel.
-        if let Some(watcher) = self.watcher.as_mut() {
+        if let Some(bus_recv) = self.bus_recv.as_mut() {
             let n = {
-                let fut = watcher.recv();
+                let fut = bus_recv.recv();
                 pin!(fut);
                 match fut.poll(cx) {
                     Poll::Ready(item) => {
@@ -444,7 +443,6 @@ where
                             Some(Notification::ExitNow) => {
                                 return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
                             },
-                            Some(Notification::None) => None,
                             other => other,
                         }
                     },
@@ -646,8 +644,8 @@ where
         //
         // now check the notification channel.
         //
-        if let Some(watcher) = self.watcher.as_mut() {
-            let fut = watcher.recv();
+        if let Some(bus_recv) = self.bus_recv.as_mut() {
+            let fut = bus_recv.recv();
             pin!(fut);
             match fut.poll(cx) {
                 Poll::Ready(item) => {
@@ -655,7 +653,6 @@ where
                         Some(Notification::ExitNow) => {
                             return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
                         },
-                        Some(Notification::None) => {},
                         other => self.notification = other,
                     }
                 },

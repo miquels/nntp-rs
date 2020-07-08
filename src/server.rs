@@ -9,11 +9,10 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::runtime::{self, Runtime};
-use tokio::signal::unix::{signal, SignalKind};
 use tokio::stream::StreamExt;
-use tokio::sync::{mpsc, watch};
 use tokio::task;
 
+use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
@@ -53,10 +52,10 @@ impl Server {
         let config = config::get_config();
 
         Runtime::new().unwrap().block_on(async move {
-            let (notifier, watcher) = server.notification_setup();
+            let (bus_sender, bus_recv) = bus::new();
 
             // Start the trust-resolver task and the hostcache task.
-            HostCache::resolver_task(watcher.clone())
+            HostCache::resolver_task(bus_recv.clone())
                 .await
                 .map_err(|e| ioerr!(Other, "initializing trust dns resolver: {}", e))?;
 
@@ -65,29 +64,32 @@ impl Server {
                     let server = server.clone();
                     let mut listener_sets = listener_sets;
                     let listeners = listener_sets.pop().unwrap();
-                    task::spawn(server.run_threaded(listeners, watcher.clone()));
+                    task::spawn(server.run_threaded(listeners, bus_recv.clone()));
                 },
                 "multisingle" => {
                     let server = server.clone();
-                    server.run_multisingle(listener_sets, watcher.clone());
+                    server.run_multisingle(listener_sets, bus_recv.clone());
                 },
                 _ => unreachable!(),
             }
 
-            server.wait(notifier, watcher).await;
+            // SIGUSR1 -> expire.
+            server.listen_expire(bus_recv.clone());
+
+            server.wait(bus_sender, bus_recv).await;
             Ok(())
         })
     }
 
     /// Run the server on a bunch of current_thread executors.
-    fn run_multisingle(self, mut listener_sets: TcpListenerSets, watcher: watch::Receiver<Notification>) {
+    fn run_multisingle(self, mut listener_sets: TcpListenerSets, bus_recv: bus::Receiver) {
         let config = config::get_config();
 
         let mut core_ids = config.multisingle.core_ids.clone().unwrap_or(Vec::new());
 
         while let Some(listeners) = listener_sets.pop() {
             let server = self.clone();
-            let watcher = watcher.clone();
+            let bus_recv = bus_recv.clone();
             let core_id = core_ids.pop();
 
             thread::spawn(move || {
@@ -108,14 +110,14 @@ impl Server {
                     let mut tasks = Vec::new();
                     for listener in listeners.into_iter() {
                         let server = server.clone();
-                        let watcher = watcher.clone();
+                        let bus_recv = bus_recv.clone();
                         let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
                             // Never happens.
                             eprintln!("cannot convert from net2 listener to tokio listener");
                             exit(1);
                         });
                         let task = task::spawn(async move {
-                            server.run(listener, watcher).await;
+                            server.run(listener, bus_recv).await;
                         });
                         tasks.push(task);
                     }
@@ -128,83 +130,45 @@ impl Server {
     }
 
     // run the server on the default threaded executor.
-    async fn run_threaded(self, listeners: Vec<TcpListener>, watcher: watch::Receiver<Notification>) {
+    async fn run_threaded(self, listeners: Vec<TcpListener>, bus_recv: bus::Receiver) {
         for listener in listeners.into_iter() {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
                 // Never happens.
                 eprintln!("cannot convert from net2 listener to tokio listener");
                 exit(1);
             });
-            task::spawn(self.clone().run(listener, watcher.clone()));
+            task::spawn(self.clone().run(listener, bus_recv.clone()));
         }
     }
 
-    // Set up a notification channel, and forward SIGINT/SIGTERM as notifications.
-    fn notification_setup(&self) -> (mpsc::Sender<Notification>, watch::Receiver<Notification>)
-    {
-        // tokio::watch::channel is SPMC, so front it with a MPSC channel
-        // so that we have, in effect, a MPMC channel.
-        let (notifier_master, watcher) = watch::channel(Notification::None);
-        let (notifier, mut notifier_receiver) = mpsc::channel::<Notification>(16);
-
-        task::spawn(async move {
-            while let Some(notification) = notifier_receiver.next().await {
-                if let Err(_) = notifier_master.broadcast(notification) {
-                    break;
-                }
-            }
-        });
-
-        // Forward control-c
-        let mut tx1 = notifier.clone();
-        task::spawn(async move {
-            let mut sig_int = signal(SignalKind::interrupt()).unwrap();
-            while let Some(_) = sig_int.next().await {
-                log::info!("received SIGINT");
-                let _ = tx1.send(Notification::ExitGraceful).await;
-            }
-        });
-
-        // Forward SIGTERM
-        let mut tx2 = notifier.clone();
-        task::spawn(async move {
-            let mut sig_term = signal(SignalKind::terminate()).unwrap();
-            while let Some(_) = sig_term.next().await {
-                log::info!("received SIGTERM");
-                let _ = tx2.send(Notification::ExitGraceful).await;
-            }
-        });
-
-        // Catch SIGUSR1
+    // Listen for an `Expire` notification (SIGUSR1) then run expire.
+    fn listen_expire(&self, mut bus_recv: bus::Receiver) {
         let server = self.clone();
         task::spawn(async move {
-            let mut sig_term = signal(SignalKind::user_defined1()).unwrap();
-            while let Some(_) = sig_term.next().await {
-                log::info!("received USR1");
-                let config = config::get_config();
-                if let Err(e) = server
-                    .history
-                    .expire(&server.spool, config.history.remember.clone(), false, true)
-                    .await
-                {
-                    log::error!("expire: {}", e);
+            while let Some(notification) = bus_recv.recv().await {
+                match notification {
+                    Notification::ExitGraceful | Notification::ExitNow => break,
+                    Notification::Expire => {
+                        let config = config::get_config();
+                        if let Err(e) = server
+                            .history
+                            .expire(&server.spool, config.history.remember.clone(), false, true)
+                            .await
+                        {
+                            log::error!("expire: {}", e);
+                        }
+                    },
+                    _ => {},
                 }
             }
         });
-
-        (notifier, watcher)
     }
 
     // wait for all sessions to finish.
-    async fn wait(
-        &self,
-        mut notifier: mpsc::Sender<Notification>,
-        mut watcher: watch::Receiver<Notification>,
-    )
-    {
+    async fn wait(&self, mut bus_sender: bus::Sender, mut bus_recv: bus::Receiver) {
         // wait for a shutdown notification
         let mut waited = 0u32;
-        while let Some(notification) = watcher.next().await {
+        while let Some(notification) = bus_recv.recv().await {
             match notification {
                 Notification::ExitGraceful => {
                     log::info!("received Notification::ExitGraceful");
@@ -222,7 +186,7 @@ impl Server {
         while self.tot_sessions.load(Ordering::SeqCst) > 0 {
             if waited == 50 {
                 log::info!("sending Notification::ExitNow to all remaining sessions");
-                let _ = notifier.send(Notification::ExitNow).await;
+                let _ = bus_sender.send(Notification::ExitNow);
             }
             waited += 1;
             let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
@@ -239,15 +203,15 @@ impl Server {
     }
 
     // This is run for every TCP listener socket.
-    async fn run(self, mut listener: tokio::net::TcpListener, watcher: watch::Receiver<Notification>) {
+    async fn run(self, mut listener: tokio::net::TcpListener, bus_recv: bus::Receiver) {
         use futures::future::Either;
         use futures::stream;
 
         // We have two streams. One, a stream of incoming connections.
         // Two, a stream of notifications. Combine them.
         let incoming = listener.incoming().map(|s| Either::Left(s));
-        let watcher2 = watcher.clone().map(|w| Either::Right(w));
-        let mut items = stream::select(incoming, watcher2);
+        let bus_recv2 = bus_recv.clone().map(|w| Either::Right(w));
+        let mut items = stream::select(incoming, bus_recv2);
 
         // Now iterate over the combined stream.
         while let Some(item) = items.next().await {
@@ -266,7 +230,7 @@ impl Server {
             let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
             let fdno = socket.as_raw_fd() as u32;
             let codec = NntpCodec::builder(socket)
-                .watcher(watcher.clone())
+                .bus_recv(bus_recv.clone())
                 .read_timeout(nntp_codec::READ_TIMEOUT)
                 .write_timeout(nntp_codec::WRITE_TIMEOUT)
                 .build();
@@ -315,12 +279,4 @@ impl Server {
             conns.remove(peername);
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Notification {
-    ExitGraceful,
-    ExitNow,
-    Reconfigure,
-    None,
 }
