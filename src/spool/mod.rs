@@ -112,7 +112,7 @@ impl Debug for ArtLoc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let token = &self.token[..self.toklen as usize]
             .iter()
-            .fold("0x".to_string(), |acc, x| acc + &format!("{:02x}", x));
+            .fold("0x".to_string(), |acc, x| acc + format!("{:02x}", x).as_str());
         f.debug_struct("ArtLoc")
             .field("storage_type", &self.storage_type.name())
             .field("spool", &self.spool)

@@ -392,10 +392,10 @@ fn handle_panic() {
         let mut msg = "".to_string();
         let mut loc = "".to_string();
         if let Some(s) = info.payload().downcast_ref::<&str>() {
-            msg = "'".to_string() + s + "', ";
+            msg = "'".to_string() + *s + "', ";
         }
         if let Some(s) = info.payload().downcast_ref::<String>() {
-            msg = "'".to_string() + &s + "', ";
+            msg = "'".to_string() + s.as_str() + "', ";
         }
         if let Some(l) = info.location() {
             loc = format!("{}", l);

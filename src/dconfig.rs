@@ -380,13 +380,13 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
 
         "distributions" => parse_list(&mut peer.distributions, words, ",")?,
         "adddist" => peer.distributions.push(parse_string(words)?),
-        "deldist" => peer.distributions.push("!".to_string() + &parse_string(words)?),
+        "deldist" => peer.distributions.push("!".to_string() + parse_string(words)?.as_str()),
 
         //"groups" => parse_num_list(&mut peer.groups.patterns, words, ",")?,
         "addgroup" => peer.groups.push(parse_group(words)?),
-        "delgroup" => peer.groups.push("!".to_string() + &parse_group(words)?),
-        "delgroupany" => peer.groups.push("@".to_string() + &parse_group(words)?),
-        "groupref" => peer.groups.push("=".to_string() + &parse_group(words)?),
+        "delgroup" => peer.groups.push("!".to_string() + parse_group(words)?.as_str()),
+        "delgroupany" => peer.groups.push("@".to_string() + parse_group(words)?.as_str()),
+        "groupref" => peer.groups.push("=".to_string() + parse_group(words)?.as_str()),
 
         "outhost" => peer.outhost = parse_string(words)?,
         "hostname" => peer.outhost = parse_string(words)?,
@@ -450,9 +450,9 @@ fn set_groupdef_item(gdef: &mut GroupDef, words: &[&str]) -> io::Result<()> {
     match words[0] {
         // "groups" => parse_list(&mut gdef.groups, words, ",")?,
         "addgroup" => gdef.groups.push(parse_string(words)?),
-        "delgroup" => gdef.groups.push("!".to_string() + &parse_string(words)?),
-        "delgroupany" => gdef.groups.push("@".to_string() + &parse_string(words)?),
-        "groupref" => gdef.groups.push("=".to_string() + &parse_string(words)?),
+        "delgroup" => gdef.groups.push("!".to_string() + parse_string(words)?.as_str()),
+        "delgroupany" => gdef.groups.push("@".to_string() + parse_string(words)?.as_str()),
+        "groupref" => gdef.groups.push("=".to_string() + parse_string(words)?.as_str()),
         _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
     }
     Ok(())

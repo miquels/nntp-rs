@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use futures::sink::{Sink, SinkExt};
 use parking_lot::Mutex;
+use smartstring::alias::String as SmartString;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
@@ -28,7 +29,7 @@ pub struct FeedArticle {
     // Location in the article spool.
     location: ArtLoc,
     // Peers to feed it to.
-    peers:    Vec<String>,
+    peers:    Vec<SmartString>,
 }
 
 // Sent from masterfeed -> peerfeed -> connection.
@@ -59,7 +60,7 @@ pub struct MasterFeed {
     art_chan:  mpsc::Receiver<FeedArticle>,
     bus:       bus::Receiver,
     newsfeeds: Arc<NewsFeeds>,
-    peerfeeds: HashMap<String, mpsc::Sender<PeerFeedItem>>,
+    peerfeeds: HashMap<SmartString, mpsc::Sender<PeerFeedItem>>,
     spool:     Spool,
 }
 
@@ -84,12 +85,12 @@ impl MasterFeed {
 
         // Find out what peers from self.peerfeeds are not in the new
         // newsfeed, and remove them.
-        let mut removed: HashSet<_> = self.peerfeeds.keys().cloned().collect();
+        let mut removed: HashSet<_> = self.peerfeeds.keys().map(|s| s.as_str().to_owned()).collect();
         for peer in &self.newsfeeds.peers {
             removed.remove(&peer.label);
         }
         for peer in removed.iter() {
-            self.peerfeeds.remove(peer);
+            self.peerfeeds.remove(peer.as_str());
         }
 
         // Now add new peers.
@@ -97,7 +98,7 @@ impl MasterFeed {
             let peer_feed = PeerFeed::new(peer, &self.newsfeeds, &self.spool);
             let tx_chan = peer_feed.tx_chan.clone();
             tokio::spawn(async move { peer_feed.run().await });
-            self.peerfeeds.insert(peer.label.clone(), tx_chan);
+            self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
         }
     }
 
