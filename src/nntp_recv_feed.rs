@@ -10,12 +10,12 @@ use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
-use crate::nntp_session::{ArtAccept, NntpResult, NntpSession};
+use crate::nntp_recv::{ArtAccept, NntpResult, NntpReceiver};
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
 use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
 
-impl NntpSession {
+impl NntpReceiver {
     pub(crate) async fn reject_art(
         &mut self,
         art: &Article,

@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::article::Article;
 use crate::errors::ArtError;
 use crate::hostcache;
-use crate::outfeed::PeerArticle;
+use crate::nntp_send::PeerArticle;
 
 #[repr(usize)]
 #[rustfmt::skip]

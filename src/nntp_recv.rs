@@ -15,7 +15,7 @@ use crate::server::Server;
 use crate::spool::ArtPart;
 use crate::util::{Buffer, UnixTime};
 
-pub struct NntpSession {
+pub struct NntpReceiver {
     pub codec:                  NntpCodec,
     pub(crate) parser:          CmdParser,
     pub(crate) server:          Server,
@@ -65,8 +65,8 @@ pub(crate) enum ArtAccept {
     Defer,
 }
 
-impl NntpSession {
-    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: SessionStats) -> NntpSession {
+impl NntpReceiver {
+    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: SessionStats) -> NntpReceiver {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();
@@ -74,7 +74,7 @@ impl NntpSession {
         // decremented in Drop.
         server.tot_sessions.fetch_add(1, Ordering::SeqCst);
 
-        NntpSession {
+        NntpReceiver {
             codec:           codec,
             parser:          CmdParser::new(),
             server:          server,
@@ -439,7 +439,7 @@ impl NntpSession {
     }
 }
 
-impl Drop for NntpSession {
+impl Drop for NntpReceiver {
     fn drop(&mut self) {
         if self.active {
             let name = &self.thispeer().label;
