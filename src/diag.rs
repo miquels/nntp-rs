@@ -1,20 +1,22 @@
 //! Diagnostics, statistics and telemetry.
 
 use std::default::Default;
+use std::net::IpAddr;
 use std::time::Instant;
 
 use crate::article::Article;
 use crate::errors::ArtError;
 use crate::hostcache;
+use crate::outfeed::PeerArticle;
 
 #[repr(usize)]
 #[rustfmt::skip]
 pub enum Stats {
     Offered,            // offered (ihave/check)
     Accepted,           // accepted
-	AcceptedBytes,
+    AcceptedBytes,
     Received,           // received
-	ReceivedBytes,
+    ReceivedBytes,
     Refused,            // refused
     RefHistory,         // ref, in history
     RefPreCommit,       // ref, offered by another host
@@ -26,7 +28,7 @@ pub enum Stats {
     Takethis,           // takethis
     Control,            // control message
     Rejected,           // rejected
-	RejectedBytes,
+    RejectedBytes,
     RejFailsafe,        // rej, failsafe
     RejMissHdrs,        // rej, missing headers
     RejTooOld,          // rej, too old
@@ -144,27 +146,27 @@ impl SessionStats {
         }
 
         log::info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
-			self.hostname,
-			self.instant.elapsed().as_secs(),
-			self.stats[Stats::Ihave as usize],
-			self.stats[Stats::Check as usize],
-			self.stats[Stats::Takethis as usize],
-			self.stats[Stats::Received as usize],
-			self.stats[Stats::Accepted as usize],
-			self.stats[Stats::Refused as usize],
-			self.stats[Stats::RefPreCommit as usize],
-			self.stats[Stats::RefPostCommit as usize],
-			self.stats[Stats::RefHistory as usize],
-			self.stats[Stats::RefBadMsgId as usize],
-			self.stats[Stats::RefIfiltHash as usize],
-			self.stats[Stats::Rejected as usize],
-			self.stats[Stats::Control as usize],
-			self.stats[Stats::RejIntSpamFilter as usize] + self.stats[Stats::RejExtSpamFilter as usize],
-			self.stats[Stats::RejErr as usize],
-			self.stats[Stats::ReceivedBytes as usize],
-			self.stats[Stats::AcceptedBytes as usize],
-			self.stats[Stats::RejectedBytes as usize],
-			rate,
+            self.hostname,
+            self.instant.elapsed().as_secs(),
+            self.stats[Stats::Ihave as usize],
+            self.stats[Stats::Check as usize],
+            self.stats[Stats::Takethis as usize],
+            self.stats[Stats::Received as usize],
+            self.stats[Stats::Accepted as usize],
+            self.stats[Stats::Refused as usize],
+            self.stats[Stats::RefPreCommit as usize],
+            self.stats[Stats::RefPostCommit as usize],
+            self.stats[Stats::RefHistory as usize],
+            self.stats[Stats::RefBadMsgId as usize],
+            self.stats[Stats::RefIfiltHash as usize],
+            self.stats[Stats::Rejected as usize],
+            self.stats[Stats::Control as usize],
+            self.stats[Stats::RejIntSpamFilter as usize] + self.stats[Stats::RejExtSpamFilter as usize],
+            self.stats[Stats::RejErr as usize],
+            self.stats[Stats::ReceivedBytes as usize],
+            self.stats[Stats::AcceptedBytes as usize],
+            self.stats[Stats::RejectedBytes as usize],
+            rate,
         );
     }
 
@@ -246,4 +248,157 @@ impl SessionStats {
         self.inc(Stats::Received);
         self.add(Stats::ReceivedBytes, art.len as u64);
     }
+}
+
+#[repr(usize)]
+#[rustfmt::skip]
+pub enum TxStats {
+    Offered,            // offered (ihave/check)
+    Accepted,           // accepted
+    AcceptedBytes,
+    Rejected,
+    RejectedBytes,
+    Refused,
+    Deferred,
+    DeferredBytes,
+    DeferredFail,
+    NotFound,
+    NumSlots,
+}
+
+#[rustfmt::skip]
+pub struct TxSessionStats {
+    // identification.
+    pub label:      String,
+    pub id:         u32,
+    pub start:      Instant,
+    pub mark:       Instant,
+    // stats
+    pub stats:      [u64; TxStats::NumSlots as usize],
+    pub total:      [u64; TxStats::NumSlots as usize],
+}
+
+impl Default for TxSessionStats {
+    fn default() -> TxSessionStats {
+        TxSessionStats {
+            label:    String::new(),
+            id:       0,
+            start:    Instant::now(),
+            mark:     Instant::now(),
+            stats:    [0u64; TxStats::NumSlots as usize],
+            total:    [0u64; TxStats::NumSlots as usize],
+        }
+    }
+}
+
+impl TxSessionStats {
+    pub fn add(&mut self, field: TxStats, count: u64) {
+        let n = field as usize;
+        self.stats[n] += count;
+    }
+
+    pub fn inc(&mut self, field: TxStats) {
+        self.add(field, 1);
+    }
+
+    pub fn on_connect(&mut self, label: &str, id: u32, outhost: &str, ipaddr: IpAddr, line: &str) {
+        self.label = label.to_string();
+        self.id = id;
+        self.start = Instant::now();
+        self.mark = Instant::now();
+        log::info!("{}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
+    }
+
+    pub fn stats_update(&mut self) {
+        log::info!("{}:{} mark {}", self.label, self.id, self.log_stats(self.mark, &self.stats));
+        if self.stats[TxStats::Deferred as usize] > 0 || self.stats[TxStats::DeferredFail as usize] > 0 {
+            log::info!("{}:{} mark {}", self.label, self.id, self.log_stats(self.mark, &self.stats));
+        }
+        self.update_total();
+    }
+
+    pub fn stats_final(&mut self) {
+        self.update_total();
+        log::info!("{}:{} final {}", self.label, self.id, self.log_stats(self.start, &self.total));
+        if self.total[TxStats::Deferred as usize] > 0 || self.total[TxStats::DeferredFail as usize] > 0 {
+            log::info!("{}:{} final {}", self.label, self.id, self.log_defer(self.start, &self.total));
+        }
+    }
+
+    fn update_total(&mut self) {
+        self.mark = Instant::now();
+        for i in 0 .. TxStats::NumSlots as usize {
+            self.total[i] += self.stats[i];
+            self.stats[i] = 0;
+        }
+    }
+
+    pub fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
+        let secs = self.mark.saturating_duration_since(start).as_secs();
+        format!("secs={:-4} acc={:-4} dup={:-4} rej={:-4} tot={:-4} bytes={:-4} ({}/min) avpend={:-4.1}",
+            secs,
+            stats[TxStats::Accepted as usize],
+            stats[TxStats::Refused as usize],
+            stats[TxStats::Rejected as usize],
+            stats[TxStats::Offered as usize],
+            stats[TxStats::AcceptedBytes as usize],
+            if secs > 0 { stats[TxStats::Offered as usize] * 60 / secs } else { 0 },
+            1,
+        )
+    }
+
+    pub fn log_defer(&self, start: Instant, stats: &[u64]) -> String {
+        let secs = self.mark.saturating_duration_since(start).as_secs();
+        format!("secs={:-4} defer={:-4} deferfail={:-4}",
+            secs,
+            stats[TxStats::Deferred as usize],
+            stats[TxStats::DeferredFail as usize],
+        )
+    }
+
+    // About to send TAKETHIS but article not present in spool anymore.
+    pub fn art_notfound(&mut self) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::NotFound);
+    }
+
+    // CHECK 431 (and incorrectly, TAKETHIS 431)
+    pub fn art_deferred(&mut self, art: Option<&PeerArticle>) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::Deferred);
+        if let Some(art) = art {
+            self.add(TxStats::DeferredBytes, art.len() as u64);
+        }
+    }
+
+    // CHECK 431 (and incorrectly, TAKETHIS 431) where we failed to re-queue.
+    pub fn art_deferred_fail(&mut self, art: Option<&PeerArticle>) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::DeferredFail);
+        if let Some(art) = art {
+            self.add(TxStats::DeferredBytes, art.len() as u64);
+        }
+    }
+
+    // CHECK 438
+    pub fn art_refused(&mut self, art: &PeerArticle) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::Refused);
+    }
+
+    // TAKETHIS 239
+    pub fn art_accepted(&mut self, art: &PeerArticle) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::Accepted);
+        self.add(TxStats::AcceptedBytes, art.len() as u64);
+    }
+
+    // TAKETHIS 439
+    pub fn art_rejected(&mut self, art: &PeerArticle) {
+        self.inc(TxStats::Offered);
+        self.inc(TxStats::Rejected);
+        self.add(TxStats::RejectedBytes, art.len() as u64);
+    }
+
+
 }

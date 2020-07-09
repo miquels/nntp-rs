@@ -390,7 +390,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
 
         "outhost" => peer.outhost = parse_string(words)?,
         "hostname" => peer.outhost = parse_string(words)?,
-        "bindaddress" => peer.bindaddress = parse_string(words)?,
+        "bindaddress" => peer.bindaddress = Some(parse_ipaddr(words)?),
         "port" => peer.port = parse_num::<u16>(words)?,
         "maxparallel" => peer.maxparallel = parse_num::<u32>(words)?,
         "maxstream" => peer.maxstream = parse_num::<u32>(words)?,
@@ -614,6 +614,14 @@ fn parse_bool(words: &[&str]) -> io::Result<bool> {
         "n" | "no" | "f" | "false" | "off" | "0" => Ok(false),
         _ => Err(invalid_data!("{}: not a boolean value {}", words[0], words[1])),
     }
+}
+
+// parse an IP address.
+fn parse_ipaddr(words: &[&str]) -> io::Result<std::net::IpAddr> {
+    if words.len() != 2 {
+        return Err(invalid_data!("{}: expected 1 argument", words[0]));
+    }
+    std::net::IpAddr::from_str(words[1]).map_err(|e| invalid_data!("{}: {} {}", words[0], e, words[1]))
 }
 
 // parse a list of words, seperated by a character from "sep".

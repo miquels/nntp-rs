@@ -19,6 +19,7 @@ use tokio::stream::StreamExt;
 use tokio::task;
 use tokio::time::delay_for;
 use trust_dns_resolver::{
+    config::LookupIpStrategy,
     error::{ResolveError, ResolveErrorKind},
     TokioAsyncResolver,
 };
@@ -126,8 +127,16 @@ impl HostCache {
         log::debug!("resolver_task: starting");
         {
             // Initialize trust-dns resolver, and start first resolving pass.
-            let resolver = TokioAsyncResolver::tokio_from_system_conf().await?;
+            let (config, mut opts) = trust_dns_resolver::system_conf::read_system_conf()?;
+            opts.timeout = Duration::new(1, 0);
+            opts.attempts = 5;
+            opts.rotate = true;
+            opts.edns0 = true;
+            opts.use_hosts_file = true;
+            opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+            let resolver = TokioAsyncResolver::tokio(config, opts).await?;
             RESOLVER_OPT.lock().replace(resolver);
+
             let this = Self::get().clone();
             task::spawn(async move {
                 this.resolve(true).await;

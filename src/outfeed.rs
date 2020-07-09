@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
-use parking_lot::Mutex;
 use smartstring::alias::String as SmartString;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -16,11 +17,25 @@ use tokio::task;
 
 use crate::bus::{self, Notification};
 use crate::config;
-use crate::diag::SessionStats;
+use crate::diag::TxSessionStats;
+use crate::hostcache;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::spool::{ArtLoc, ArtPart, Spool};
 use crate::util::Buffer;
+
+// Size of the command channel for the peerfeed.
+// The Masterfeed sends articles and notification messages down.
+// Connections send notification messages up.
+const PEERFEED_COMMAND_CHANNEL_SIZE: usize = 512;
+
+// Size of the broadcast channel from the PeerFeed to the Connections.
+// Not too small, as writes to the channel never ever block so
+// no backpressure even if there are bursts (which there won't be).
+const CONNECTION_BCAST_CHANNEL_SIZE: usize = 64;
+
+// Size of the article queue in a PeerFeed from which the Connections read.
+const PEERFEED_QUEUE_SIZE: usize = 5000;
 
 /// Sent to the MasterFeed.
 pub struct FeedArticle {
@@ -28,6 +43,8 @@ pub struct FeedArticle {
     msgid:    String,
     // Location in the article spool.
     location: ArtLoc,
+    // Size.
+    size:     usize,
     // Peers to feed it to.
     peers:    Vec<SmartString>,
 }
@@ -36,7 +53,7 @@ pub struct FeedArticle {
 #[derive(Clone)]
 enum PeerFeedItem {
     Article(PeerArticle),
-    ConnExit,
+    ConnExit(Vec<PeerArticle>),
     Reconfigure,
     ExitGraceful,
     ExitNow,
@@ -44,11 +61,19 @@ enum PeerFeedItem {
 
 // Article in the peerfeed queue.
 #[derive(Clone)]
-struct PeerArticle {
+pub struct PeerArticle {
     // Message-Id.
     msgid:    String,
     // Location in the article spool.
     location: ArtLoc,
+    // Size
+    size:     usize,
+}
+
+impl PeerArticle {
+    pub fn len(&self) -> usize {
+        self.size
+    }
 }
 
 // Masterfeed.
@@ -96,7 +121,7 @@ impl MasterFeed {
         // Now add new peers.
         for peer in &self.newsfeeds.peers {
             let peer_feed = PeerFeed::new(peer, &self.newsfeeds, &self.spool);
-            let tx_chan = peer_feed.tx_chan.clone();
+            let tx_chan = peer_feed.get_tx_chan();
             tokio::spawn(async move { peer_feed.run().await });
             self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
         }
@@ -155,6 +180,7 @@ impl MasterFeed {
                 let peer_art = PeerArticle {
                     msgid:    art.msgid.clone(),
                     location: art.location.clone(),
+                    size:     art.size,
                 };
                 if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
                     log::warn!(
@@ -185,7 +211,7 @@ impl MasterFeed {
 struct Peer {
     label:         String,
     outhost:       String,
-    bindaddress:   String,
+    bindaddress:   Option<IpAddr>,
     port:          u16,
     maxparallel:   u32,
     maxstream:     u32,
@@ -246,7 +272,12 @@ struct PeerFeed {
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
 
-    // active connections.
+    // A capacity-of-one channel that is used to signal that
+    // the article queue is empty. We can then fill it with
+    // data from the backlog (if we have a backlog).
+    tx_empty: mpsc::Sender<()>,
+    rx_empty: mpsc::Receiver<()>,
+
     num_conns: u32,
 
     // Spool instance.
@@ -256,10 +287,12 @@ struct PeerFeed {
 impl PeerFeed {
     /// Create a new PeerFeed.
     fn new(nfpeer: &NewsPeer, newsfeeds: &Arc<NewsFeeds>, spool: &Spool) -> PeerFeed {
-        let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(16);
-        let (broadcast, _) = broadcast::channel(64);
-        let queue_capacity = 10000;
+        let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(PEERFEED_COMMAND_CHANNEL_SIZE);
+        let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
+        let queue_capacity = PEERFEED_QUEUE_SIZE;
         let (tx_queue, rx_queue) = async_channel::bounded(queue_capacity);
+        let (tx_empty, rx_empty) = mpsc::channel::<()>(1);
+
         PeerFeed {
             label: nfpeer.label.clone(),
             newsfeeds: newsfeeds.clone(),
@@ -269,17 +302,33 @@ impl PeerFeed {
             tx_queue,
             queue_capacity,
             broadcast,
+            tx_empty,
+            rx_empty,
             num_conns: 0,
             spool: spool.clone(),
             newspeer: Arc::new(Peer::new(nfpeer)),
         }
     }
 
+    // Get a clone of tx_chan. Masterfeed calls this.
+    fn get_tx_chan(&self) -> mpsc::Sender<PeerFeedItem> {
+        self.tx_chan.clone()
+    }
+
     /// Run the PeerFeed.
     async fn run(mut self) {
         let mut closed = false;
+        let mut exiting = false;
+
+        // NOTE: since we have a clone of tx_chan ourselves, this will loop forever.
+        // Or at least until we receive ExitGraceful or ExitNow.
 
         while let Some(item) = self.rx_chan.recv().await {
+
+            if exiting && self.num_conns == 0 {
+                break;
+            }
+
             match item {
                 PeerFeedItem::Article(art) => {
                     // if we have no connections, or less than maxconn, create a connection here.
@@ -287,11 +336,10 @@ impl PeerFeed {
                         self.add_connection().await;
                     }
 
-                    //let mut art = art;
                     loop {
                         match self.tx_queue.try_send(art) {
                             Ok(()) => break,
-                            Err(async_channel::TrySendError::Closed(_err)) => {
+                            Err(async_channel::TrySendError::Closed(_art)) => {
                                 // should never happen.
                                 if !closed {
                                     log::error!(
@@ -300,14 +348,14 @@ impl PeerFeed {
                                     );
                                     closed = true;
                                 }
-                                // XXX TODO: full. send half of the queue to the backlog.
-                                //art = err;
-                                //continue;
+                                // XXX TODO: full. send article to the backlog.
+                                //self.send_art_to_backlog(art);
                                 break;
                             },
-                            Err(async_channel::TrySendError::Full(_err)) => {
-                                // XXX TODO: full. send half of the queue to the backlog.
-                                //art = err;
+                            Err(async_channel::TrySendError::Full(_art)) => {
+                                // XXX TODO: full. send article and half of the queue to the backlog.
+                                //self.send_art_to_backlog(art)
+                                //self.send_queue_to_backlog(false)
                                 //continue;
                                 break;
                             },
@@ -315,19 +363,27 @@ impl PeerFeed {
                     }
                 },
                 PeerFeedItem::ExitGraceful => {
-                    // XXX TODO handle exit
+                    exiting = true;
+                    let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
                 },
                 PeerFeedItem::ExitNow => {
-                    // XXX TODO handle exit
+                    exiting = true;
+                    let _ = self.broadcast.send(PeerFeedItem::ExitNow);
                 },
                 PeerFeedItem::Reconfigure => {
-                    // XXX TODO handle reconfigure
+                    let _ = self.broadcast.send(PeerFeedItem::Reconfigure);
                 },
-                PeerFeedItem::ConnExit => {
+                PeerFeedItem::ConnExit(arts) => {
+                    // XXX TODO handle returned arts.
+                    //self.requeue(arts);
                     self.num_conns -= 1;
                 },
             }
         }
+
+        // save queue to disk.
+        // XXX TODO
+        //self.send_queue_to_backlog(true);
     }
 
     async fn add_connection(&mut self) {
@@ -337,12 +393,23 @@ impl PeerFeed {
         let rx_queue = self.rx_queue.clone();
         let spool = self.spool.clone();
         let broadcast = self.broadcast.clone();
+        let tx_empty = self.tx_empty.clone();
 
         self.num_conns += 1;
 
         // We spawn a new Connection task.
         task::spawn(async move {
-            match Connection::new(id, newspeer, tx_chan.clone(), rx_queue, broadcast, spool).await {
+            match Connection::new(
+                id,
+                newspeer,
+                tx_chan.clone(),
+                rx_queue,
+                broadcast,
+                tx_empty,
+                spool,
+            )
+            .await
+            {
                 Ok(conn) => {
                     // On succes, we start talking nntp.
                     drop(tx_chan);
@@ -350,7 +417,7 @@ impl PeerFeed {
                 },
                 Err(_) => {
                     // notify PeerFeed that we failed.
-                    let _ = tx_chan.send(PeerFeedItem::ConnExit);
+                    let _ = tx_chan.send(PeerFeedItem::ConnExit(Vec::new()));
                 },
             }
         });
@@ -374,6 +441,8 @@ impl PeerFeed {
 struct Connection {
     // Unique identifier.
     id:          u32,
+    // IP address we're connected to.
+    ipaddr:      IpAddr,
     // Peer info.
     newspeer:    Arc<Peer>,
     // reader / writer.
@@ -383,10 +452,10 @@ struct Connection {
     send_queue:  VecDeque<ConnItem>,
     // Sent items, waiting for a reply.
     recv_queue:  VecDeque<ConnItem>,
+    // Dropped items to be pushed onto the backlog.
+    dropped:     Vec<ConnItem>,
     // Stats
-    stats:       SessionStats,
-    // Set after we have sent QUIT
-    sender_done: bool,
+    stats:       TxSessionStats,
     // Spool.
     spool:       Spool,
     // channel to send information to the PeerFeed.
@@ -395,6 +464,8 @@ struct Connection {
     rx_queue:    async_channel::Receiver<PeerArticle>,
     // broadcast channel to receive notifications from the PeerFeed.
     broadcast:   broadcast::Receiver<PeerFeedItem>,
+    // used to wake up the fill-the-queue-from-the-backlog task.
+    tx_empty:    mpsc::Sender<()>,
 }
 
 impl Connection {
@@ -405,49 +476,102 @@ impl Connection {
         tx_chan: mpsc::Sender<PeerFeedItem>,
         rx_queue: async_channel::Receiver<PeerArticle>,
         broadcast: broadcast::Sender<PeerFeedItem>,
+        tx_empty: mpsc::Sender<()>,
         spool: Spool,
     ) -> io::Result<Connection>
     {
-        // First, connect.
-        let codec = Connection::connect(&newspeer.outhost)
-            .await
-            .map_err(|e| ioerr!(e.kind(), "{}: {}", newspeer.label, e))?;
+        let mut broadcast_rx = broadcast.subscribe();
 
-        // Build and return a new Connection struct.
-        let (reader, writer) = codec.split();
-        Ok(Connection {
+        log::info!(
+            "outfeed: {}:{}: connecting to {}",
+            newspeer.label,
             id,
-            newspeer,
-            reader,
-            writer,
-            send_queue: VecDeque::new(),
-            recv_queue: VecDeque::new(),
-            stats: SessionStats::default(),
-            sender_done: false,
-            spool,
-            tx_chan,
-            rx_queue,
-            broadcast: broadcast.subscribe(),
-        })
+            newspeer.outhost
+        );
+
+        // Start connecting, but also listen to broadcasts while connecting.
+        loop {
+            tokio::select! {
+                conn = Connection::connect(newspeer.as_ref()) => {
+                    let (codec, ipaddr, connect_msg) = conn.map_err(|e| {
+                        ioerr!(e.kind(), "{}:{}: {}", newspeer.label, id, e)
+                    })?;
+
+                    // Build and return a new Connection struct.
+                    let (reader, writer) = codec.split();
+                    let mut conn = Connection {
+                        id,
+                        ipaddr,
+                        newspeer,
+                        reader,
+                        writer,
+                        send_queue: VecDeque::new(),
+                        recv_queue: VecDeque::new(),
+                        dropped: Vec::new(),
+                        stats: TxSessionStats::default(),
+                        spool,
+                        tx_chan,
+                        rx_queue,
+                        broadcast: broadcast_rx,
+                        tx_empty,
+                    };
+
+                    // Initialize stats logger and log connect message.
+                    conn.stats.on_connect(&conn.newspeer.label, id, &conn.newspeer.outhost, conn.ipaddr,  &connect_msg);
+                    return Ok(conn);
+                }
+                item = broadcast_rx.recv() => {
+                    // if any of these events happen, cancel the connect.
+                    match item {
+                        Ok(PeerFeedItem::Reconfigure) |
+                        Ok(PeerFeedItem::ExitGraceful) |
+                        Ok(PeerFeedItem::ExitNow) |
+                        Err(_) => {
+                            return Err(ioerr!(ConnectionAborted, "{}:{}: connection cancelled", newspeer.label, id));
+                        },
+                        _ => {},
+                    }
+                }
+            }
+        }
     }
 
     // Spawn Self as a separate task.
     async fn run(mut self) {
         let _ = tokio::spawn(async move {
-            // TODO: log initial start, final stats.
-            let _ = self.feed().await;
+            // call feeder loop.
+            if let Err(e) = self.feed().await {
+                log::error!("outfeed: {}:{}: fatal: {}", self.newspeer.label, self.id, e);
+            }
+
+            // log stats.
+            self.stats.stats_final();
+
+            // return remaining articles that weren't sent.
+            let mut arts = Vec::new();
+            for item in self.send_queue.iter()
+                .chain(self.recv_queue.iter())
+                .chain(self.dropped.iter()) {
+                match item {
+                    &ConnItem::Check(ref art) | &ConnItem::Takethis(ref art) => {
+                        arts.push(art.clone());
+                    },
+                    _ => {},
+                }
+            }
+            let _ = self.tx_chan.send(PeerFeedItem::ConnExit(arts)).await;
         });
     }
 
     // Connect to remote peer.
-    async fn connect(outhost: &str) -> io::Result<NntpCodec> {
+    async fn connect(peer: &Peer) -> io::Result<(NntpCodec, IpAddr, String)> {
         // A lookup of the hostname might return multiple addresses.
-        // We're not sure of the order that tokio returns addresses
-        // in, so sort IPv6 before IPv4 but otherwise keep the order
+        // We're not sure of the order that addresses are returned in,
+        // so sort IPv6 before IPv4 but otherwise keep the order
         // intact.
-        let addrs = match tokio::net::lookup_host(outhost).await {
-            Ok(addr_iter) => {
-                let addrs: Vec<std::net::SocketAddr> = addr_iter.collect();
+        let addrs = match hostcache::RESOLVER.lookup_ip(peer.outhost.as_str()).await {
+            Ok(lookupip) => {
+                let addrs: Vec<SocketAddr> = lookupip.iter().map(|a| SocketAddr::new(a, peer.port)).collect();
                 let v6 = addrs.iter().filter(|a| a.is_ipv6()).cloned();
                 let v4 = addrs.iter().filter(|a| a.is_ipv4()).cloned();
                 let mut addrs2 = Vec::new();
@@ -455,19 +579,62 @@ impl Connection {
                 addrs2.extend(v4);
                 addrs2
             },
-            Err(e) => return Err(e),
+            Err(e) => return Err(ioerr!(Other, e)),
         };
 
         // Try to connect to the peer.
         let mut last_err = None;
         for addr in &addrs {
             let result = async move {
-                // Connect.
+                // Create socket.
+                let is_ipv6 = peer
+                    .bindaddress
+                    .map(|ref a| a.is_ipv6())
+                    .unwrap_or(addr.is_ipv6());
+                let domain = if is_ipv6 {
+                    socket2::Domain::ipv6()
+                } else {
+                    socket2::Domain::ipv4()
+                };
+                let socket = socket2::Socket::new(domain, socket2::Type::stream(), None).map_err(|e| {
+                    log::trace!("Connection::connect: Socket::new({:?}): {}", domain, e);
+                    e
+                })?;
+
+                // Set IPV6_V6ONLY if this is going to be an IPv6 connection.
+                if is_ipv6 {
+                    socket.set_only_v6(true).map_err(|_| {
+                        log::trace!("Connection::connect: Socket.set_only_v6() failed");
+                        ioerr!(AddrNotAvailable, "socket.set_only_v6() failed")
+                    })?;
+                }
+
+                // Bind local address.
+                if let Some(ref bindaddr) = peer.bindaddress {
+                    let sa = SocketAddr::new(bindaddr.to_owned(), 0);
+                    socket.bind(&sa.clone().into()).map_err(|e| {
+                        log::trace!("Connection::connect: Socket::bind({:?}): {}", sa, e);
+                        ioerr!(e.kind(), "bind {}: {}", sa, e)
+                    })?;
+                }
+
+                // Now this sucks, having to run it on a threadpool.
                 log::trace!("Trying to connect to {:?}", addr);
-                let socket = TcpStream::connect(addr).await.map_err(|e| {
-                    log::trace!("connect {:?}: {}", addr, e);
+                let addr2: socket2::SockAddr = addr.to_owned().into();
+                let res = task::spawn_blocking(move || {
+                    // 10 second timeout for a connect is more than enough.
+                    socket.connect_timeout(&addr2, Duration::new(10, 0))?;
+                    Ok(socket)
+                })
+                .await
+                .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)));
+                let socket = res.map_err(|e| {
+                    log::trace!("Connection::connect({}): {}", addr, e);
                     ioerr!(e.kind(), "{}: {}", addr, e)
                 })?;
+
+                // Now turn it into a tokio::net::TcpStream.
+                let socket = TcpStream::from_std(socket.into()).unwrap();
 
                 // Create codec from socket.
                 let mut codec = NntpCodec::builder(socket)
@@ -489,6 +656,7 @@ impl Connection {
                         resp.code
                     ))?;
                 }
+                let connect_msg = resp.short().to_string();
 
                 // Send MODE STREAM.
                 log::trace!(">> MODE STREAM");
@@ -506,13 +674,13 @@ impl Connection {
                     ))?;
                 }
 
-                Ok(codec)
+                Ok((codec, connect_msg))
             }
             .await;
 
             // On success, return. Otherwise, save the error.
             match result {
-                Ok(codec) => return Ok(codec),
+                Ok((codec, connect_msg)) => return Ok((codec, addr.ip(), connect_msg)),
                 Err(e) => last_err = Some(e),
             }
         }
@@ -521,18 +689,10 @@ impl Connection {
         Err(last_err.unwrap())
     }
 
-    async fn feed(&mut self) {
-        if let Err(e) = self.feed2().await {
-            log::error!("Connection::feed: exit: {}", e);
-        }
-        // XXX TODO include remaining articles that weren't sent.
-        let _ = self.tx_chan.send(PeerFeedItem::ConnExit).await;
-    }
-
     // Feeder loop.
-    async fn feed2(&mut self) -> io::Result<()> {
+    async fn feed(&mut self) -> io::Result<()> {
         let mut xmit_busy = false;
-        let mut bcast_listen = true;
+        let mut maxstream = self.newspeer.maxstream as usize;
 
         loop {
             // If there is an item in the send queue, and we're not still busy
@@ -547,14 +707,23 @@ impl Connection {
             }
 
             let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let need_item = !xmit_busy && queue_len < self.newspeer.maxstream as usize;
+            let mut need_item = !xmit_busy && queue_len < maxstream;
 
-            // XXX TODO
-            //  if need_item && self.rx_queue.len() == 0 {
-            //      if !self.shared.no_backlog {
-            //          self.tx_chan.send(PeerFeedItem::NeedMoreInput);
-            //      }
-            //  }
+            if need_item {
+                // Try to get one item from the queue. If it's empty,
+                // signal the PeerFeed that we hit an empty queue.
+                match self.rx_queue.try_recv() {
+                    Ok(art) => {
+                        self.send_queue.push_back(ConnItem::Check(art));
+                        need_item = queue_len + 1 < maxstream;
+                    },
+                    Err(async_channel::TryRecvError::Empty) => {
+                        let _ = self.tx_empty.try_send(());
+                    },
+                    _ => {},
+                }
+            }
+
             tokio::select! {
 
                 // If we need to, get an item from the global queue for this feed.
@@ -562,35 +731,41 @@ impl Connection {
                     match res {
                         Ok(art) => self.send_queue.push_back(ConnItem::Check(art)),
                         Err(_) => {
-                            // channel closed. shutdown in progress. send quit.
-                            // XXX TODO: update stats, log, return
-                            return Ok(());
+                            // channel closed. shutdown in progress.
+                            // drop anything in the send_queue and send quit.
+                            self.dropped.extend(self.send_queue.drain(..));
+                            self.send_queue.push_back(ConnItem::Quit);
+                            // this will make sure that need_item == false.
+                            maxstream = 0;
                         },
                     }
                 }
 
                 // check for notifications from the broadcast channel.
-                res = self.broadcast.recv(), if bcast_listen => {
+                res = self.broadcast.recv() => {
                     match res {
-                        Ok(PeerFeedItem::ExitGraceful) => {
-                            // XXX TODO graceful exit.
-                            break;
-                        },
                         Ok(PeerFeedItem::ExitNow) => {
-                            // XXX TODO ungraceful exit.
-                            break;
+                            return Err(ioerr!(Interrupted, "forced exit"));
+                        }
+                        Ok(PeerFeedItem::ExitGraceful) => {
+                            // exit gracefully.
+                            self.dropped.extend(self.send_queue.drain(..));
+                            self.send_queue.push_back(ConnItem::Quit);
+                            maxstream = 0;
                         },
                         Ok(PeerFeedItem::Reconfigure) => {
-                            // XXX TODO graceful exit.
-                            break;
+                            // config changed. drain slowly and quit.
+                            log::info!("outfeed: {}:{}: reconfigure", self.newspeer.label, self.id);
+                            self.send_queue.push_back(ConnItem::Quit);
+                            maxstream = 0;
                         },
-                        Err(broadcast::RecvError::Lagged(_)) => {
+                        Err(broadcast::RecvError::Lagged(num)) => {
                             // what else can we do ?
-                            break;
+                            return Err(ioerr!(TimedOut, "missed too many messages ({}) on bus", num));
                         },
                         Err(broadcast::RecvError::Closed) => {
                             // what else can we do?
-                            bcast_listen = false;
+                            return Err(ioerr!(TimedOut, "bus unexpectedly closed"));
                         },
                         _ => {},
                     }
@@ -600,41 +775,85 @@ impl Connection {
                 res = self.writer.flush(), if xmit_busy => {
                     // Done sending either CHECK or TAKETHIS.
                     if let Err(e) = res {
-                        // XXX TODO: update stats, log, return
-                        panic!("transmit: {}", e);
+                        return Err(ioerr!(e.kind(), "writing to socket: {}", e));
                     }
                     xmit_busy = false;
                 }
 
                 // process a reply from the remote server.
                 res = self.reader.next() => {
+                    // Remap None (end of stream) to EOF.
+                    let res = res.unwrap_or_else(|| Err(ioerr!(UnexpectedEof, "Connection closed")));
+
                     // What did we receive?
-                    match res.unwrap().and_then(NntpResponse::try_from) {
+                    match res.and_then(NntpResponse::try_from) {
                         Err(e) => {
-                            // XXX TODO: update stats, log, return
-                            panic!("transmit: {}", e);
+                            if e.kind() == io::ErrorKind::UnexpectedEof {
+                                if self.recv_queue.len() == 0 {
+                                    log::info!("outfeed: {}:{}: connection closed by remote", self.newspeer.label, self.id);
+                                    return Ok(());
+                                }
+                                return Err(ioerr!(e.kind(), "connection closed unexpectedly"));
+                            }
+                            return Err(ioerr!(e.kind(), "reading from socket: {}", e));
                         },
                         Ok(resp) => {
                             // Got a valid reply. Find matching command.
+                            let mut unexpected = false;
                             match self.recv_queue.pop_front() {
-                                None => panic!("recv queue out of sync"),
+                                None => {
+                                    if resp.code == 400 {
+                                        log::info!("outfeed: {}:{}: connection closed by remote ({})", self.newspeer.label, self.id, resp.short());
+                                        return Ok(());
+                                    }
+                                    return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short()));
+                                },
                                 Some(ConnItem::Check(art)) => {
-                                    // TODO check resp status code, update stats.
-                                    self.send_queue.push_back(ConnItem::Takethis(art));
+                                    match resp.code {
+                                        238 => {
+                                            self.send_queue.push_back(ConnItem::Takethis(art));
+                                        },
+                                        431 => {
+                                            // XXX TODO req-queue article.
+                                            //self.stats.art_deferred(None);
+                                            self.stats.art_deferred_fail(None); // XXX
+                                        },
+                                        438 => {
+                                            self.stats.art_refused(&art);
+                                        },
+                                        _ => unexpected = true,
+                                    }
                                 },
                                 Some(ConnItem::Takethis(art)) => {
-                                    // TODO check resp status code, send article, update stats.
+                                    match resp.code {
+                                        239 => {
+                                            self.stats.art_accepted(&art);
+                                            self.send_queue.push_back(ConnItem::Takethis(art));
+                                        },
+                                        431 => {
+                                            // this is an invalid TAKETHIS reply!
+                                            // XXX TODO req-queue article.
+                                            //self.stats.art_deferred(None);
+                                            self.stats.art_deferred_fail(Some(&art)); // XXX
+                                        },
+                                        439 => {
+                                            self.stats.art_rejected(&art);
+                                        },
+                                        _ => unexpected = true,
+                                    }
                                 },
                                 Some(ConnItem::Quit) => {
-                                    // TODO check resp status code, update stats, return.
+                                    return Ok(());
                                 },
+                            }
+                            if unexpected {
+                                return Err(ioerr!(InvalidData, "unexpected response: {}", resp.short()));
                             }
                         },
                     }
                 }
             }
         }
-        Ok(())
     }
 
     // Put the ConnItem in the Sink.
@@ -649,9 +868,11 @@ impl Connection {
                 let buffer = match self.spool.read(art.location, ArtPart::Article, tmpbuf).await {
                     Ok(buf) => buf,
                     Err(e) => {
-                        // check the error and see if it's fatal. If not,
-                        // update stats and return Ok. TODO
-                        return Ok(());
+                        if e.kind() == io::ErrorKind::NotFound {
+                            self.stats.art_notfound();
+                            return Ok(());
+                        }
+                        return Err(e);
                     },
                 };
                 let line = format!("TAKETHIS {}\r\n", art.msgid);

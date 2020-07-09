@@ -147,7 +147,7 @@ pub struct NewsPeer {
 
     /// used with the outgoing feed.
     pub outhost:            String,
-    pub bindaddress:        String,
+    pub bindaddress:        Option<IpAddr>,
     pub port:               u16,
     pub maxparallel:        u32,
     pub maxstream:          u32,
