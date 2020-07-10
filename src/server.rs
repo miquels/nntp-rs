@@ -10,6 +10,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::runtime::{self, Runtime};
 use tokio::stream::StreamExt;
+use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::bus::{self, Notification};
@@ -20,6 +21,7 @@ use crate::hostcache::HostCache;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_recv::NntpReceiver;
+use crate::nntp_send::{MasterFeed, FeedArticle};
 use crate::spool::Spool;
 use crate::util::TcpListenerSets;
 
@@ -38,27 +40,14 @@ pub struct Server {
     pub history:      History,
     pub spool:        Spool,
     pub conns:        Arc<Mutex<HashMap<String, usize>>>,
+    pub outfeed:      mpsc::Sender<FeedArticle>,
 }
 
 impl Server {
-    /// Create a new Server.
-    pub fn new(history: History, spool: Spool) -> Server {
-        Server {
-            history,
-            spool,
-            conns: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
     pub fn start(history: History, spool: Spool, listener_sets: TcpListenerSets) -> io::Result<()> {
-        let server = Server {
-            history,
-            spool,
-            conns: Arc::new(Mutex::new(HashMap::new())),
-        };
-        let config = config::get_config();
-
         Runtime::new().unwrap().block_on(async move {
+
+            // Create pub/sub bus.
             let (bus_sender, bus_recv) = bus::new();
 
             // Start the trust-resolver task and the hostcache task.
@@ -66,6 +55,22 @@ impl Server {
                 .await
                 .map_err(|e| ioerr!(Other, "initializing trust dns resolver: {}", e))?;
 
+            // Start the outgoing feed.
+            let (mut master, master_chan) = MasterFeed::new(bus_recv.clone(), spool.clone()).await;
+            task::spawn(async move {
+                master.run().await;
+            });
+
+            // Create server struct.
+            let server = Server {
+                history,
+                spool,
+                conns: Arc::new(Mutex::new(HashMap::new())),
+                outfeed: master_chan,
+            };
+            let config = config::get_config();
+
+            // Start the nntp sender.
             match config.server.runtime.as_str() {
                 "threaded" => {
                     let server = server.clone();

@@ -20,6 +20,8 @@ use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use smartstring::alias::String as SmartString;
+
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::hostcache::HostCache;
@@ -35,7 +37,7 @@ pub struct NewsFeeds {
     pub infilter:       Option<NewsPeer>,
     /// All peers we have.
     pub peers:          Vec<NewsPeer>,
-    pub peer_map:       HashMap<String, usize>,
+    pub peer_map:       HashMap<SmartString, usize>,
     /// And the groupdefs that can be referenced by the peers.
     pub groupdefs:      Vec<WildMatList>,
     /// timestamp of file when we loaded this data
@@ -97,7 +99,7 @@ impl NewsFeeds {
     /// and a reference to the NewsPeer instance.
     pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
         if let Some(name) = self.hcache.lookup(ipaddr) {
-            return self.peer_map.get(&name).map(|idx| (*idx, &self.peers[*idx]));
+            return self.peer_map.get(name.as_str()).map(|idx| (*idx, &self.peers[*idx]));
         }
         for i in 0..self.peers.len() {
             let e = &self.peers[i];
@@ -116,7 +118,7 @@ impl NewsFeeds {
 #[rustfmt::skip]
 pub struct NewsPeer {
     /// Name of this feed.
-    pub label:              String,
+    pub label:              SmartString,
 
     /// used both to filter incoming and outgoing articles.
     pub pathalias:          Vec<String>,

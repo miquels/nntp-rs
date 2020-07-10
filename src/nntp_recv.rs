@@ -3,6 +3,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 use crate::bus::Notification;
 use crate::commands::{self, Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
@@ -11,6 +13,7 @@ use crate::history::HistStatus;
 use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpLine};
+use crate::nntp_send::FeedArticle;
 use crate::server::{self, Server};
 use crate::spool::ArtPart;
 use crate::util::{Buffer, UnixTime};
@@ -22,6 +25,7 @@ pub struct NntpReceiver {
     pub(crate) remote:          SocketAddr,
     pub(crate) newsfeeds:       Arc<NewsFeeds>,
     pub(crate) config:          Arc<Config>,
+    pub(crate) outfeed:         mpsc::Sender<FeedArticle>,
     pub(crate) incoming_logger: logger::Incoming,
     pub(crate) peer_idx:        usize,
     pub(crate) active:          bool,
@@ -70,18 +74,20 @@ impl NntpReceiver {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();
+        let outfeed = server.outfeed.clone();
 
         // decremented in Drop.
         server::inc_sessions();
 
         NntpReceiver {
-            codec:           codec,
+            codec,
+            server,
+            newsfeeds,
+            config,
+            incoming_logger,
+            outfeed,
             parser:          CmdParser::new(),
-            server:          server,
             remote:          peer,
-            newsfeeds:       newsfeeds,
-            config:          config,
-            incoming_logger: incoming_logger,
             peer_idx:        0,
             active:          false,
             stats:           stats,
@@ -178,7 +184,7 @@ impl NntpReceiver {
         }
 
         self.stats
-            .on_connect(remote.to_string(), peer.label.clone())
+            .on_connect(remote.to_string(), peer.label.to_string())
             .await;
 
         let code = if peer.readonly {

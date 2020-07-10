@@ -14,6 +14,8 @@ use std::io::{self, BufReader};
 use std::str::FromStr;
 use std::time::Duration;
 
+use smartstring::alias::String as SmartString;
+
 use crate::arttype::ArtType;
 use crate::newsfeeds::*;
 use crate::spool::{GroupMap, MetaSpool, SpoolCfg, SpoolDef};
@@ -97,7 +99,7 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
                             _ => {},
                         }
                         state = DNState::Label;
-                        nf.label = words[1].to_string();
+                        nf.label = SmartString::from(words[1]);
                     },
                     "groupdef" => {
                         if words.len() != 2 {

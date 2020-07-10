@@ -97,7 +97,7 @@ impl HostCache {
                 Some(None) => {},
                 None => {
                     inner.entries.push(HostEntry {
-                        label:      label.clone(),
+                        label:      label.to_string(),
                         hostname:   host.clone(),
                         addrs:      Vec::new(),
                         lastupdate: None,

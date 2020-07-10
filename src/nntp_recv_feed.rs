@@ -11,6 +11,7 @@ use crate::commands;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
 use crate::nntp_recv::{ArtAccept, NntpReceiver, NntpResult};
+use crate::nntp_send::FeedArticle;
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
 use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
@@ -146,49 +147,60 @@ impl NntpReceiver {
             Err(HistError::Status(_)) => {
                 // message-id seen before, log "duplicate"
                 self.incoming_logger.reject(label, art, ArtError::PostDuplicate);
-                Ok(ArtAccept::Reject)
+                return Ok(ArtAccept::Reject);
             },
             Err(HistError::IoError(e)) => {
                 // I/O error, no incoming.log - we reply with status 400.
                 log::error!("received_article {}: history lookup: {}", msgid, e);
-                self.stats.art_error(&art, &ArtError::IOError);
-                Err(e)
+                self.stats.art_error(art, &ArtError::IOError);
+                return Err(e);
             },
-            Ok(_) => {
-                // store the article.
-                let mut buffer = Buffer::new();
-                headers.header_bytes(&mut buffer);
-                let artloc = match spool.write(spool_no, buffer, body).await {
-                    Ok(loc) => loc,
-                    Err(e) => {
-                        log::error!("received_article {}: spool write: {}", msgid, e);
-                        self.stats.art_error(&art, &ArtError::IOError);
-                        history.store_rollback(msgid);
-                        return Err(e);
-                    },
-                };
-                let he = HistEnt {
-                    status:    HistStatus::Present,
-                    time:      recv_time,
-                    head_only: false,
-                    location:  Some(artloc),
-                };
-                match history.store_commit(msgid, he).await {
-                    Err(e) => {
-                        log::error!("received_article {}: history write: {}", msgid, e);
-                        self.stats.art_error(&art, &ArtError::IOError);
-                        history.store_rollback(msgid);
-                        Err(e)
-                    },
-                    Ok(_) => {
-                        let peers = &self.newsfeeds.peers;
-                        self.incoming_logger.accept(label, art, peers, &wantpeers);
-                        self.stats.art_accepted(&art);
-                        Ok(ArtAccept::Accept)
-                    },
-                }
-            },
+            Ok(_) => {},
         }
+
+        // store the article.
+        let mut buffer = Buffer::new();
+        headers.header_bytes(&mut buffer);
+        let artloc = match spool.write(spool_no, buffer, body).await {
+            Ok(loc) => loc,
+            Err(e) => {
+                log::error!("received_article {}: spool write: {}", msgid, e);
+                self.stats.art_error(art, &ArtError::IOError);
+                history.store_rollback(msgid);
+                return Err(e);
+            },
+        };
+        let he = HistEnt {
+            status:    HistStatus::Present,
+            time:      recv_time,
+            head_only: false,
+            location:  Some(artloc.clone()),
+        };
+
+        if let Err(e) = history.store_commit(msgid, he).await {
+            log::error!("received_article {}: history write: {}", msgid, e);
+            self.stats.art_error(art, &ArtError::IOError);
+            history.store_rollback(msgid);
+            return Err(e);
+        }
+
+        let peers = &self.newsfeeds.peers;
+
+        // log and stats.
+        self.incoming_logger.accept(label, art, peers, &wantpeers);
+        self.stats.art_accepted(art);
+
+        // outgoing feed.
+        let outpeers = wantpeers.iter().map(|i| peers[*i as usize].label.clone()).collect();
+        let feed_art = FeedArticle {
+            msgid:  art.msgid.clone(),
+            location: artloc,
+            size: art.len,
+            peers: outpeers,
+        };
+        let _ = self.outfeed.send(feed_art);
+
+        Ok(ArtAccept::Accept)
     }
 
     // parse the received article headers, then see if we want it.
@@ -290,7 +302,8 @@ impl NntpReceiver {
         if !thispeer.nomismatch {
             let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
             if !is_match {
-                log::info!(
+                // XXX TODO ratelimit message.
+                log::warn!(
                     "{} {} Path element fails to match aliases: {} in {}",
                     thispeer.label,
                     self.remote.ip(),

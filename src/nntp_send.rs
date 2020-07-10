@@ -92,8 +92,9 @@ pub struct MasterFeed {
 
 impl MasterFeed {
     /// Create a new masterfeed.
-    pub async fn new(art_chan: mpsc::Receiver<FeedArticle>, bus: bus::Receiver, spool: Spool) -> MasterFeed {
+    pub async fn new(bus: bus::Receiver, spool: Spool) -> (MasterFeed, mpsc::Sender<FeedArticle>) {
         log::debug!("new MasterFeed created");
+        let (art_chan_tx, art_chan) = mpsc::channel(1000);
         let mut masterfeed = MasterFeed {
             art_chan,
             bus,
@@ -103,7 +104,7 @@ impl MasterFeed {
             spool,
         };
         masterfeed.reconfigure(false).await;
-        masterfeed
+        (masterfeed, art_chan_tx)
     }
 
     // Add/remove peers.
@@ -115,7 +116,7 @@ impl MasterFeed {
         // newsfeed, and remove them.
         let mut removed: HashSet<_> = self.peerfeeds.keys().map(|s| s.as_str().to_owned()).collect();
         for peer in &self.newsfeeds.peers {
-            removed.remove(&peer.label);
+            removed.remove(peer.label.as_str());
         }
         for peer in removed.iter() {
             if let Some(mut orphan) = self.peerfeeds.remove(peer.as_str()) {
@@ -255,7 +256,7 @@ impl MasterFeed {
 // A shorter version of newsfeeds::NewsPeer.
 #[derive(Clone, PartialEq, Eq)]
 struct Peer {
-    label:         String,
+    label:         SmartString,
     outhost:       String,
     bindaddress:   Option<IpAddr>,
     port:          u16,
@@ -293,7 +294,7 @@ impl Peer {
 //
 struct PeerFeed {
     // Name.
-    label: String,
+    label: SmartString,
 
     // Unique id for every connection.
     id_counter: AtomicU64,
