@@ -1,7 +1,7 @@
 use std;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::Arc;
 
 use crate::bus::Notification;
 use crate::commands::{self, Capb, Cmd, CmdParser};
@@ -11,7 +11,7 @@ use crate::history::HistStatus;
 use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpLine};
-use crate::server::Server;
+use crate::server::{self, Server};
 use crate::spool::ArtPart;
 use crate::util::{Buffer, UnixTime};
 
@@ -72,7 +72,7 @@ impl NntpReceiver {
         let incoming_logger = logger::get_incoming_logger();
 
         // decremented in Drop.
-        server.tot_sessions.fetch_add(1, Ordering::SeqCst);
+        server::inc_sessions();
 
         NntpReceiver {
             codec:           codec,
@@ -445,6 +445,6 @@ impl Drop for NntpReceiver {
             let name = &self.thispeer().label;
             self.server.remove_connection(name);
         }
-        self.server.tot_sessions.fetch_sub(1, Ordering::SeqCst);
+        server::dec_sessions();
     }
 }

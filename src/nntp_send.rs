@@ -7,6 +7,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
@@ -23,6 +24,7 @@ use crate::diag::TxSessionStats;
 use crate::hostcache;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpResponse};
+use crate::server;
 use crate::spool::{ArtLoc, ArtPart, Spool};
 use crate::util::Buffer;
 
@@ -293,6 +295,9 @@ struct PeerFeed {
     // Name.
     label: String,
 
+    // Unique id for every connection.
+    id_counter: AtomicU64,
+
     // The relevant parts of newsfeed::NewsPeer.
     newspeer: Arc<Peer>,
 
@@ -324,6 +329,13 @@ struct PeerFeed {
     spool: Spool,
 }
 
+impl Drop for PeerFeed {
+    fn drop(&mut self) {
+        // decrement session counter.
+        server::dec_sessions();
+    }
+}
+
 impl PeerFeed {
     /// Create a new PeerFeed.
     fn new(peer: Peer, spool: &Spool) -> PeerFeed {
@@ -332,8 +344,11 @@ impl PeerFeed {
         let (tx_queue, rx_queue) = async_channel::bounded(PEERFEED_QUEUE_SIZE);
         let (tx_empty, rx_empty) = mpsc::channel::<()>(1);
 
+        server::inc_sessions();
+
         PeerFeed {
             label: peer.label.clone(),
+            id_counter: AtomicU64::new(1),
             rx_chan,
             tx_chan,
             rx_queue,
@@ -425,7 +440,7 @@ impl PeerFeed {
     }
 
     async fn add_connection(&mut self) {
-        let id = 1;
+        let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
         let newspeer = self.newspeer.clone();
         let mut tx_chan = self.tx_chan.clone();
         let rx_queue = self.rx_queue.clone();
@@ -478,7 +493,7 @@ impl PeerFeed {
 //
 struct Connection {
     // Unique identifier.
-    id:         u32,
+    id:         u64,
     // IP address we're connected to.
     ipaddr:     IpAddr,
     // Peer info.
@@ -509,7 +524,7 @@ struct Connection {
 impl Connection {
     // Create a new connection.
     async fn new(
-        id: u32,
+        id: u64,
         newspeer: Arc<Peer>,
         tx_chan: mpsc::Sender<PeerFeedItem>,
         rx_queue: async_channel::Receiver<PeerArticle>,

@@ -269,7 +269,7 @@ pub enum TxStats {
 pub struct TxSessionStats {
     // identification.
     pub label:      String,
-    pub id:         u32,
+    pub id:         u64,
     pub start:      Instant,
     pub mark:       Instant,
     // stats
@@ -300,7 +300,7 @@ impl TxSessionStats {
         self.add(field, 1);
     }
 
-    pub fn on_connect(&mut self, label: &str, id: u32, outhost: &str, ipaddr: IpAddr, line: &str) {
+    pub fn on_connect(&mut self, label: &str, id: u64, outhost: &str, ipaddr: IpAddr, line: &str) {
         self.label = label.to_string();
         self.id = id;
         self.start = Instant::now();

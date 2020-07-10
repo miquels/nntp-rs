@@ -23,12 +23,21 @@ use crate::nntp_recv::NntpReceiver;
 use crate::spool::Spool;
 use crate::util::TcpListenerSets;
 
+static TOT_SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+pub fn inc_sessions() {
+    TOT_SESSIONS.fetch_add(1, Ordering::SeqCst);
+}
+
+pub fn dec_sessions() {
+    TOT_SESSIONS.fetch_sub(1, Ordering::SeqCst);
+}
+
 #[derive(Clone)]
 pub struct Server {
     pub history:      History,
     pub spool:        Spool,
     pub conns:        Arc<Mutex<HashMap<String, usize>>>,
-    pub tot_sessions: Arc<AtomicU64>,
 }
 
 impl Server {
@@ -38,7 +47,6 @@ impl Server {
             history,
             spool,
             conns: Arc::new(Mutex::new(HashMap::new())),
-            tot_sessions: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -47,7 +55,6 @@ impl Server {
             history,
             spool,
             conns: Arc::new(Mutex::new(HashMap::new())),
-            tot_sessions: Arc::new(AtomicU64::new(0)),
         };
         let config = config::get_config();
 
@@ -183,7 +190,7 @@ impl Server {
         }
 
         // now busy-wait until all connections are closed.
-        while self.tot_sessions.load(Ordering::SeqCst) > 0 {
+        while TOT_SESSIONS.load(Ordering::SeqCst) > 0 {
             if waited == 50 {
                 log::info!("sending Notification::ExitNow to all remaining sessions");
                 let _ = bus_sender.send(Notification::ExitNow);
