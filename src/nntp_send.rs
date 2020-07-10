@@ -1,3 +1,5 @@
+//! Outgoing feeds.
+//!
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
@@ -39,14 +41,14 @@ const PEERFEED_QUEUE_SIZE: usize = 5000;
 
 /// Sent to the MasterFeed.
 pub struct FeedArticle {
-    // Message-Id.
-    msgid:    String,
-    // Location in the article spool.
-    location: ArtLoc,
-    // Size.
-    size:     usize,
-    // Peers to feed it to.
-    peers:    Vec<SmartString>,
+    /// Message-Id.
+    pub msgid:    String,
+    /// Location in the article spool.
+    pub location: ArtLoc,
+    /// Article size.
+    pub size:     usize,
+    /// Peers to feed it to.
+    pub peers:    Vec<SmartString>,
 }
 
 // Sent from masterfeed -> peerfeed -> connection.
@@ -54,14 +56,16 @@ pub struct FeedArticle {
 enum PeerFeedItem {
     Article(PeerArticle),
     ConnExit(Vec<PeerArticle>),
+    ReconfigurePeer(Peer),
     Reconfigure,
     ExitGraceful,
     ExitNow,
+    Ping,
 }
 
-// Article in the peerfeed queue.
+// Article queued for an outgoing connection.
 #[derive(Clone)]
-pub struct PeerArticle {
+struct PeerArticle {
     // Message-Id.
     msgid:    String,
     // Location in the article spool.
@@ -70,41 +74,38 @@ pub struct PeerArticle {
     size:     usize,
 }
 
-impl PeerArticle {
-    pub fn len(&self) -> usize {
-        self.size
-    }
-}
-
-// Masterfeed.
-//
-// Receives articles from the incoming feed, and then fans them
-// out over all PeerFeeds that want the article.
-//
+/// Fans out articles to the peers.
+///
+/// Receives articles from the incoming feed, and then fans them
+/// out over all PeerFeeds that want the article.
+///
 pub struct MasterFeed {
     art_chan:  mpsc::Receiver<FeedArticle>,
     bus:       bus::Receiver,
     newsfeeds: Arc<NewsFeeds>,
     peerfeeds: HashMap<SmartString, mpsc::Sender<PeerFeedItem>>,
+    orphans:   Vec<mpsc::Sender<PeerFeedItem>>,
     spool:     Spool,
 }
 
 impl MasterFeed {
     /// Create a new masterfeed.
-    pub fn new(art_chan: mpsc::Receiver<FeedArticle>, bus: bus::Receiver, spool: Spool) -> MasterFeed {
+    pub async fn new(art_chan: mpsc::Receiver<FeedArticle>, bus: bus::Receiver, spool: Spool) -> MasterFeed {
+        log::debug!("new MasterFeed created");
         let mut masterfeed = MasterFeed {
             art_chan,
             bus,
             newsfeeds: config::get_newsfeeds(),
             peerfeeds: HashMap::new(),
+            orphans: Vec::new(),
             spool,
         };
-        masterfeed.reconfigure();
+        masterfeed.reconfigure(false).await;
         masterfeed
     }
 
     // Add/remove peers.
-    fn reconfigure(&mut self) {
+    async fn reconfigure(&mut self, send_reconfigure: bool) {
         log::debug!("MasterFeed::reconfigure called");
         self.newsfeeds = config::get_newsfeeds();
 
@@ -115,12 +116,41 @@ impl MasterFeed {
             removed.remove(&peer.label);
         }
         for peer in removed.iter() {
-            self.peerfeeds.remove(peer.as_str());
+            if let Some(mut orphan) = self.peerfeeds.remove(peer.as_str()) {
+                // notify NewsPeer to shut down.
+                match orphan.send(PeerFeedItem::ExitGraceful).await {
+                    Ok(_) => self.orphans.push(orphan),
+                    Err(e) => {
+                        // already gone. cannot happen, but expect the
+                        // unexpected and log it anyway.
+                        log::error!(
+                            "MasterFeed::reconfigure: removed {}, but it was already vanished: {}",
+                            peer,
+                            e
+                        );
+                    },
+                }
+            }
+        }
+
+        // Before adding new peers, send all existing peers a Reconfigure.
+        if send_reconfigure {
+            for peer in &self.newsfeeds.peers {
+                if let Some(chan) = self.peerfeeds.get_mut(peer.label.as_str()) {
+                    if let Err(e) = chan.send(PeerFeedItem::ReconfigurePeer(Peer::new(peer))).await {
+                        log::error!(
+                            "MasterFeed::reconfigure: internal error: send to PeerFeed({}): {}",
+                            peer.label,
+                            e
+                        );
+                    }
+                }
+            }
         }
 
         // Now add new peers.
         for peer in &self.newsfeeds.peers {
-            let peer_feed = PeerFeed::new(peer, &self.newsfeeds, &self.spool);
+            let peer_feed = PeerFeed::new(Peer::new(peer), &self.spool);
             let tx_chan = peer_feed.get_tx_chan();
             tokio::spawn(async move { peer_feed.run().await });
             self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
@@ -130,7 +160,7 @@ impl MasterFeed {
     /// The actual task. This reads from the receiver channel and fans out
     /// the messages over all peerfeeds.
     ///
-    pub async fn run(mut self) {
+    pub async fn run(&mut self) {
         log::debug!("MasterFeed::run: starting");
         let mut recv_arts = true;
 
@@ -144,7 +174,7 @@ impl MasterFeed {
                             // all incoming connections are gone. Translate that
                             // into an `ExitGraceful` for the PeerFeeds.
                             log::debug!("MasterFeed: hit end-of-stream on article channel");
-                            let _ = self.broadcast(PeerFeedItem::ExitGraceful).await;
+                            self.broadcast(PeerFeedItem::ExitGraceful).await;
                             recv_arts = false;
                             continue;
                         }
@@ -157,14 +187,13 @@ impl MasterFeed {
                         Some(Notification::ExitNow) | None => {
                             // Time's up!
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
-                            let _ = self.broadcast(PeerFeedItem::ExitNow).await;
+                            self.broadcast(PeerFeedItem::ExitNow).await;
                             return;
                         }
                         Some(Notification::Reconfigure) => {
                             // The "newsfeeds" file might have been updated.
                             log::debug!("MasterFeed: reconfigure event");
-                            self.reconfigure();
-                            self.broadcast(PeerFeedItem::Reconfigure).await;
+                            self.reconfigure(true).await;
                         }
                         _ => {},
                     }
@@ -183,8 +212,8 @@ impl MasterFeed {
                     size:     art.size,
                 };
                 if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
-                    log::warn!(
-                        "MasterFeed::run: internal error: send to PeerFeed({}): {}",
+                    log::error!(
+                        "MasterFeed::fanout: internal error: send to PeerFeed({}): {}",
                         peername,
                         e
                     );
@@ -197,17 +226,32 @@ impl MasterFeed {
         // Forward to all peerfeeds.
         for (name, peer) in self.peerfeeds.iter_mut() {
             if let Err(e) = peer.send(item.clone()).await {
-                log::warn!(
-                    "MasterFeed::run: internal error: send to PeerFeed({}): {}",
+                log::error!(
+                    "MasterFeed::broadcast: internal error: send to PeerFeed({}): {}",
                     name,
                     e
                 );
             }
         }
+
+        // And the orphans. If it's not an ExitNow, just send a Ping.
+        let item = match item {
+            x @ PeerFeedItem::ExitNow => x,
+            _ => PeerFeedItem::Ping,
+        };
+        let mut orphans = Vec::new();
+        for mut peer in self.orphans.drain(..) {
+            // Only retain if it hasn't gone away yet.
+            if let Ok(_) = peer.send(item.clone()).await {
+                orphans.push(peer);
+            }
+        }
+        self.orphans = orphans;
     }
 }
 
 // A shorter version of newsfeeds::NewsPeer.
+#[derive(Clone, PartialEq, Eq)]
 struct Peer {
     label:         String,
     outhost:       String,
@@ -249,9 +293,6 @@ struct PeerFeed {
     // Name.
     label: String,
 
-    // Reference to newsfeed config.
-    newsfeeds: Arc<NewsFeeds>,
-
     // The relevant parts of newsfeed::NewsPeer.
     newspeer: Arc<Peer>,
 
@@ -265,9 +306,8 @@ struct PeerFeed {
     tx_chan: mpsc::Sender<PeerFeedItem>,
 
     // MPSC channel that is the article queue for the Connections.
-    rx_queue:       async_channel::Receiver<PeerArticle>,
-    tx_queue:       async_channel::Sender<PeerArticle>,
-    queue_capacity: usize,
+    rx_queue: async_channel::Receiver<PeerArticle>,
+    tx_queue: async_channel::Sender<PeerArticle>,
 
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
@@ -286,27 +326,24 @@ struct PeerFeed {
 
 impl PeerFeed {
     /// Create a new PeerFeed.
-    fn new(nfpeer: &NewsPeer, newsfeeds: &Arc<NewsFeeds>, spool: &Spool) -> PeerFeed {
+    fn new(peer: Peer, spool: &Spool) -> PeerFeed {
         let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(PEERFEED_COMMAND_CHANNEL_SIZE);
         let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
-        let queue_capacity = PEERFEED_QUEUE_SIZE;
-        let (tx_queue, rx_queue) = async_channel::bounded(queue_capacity);
+        let (tx_queue, rx_queue) = async_channel::bounded(PEERFEED_QUEUE_SIZE);
         let (tx_empty, rx_empty) = mpsc::channel::<()>(1);
 
         PeerFeed {
-            label: nfpeer.label.clone(),
-            newsfeeds: newsfeeds.clone(),
+            label: peer.label.clone(),
             rx_chan,
             tx_chan,
             rx_queue,
             tx_queue,
-            queue_capacity,
             broadcast,
             tx_empty,
             rx_empty,
             num_conns: 0,
             spool: spool.clone(),
-            newspeer: Arc::new(Peer::new(nfpeer)),
+            newspeer: Arc::new(peer),
         }
     }
 
@@ -324,7 +361,6 @@ impl PeerFeed {
         // Or at least until we receive ExitGraceful or ExitNow.
 
         while let Some(item) = self.rx_chan.recv().await {
-
             if exiting && self.num_conns == 0 {
                 break;
             }
@@ -342,10 +378,7 @@ impl PeerFeed {
                             Err(async_channel::TrySendError::Closed(_art)) => {
                                 // should never happen.
                                 if !closed {
-                                    log::error!(
-                                        "PeerFeed::run: {}: async_channel closed ?!",
-                                        self.newspeer.label
-                                    );
+                                    log::error!("PeerFeed::run: {}: async_channel closed ?!", self.label);
                                     closed = true;
                                 }
                                 // XXX TODO: full. send article to the backlog.
@@ -370,14 +403,19 @@ impl PeerFeed {
                     exiting = true;
                     let _ = self.broadcast.send(PeerFeedItem::ExitNow);
                 },
-                PeerFeedItem::Reconfigure => {
-                    let _ = self.broadcast.send(PeerFeedItem::Reconfigure);
+                PeerFeedItem::Reconfigure => {},
+                PeerFeedItem::ReconfigurePeer(peer) => {
+                    if &peer != self.newspeer.as_ref() {
+                        self.newspeer = Arc::new(peer);
+                        let _ = self.broadcast.send(PeerFeedItem::Reconfigure);
+                    }
                 },
                 PeerFeedItem::ConnExit(arts) => {
                     // XXX TODO handle returned arts.
                     //self.requeue(arts);
                     self.num_conns -= 1;
                 },
+                PeerFeedItem::Ping => {},
             }
         }
 
@@ -440,32 +478,32 @@ impl PeerFeed {
 //
 struct Connection {
     // Unique identifier.
-    id:          u32,
+    id:         u32,
     // IP address we're connected to.
-    ipaddr:      IpAddr,
+    ipaddr:     IpAddr,
     // Peer info.
-    newspeer:    Arc<Peer>,
+    newspeer:   Arc<Peer>,
     // reader / writer.
-    reader:      NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
-    writer:      NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
+    reader:     NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
+    writer:     NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
     // Local items waiting to be sent (check -> takethis transition)
-    send_queue:  VecDeque<ConnItem>,
+    send_queue: VecDeque<ConnItem>,
     // Sent items, waiting for a reply.
-    recv_queue:  VecDeque<ConnItem>,
+    recv_queue: VecDeque<ConnItem>,
     // Dropped items to be pushed onto the backlog.
-    dropped:     Vec<ConnItem>,
+    dropped:    Vec<ConnItem>,
     // Stats
-    stats:       TxSessionStats,
+    stats:      TxSessionStats,
     // Spool.
-    spool:       Spool,
+    spool:      Spool,
     // channel to send information to the PeerFeed.
-    tx_chan:     mpsc::Sender<PeerFeedItem>,
+    tx_chan:    mpsc::Sender<PeerFeedItem>,
     // article queue.
-    rx_queue:    async_channel::Receiver<PeerArticle>,
+    rx_queue:   async_channel::Receiver<PeerArticle>,
     // broadcast channel to receive notifications from the PeerFeed.
-    broadcast:   broadcast::Receiver<PeerFeedItem>,
+    broadcast:  broadcast::Receiver<PeerFeedItem>,
     // used to wake up the fill-the-queue-from-the-backlog task.
-    tx_empty:    mpsc::Sender<()>,
+    tx_empty:   mpsc::Sender<()>,
 }
 
 impl Connection {
@@ -549,9 +587,12 @@ impl Connection {
 
             // return remaining articles that weren't sent.
             let mut arts = Vec::new();
-            for item in self.send_queue.iter()
+            for item in self
+                .send_queue
+                .iter()
                 .chain(self.recv_queue.iter())
-                .chain(self.dropped.iter()) {
+                .chain(self.dropped.iter())
+            {
                 match item {
                     &ConnItem::Check(ref art) | &ConnItem::Takethis(ref art) => {
                         arts.push(art.clone());
@@ -819,7 +860,7 @@ impl Connection {
                                             self.stats.art_deferred_fail(None); // XXX
                                         },
                                         438 => {
-                                            self.stats.art_refused(&art);
+                                            self.stats.art_refused();
                                         },
                                         _ => unexpected = true,
                                     }
@@ -827,17 +868,17 @@ impl Connection {
                                 Some(ConnItem::Takethis(art)) => {
                                     match resp.code {
                                         239 => {
-                                            self.stats.art_accepted(&art);
+                                            self.stats.art_accepted(art.size);
                                             self.send_queue.push_back(ConnItem::Takethis(art));
                                         },
                                         431 => {
                                             // this is an invalid TAKETHIS reply!
                                             // XXX TODO req-queue article.
-                                            //self.stats.art_deferred(None);
-                                            self.stats.art_deferred_fail(Some(&art)); // XXX
+                                            //self.stats.art_deferred(Some(art.size));
+                                            self.stats.art_deferred_fail(Some(art.size)); // XXX
                                         },
                                         439 => {
-                                            self.stats.art_rejected(&art);
+                                            self.stats.art_rejected(art.size);
                                         },
                                         _ => unexpected = true,
                                     }

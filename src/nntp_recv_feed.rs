@@ -10,7 +10,7 @@ use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
-use crate::nntp_recv::{ArtAccept, NntpResult, NntpReceiver};
+use crate::nntp_recv::{ArtAccept, NntpReceiver, NntpResult};
 use crate::spool::{ArtPart, SPOOL_DONTSTORE, SPOOL_REJECTARTS};
 use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};

@@ -7,7 +7,6 @@ use std::time::Instant;
 use crate::article::Article;
 use crate::errors::ArtError;
 use crate::hostcache;
-use crate::nntp_send::PeerArticle;
 
 #[repr(usize)]
 #[rustfmt::skip]
@@ -281,12 +280,12 @@ pub struct TxSessionStats {
 impl Default for TxSessionStats {
     fn default() -> TxSessionStats {
         TxSessionStats {
-            label:    String::new(),
-            id:       0,
-            start:    Instant::now(),
-            mark:     Instant::now(),
-            stats:    [0u64; TxStats::NumSlots as usize],
-            total:    [0u64; TxStats::NumSlots as usize],
+            label: String::new(),
+            id:    0,
+            start: Instant::now(),
+            mark:  Instant::now(),
+            stats: [0u64; TxStats::NumSlots as usize],
+            total: [0u64; TxStats::NumSlots as usize],
         }
     }
 }
@@ -310,24 +309,44 @@ impl TxSessionStats {
     }
 
     pub fn stats_update(&mut self) {
-        log::info!("{}:{} mark {}", self.label, self.id, self.log_stats(self.mark, &self.stats));
+        log::info!(
+            "{}:{} mark {}",
+            self.label,
+            self.id,
+            self.log_stats(self.mark, &self.stats)
+        );
         if self.stats[TxStats::Deferred as usize] > 0 || self.stats[TxStats::DeferredFail as usize] > 0 {
-            log::info!("{}:{} mark {}", self.label, self.id, self.log_stats(self.mark, &self.stats));
+            log::info!(
+                "{}:{} mark {}",
+                self.label,
+                self.id,
+                self.log_stats(self.mark, &self.stats)
+            );
         }
         self.update_total();
     }
 
     pub fn stats_final(&mut self) {
         self.update_total();
-        log::info!("{}:{} final {}", self.label, self.id, self.log_stats(self.start, &self.total));
+        log::info!(
+            "{}:{} final {}",
+            self.label,
+            self.id,
+            self.log_stats(self.start, &self.total)
+        );
         if self.total[TxStats::Deferred as usize] > 0 || self.total[TxStats::DeferredFail as usize] > 0 {
-            log::info!("{}:{} final {}", self.label, self.id, self.log_defer(self.start, &self.total));
+            log::info!(
+                "{}:{} final {}",
+                self.label,
+                self.id,
+                self.log_defer(self.start, &self.total)
+            );
         }
     }
 
     fn update_total(&mut self) {
         self.mark = Instant::now();
-        for i in 0 .. TxStats::NumSlots as usize {
+        for i in 0..TxStats::NumSlots as usize {
             self.total[i] += self.stats[i];
             self.stats[i] = 0;
         }
@@ -335,21 +354,27 @@ impl TxSessionStats {
 
     pub fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
         let secs = self.mark.saturating_duration_since(start).as_secs();
-        format!("secs={:-4} acc={:-4} dup={:-4} rej={:-4} tot={:-4} bytes={:-4} ({}/min) avpend={:-4.1}",
+        format!(
+            "secs={:-4} acc={:-4} dup={:-4} rej={:-4} tot={:-4} bytes={:-4} ({}/min) avpend={:-4.1}",
             secs,
             stats[TxStats::Accepted as usize],
             stats[TxStats::Refused as usize],
             stats[TxStats::Rejected as usize],
             stats[TxStats::Offered as usize],
             stats[TxStats::AcceptedBytes as usize],
-            if secs > 0 { stats[TxStats::Offered as usize] * 60 / secs } else { 0 },
+            if secs > 0 {
+                stats[TxStats::Offered as usize] * 60 / secs
+            } else {
+                0
+            },
             1,
         )
     }
 
     pub fn log_defer(&self, start: Instant, stats: &[u64]) -> String {
         let secs = self.mark.saturating_duration_since(start).as_secs();
-        format!("secs={:-4} defer={:-4} deferfail={:-4}",
+        format!(
+            "secs={:-4} defer={:-4} deferfail={:-4}",
             secs,
             stats[TxStats::Deferred as usize],
             stats[TxStats::DeferredFail as usize],
@@ -363,42 +388,40 @@ impl TxSessionStats {
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431)
-    pub fn art_deferred(&mut self, art: Option<&PeerArticle>) {
+    pub fn art_deferred(&mut self, size: Option<usize>) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Deferred);
-        if let Some(art) = art {
-            self.add(TxStats::DeferredBytes, art.len() as u64);
+        if let Some(size) = size {
+            self.add(TxStats::DeferredBytes, size as u64);
         }
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431) where we failed to re-queue.
-    pub fn art_deferred_fail(&mut self, art: Option<&PeerArticle>) {
+    pub fn art_deferred_fail(&mut self, size: Option<usize>) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::DeferredFail);
-        if let Some(art) = art {
-            self.add(TxStats::DeferredBytes, art.len() as u64);
+        if let Some(size) = size {
+            self.add(TxStats::DeferredBytes, size as u64);
         }
     }
 
     // CHECK 438
-    pub fn art_refused(&mut self, art: &PeerArticle) {
+    pub fn art_refused(&mut self) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Refused);
     }
 
     // TAKETHIS 239
-    pub fn art_accepted(&mut self, art: &PeerArticle) {
+    pub fn art_accepted(&mut self, size: usize) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Accepted);
-        self.add(TxStats::AcceptedBytes, art.len() as u64);
+        self.add(TxStats::AcceptedBytes, size as u64);
     }
 
     // TAKETHIS 439
-    pub fn art_rejected(&mut self, art: &PeerArticle) {
+    pub fn art_rejected(&mut self, size: usize) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Rejected);
-        self.add(TxStats::RejectedBytes, art.len() as u64);
+        self.add(TxStats::RejectedBytes, size as u64);
     }
-
-
 }
