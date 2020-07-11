@@ -86,12 +86,12 @@ impl NntpReceiver {
             config,
             incoming_logger,
             outfeed,
-            parser:          CmdParser::new(),
-            remote:          peer,
-            peer_idx:        0,
-            active:          false,
-            stats:           stats,
-            quit:            false,
+            parser: CmdParser::new(),
+            remote: peer,
+            peer_idx: 0,
+            active: false,
+            stats: stats,
+            quit: false,
         }
     }
 

@@ -6,8 +6,8 @@ use std::fmt;
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use futures::sink::{Sink, SinkExt};
 use smartstring::alias::String as SmartString;
@@ -626,7 +626,8 @@ impl Connection {
             "MODE STREAM",
             203,
             newspeer.bindaddress.clone(),
-        ).await
+        )
+        .await
     }
 
     // Feeder loop.

@@ -191,12 +191,15 @@ impl NntpReceiver {
         self.stats.art_accepted(art);
 
         // outgoing feed.
-        let outpeers = wantpeers.iter().map(|i| peers[*i as usize].label.clone()).collect();
+        let outpeers = wantpeers
+            .iter()
+            .map(|i| peers[*i as usize].label.clone())
+            .collect();
         let feed_art = FeedArticle {
-            msgid:  art.msgid.clone(),
+            msgid:    art.msgid.clone(),
             location: artloc,
-            size: art.len,
-            peers: outpeers,
+            size:     art.len,
+            peers:    outpeers,
         };
         let _ = self.outfeed.send(feed_art);
 

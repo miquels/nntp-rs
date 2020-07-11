@@ -16,12 +16,12 @@ use tokio::task;
 use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::SessionStats;
-use crate::history::History;
 use crate::dns::HostCache;
+use crate::history::History;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_recv::NntpReceiver;
-use crate::nntp_send::{MasterFeed, FeedArticle};
+use crate::nntp_send::{FeedArticle, MasterFeed};
 use crate::spool::Spool;
 use crate::util::TcpListenerSets;
 
@@ -37,16 +37,15 @@ pub fn dec_sessions() {
 
 #[derive(Clone)]
 pub struct Server {
-    pub history:      History,
-    pub spool:        Spool,
-    pub conns:        Arc<Mutex<HashMap<String, usize>>>,
-    pub outfeed:      mpsc::Sender<FeedArticle>,
+    pub history: History,
+    pub spool:   Spool,
+    pub conns:   Arc<Mutex<HashMap<String, usize>>>,
+    pub outfeed: mpsc::Sender<FeedArticle>,
 }
 
 impl Server {
     pub fn start(history: History, spool: Spool, listener_sets: TcpListenerSets) -> io::Result<()> {
         Runtime::new().unwrap().block_on(async move {
-
             // Create pub/sub bus.
             let (bus_sender, bus_recv) = bus::new();
 

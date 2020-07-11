@@ -5,8 +5,8 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 use crate::article::Article;
-use crate::errors::ArtError;
 use crate::dns;
+use crate::errors::ArtError;
 
 #[repr(usize)]
 #[rustfmt::skip]

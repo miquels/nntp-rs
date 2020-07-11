@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;

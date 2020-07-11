@@ -6,15 +6,21 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 
-use crate::nntp_codec::NntpCodec;
 use crate::dns;
+use crate::nntp_codec::NntpCodec;
 
 /// Connect to remote server.
 ///
 /// Returns a codec, the address we connected to, and the
 /// initial welcome message. Or an error ofcourse.
-pub async fn nntp_connect(hostname: &str, port: u16, cmd: &str, respcode: u32, bindaddr: Option<IpAddr>) -> io::Result<(NntpCodec, IpAddr, String)> {
-
+pub async fn nntp_connect(
+    hostname: &str,
+    port: u16,
+    cmd: &str,
+    respcode: u32,
+    bindaddr: Option<IpAddr>,
+) -> io::Result<(NntpCodec, IpAddr, String)>
+{
     // A lookup of the hostname might return multiple addresses.
     // We're not sure of the order that addresses are returned in,
     // so sort IPv6 before IPv4 but otherwise keep the order
@@ -38,9 +44,7 @@ pub async fn nntp_connect(hostname: &str, port: u16, cmd: &str, respcode: u32, b
         log::debug!("Trying to connect to {:?}", addr);
         let result = async move {
             // Create socket.
-            let is_ipv6 = bindaddr
-                .map(|ref a| a.is_ipv6())
-                .unwrap_or(addr.is_ipv6());
+            let is_ipv6 = bindaddr.map(|ref a| a.is_ipv6()).unwrap_or(addr.is_ipv6());
             let domain = if is_ipv6 {
                 socket2::Domain::ipv6()
             } else {
@@ -67,30 +71,30 @@ pub async fn nntp_connect(hostname: &str, port: u16, cmd: &str, respcode: u32, b
                     ioerr!(e.kind(), "bind {}: {}", sa, e)
                 })?;
             }
-/*
-            // Now this sucks, having to run it on a threadpool.
-            //
-            // See below, turns out that tokio _does_ have a method
-            // for this, but it's undocumented. I'm leaving this
-            // here in case it gets removed without a replacement.
-            //
-            log::trace!("Trying to connect to {:?}", addr);
-            let addr2: socket2::SockAddr = addr.to_owned().into();
-            let res = task::spawn_blocking(move || {
-                // 10 second timeout for a connect is more than enough.
-                socket.connect_timeout(&addr2, Duration::new(10, 0))?;
-                Ok(socket)
-            })
-            .await
-            .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)));
-            let socket = res.map_err(|e| {
-                log::trace!("Connection::connect({}): {}", addr, e);
-                ioerr!(e.kind(), "{}: {}", addr, e)
-            })?;
+            /*
+                        // Now this sucks, having to run it on a threadpool.
+                        //
+                        // See below, turns out that tokio _does_ have a method
+                        // for this, but it's undocumented. I'm leaving this
+                        // here in case it gets removed without a replacement.
+                        //
+                        log::trace!("Trying to connect to {:?}", addr);
+                        let addr2: socket2::SockAddr = addr.to_owned().into();
+                        let res = task::spawn_blocking(move || {
+                            // 10 second timeout for a connect is more than enough.
+                            socket.connect_timeout(&addr2, Duration::new(10, 0))?;
+                            Ok(socket)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)));
+                        let socket = res.map_err(|e| {
+                            log::trace!("Connection::connect({}): {}", addr, e);
+                            ioerr!(e.kind(), "{}: {}", addr, e)
+                        })?;
 
-            // Now turn it into a tokio::net::TcpStream.
-            let socket = TcpStream::from_std(socket.into()).unwrap();
-*/
+                        // Now turn it into a tokio::net::TcpStream.
+                        let socket = TcpStream::from_std(socket.into()).unwrap();
+            */
             let socket = tokio::select! {
                 _ = tokio::time::delay_for(Duration::new(10, 0)) => {
                     log::trace!("Connection::connect({}): timed out", addr);

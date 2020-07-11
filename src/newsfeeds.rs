@@ -99,7 +99,10 @@ impl NewsFeeds {
     /// and a reference to the NewsPeer instance.
     pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
         if let Some(name) = self.hcache.lookup(ipaddr) {
-            return self.peer_map.get(name.as_str()).map(|idx| (*idx, &self.peers[*idx]));
+            return self
+                .peer_map
+                .get(name.as_str())
+                .map(|idx| (*idx, &self.peers[*idx]));
         }
         for i in 0..self.peers.len() {
             let e = &self.peers[i];
