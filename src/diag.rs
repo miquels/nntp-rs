@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::article::Article;
 use crate::errors::ArtError;
-use crate::hostcache;
+use crate::dns;
 
 #[repr(usize)]
 #[rustfmt::skip]
@@ -99,7 +99,7 @@ impl SessionStats {
 
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
         let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
-        let host = match hostcache::RESOLVER.reverse_lookup(ipaddr).await {
+        let host = match dns::RESOLVER.reverse_lookup(ipaddr).await {
             Ok(m) => m.iter().next().map(|name| name.to_utf8()),
             Err(_) => None,
         };

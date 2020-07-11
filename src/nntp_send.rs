@@ -4,15 +4,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
 use smartstring::alias::String as SmartString;
-use tokio::net::TcpStream;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
@@ -21,8 +19,8 @@ use tokio::task;
 use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::TxSessionStats;
-use crate::hostcache;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
+use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::server;
 use crate::spool::{ArtLoc, ArtPart, Spool};
@@ -621,129 +619,14 @@ impl Connection {
     }
 
     // Connect to remote peer.
-    async fn connect(peer: &Peer) -> io::Result<(NntpCodec, IpAddr, String)> {
-        // A lookup of the hostname might return multiple addresses.
-        // We're not sure of the order that addresses are returned in,
-        // so sort IPv6 before IPv4 but otherwise keep the order
-        // intact.
-        let addrs = match hostcache::RESOLVER.lookup_ip(peer.outhost.as_str()).await {
-            Ok(lookupip) => {
-                let addrs: Vec<SocketAddr> = lookupip.iter().map(|a| SocketAddr::new(a, peer.port)).collect();
-                let v6 = addrs.iter().filter(|a| a.is_ipv6()).cloned();
-                let v4 = addrs.iter().filter(|a| a.is_ipv4()).cloned();
-                let mut addrs2 = Vec::new();
-                addrs2.extend(v6);
-                addrs2.extend(v4);
-                addrs2
-            },
-            Err(e) => return Err(ioerr!(Other, e)),
-        };
-
-        // Try to connect to the peer.
-        let mut last_err = None;
-        for addr in &addrs {
-            let result = async move {
-                // Create socket.
-                let is_ipv6 = peer
-                    .bindaddress
-                    .map(|ref a| a.is_ipv6())
-                    .unwrap_or(addr.is_ipv6());
-                let domain = if is_ipv6 {
-                    socket2::Domain::ipv6()
-                } else {
-                    socket2::Domain::ipv4()
-                };
-                let socket = socket2::Socket::new(domain, socket2::Type::stream(), None).map_err(|e| {
-                    log::trace!("Connection::connect: Socket::new({:?}): {}", domain, e);
-                    e
-                })?;
-
-                // Set IPV6_V6ONLY if this is going to be an IPv6 connection.
-                if is_ipv6 {
-                    socket.set_only_v6(true).map_err(|_| {
-                        log::trace!("Connection::connect: Socket.set_only_v6() failed");
-                        ioerr!(AddrNotAvailable, "socket.set_only_v6() failed")
-                    })?;
-                }
-
-                // Bind local address.
-                if let Some(ref bindaddr) = peer.bindaddress {
-                    let sa = SocketAddr::new(bindaddr.to_owned(), 0);
-                    socket.bind(&sa.clone().into()).map_err(|e| {
-                        log::trace!("Connection::connect: Socket::bind({:?}): {}", sa, e);
-                        ioerr!(e.kind(), "bind {}: {}", sa, e)
-                    })?;
-                }
-
-                // Now this sucks, having to run it on a threadpool.
-                log::trace!("Trying to connect to {:?}", addr);
-                let addr2: socket2::SockAddr = addr.to_owned().into();
-                let res = task::spawn_blocking(move || {
-                    // 10 second timeout for a connect is more than enough.
-                    socket.connect_timeout(&addr2, Duration::new(10, 0))?;
-                    Ok(socket)
-                })
-                .await
-                .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)));
-                let socket = res.map_err(|e| {
-                    log::trace!("Connection::connect({}): {}", addr, e);
-                    ioerr!(e.kind(), "{}: {}", addr, e)
-                })?;
-
-                // Now turn it into a tokio::net::TcpStream.
-                let socket = TcpStream::from_std(socket.into()).unwrap();
-
-                // Create codec from socket.
-                let mut codec = NntpCodec::builder(socket)
-                    .read_timeout(30)
-                    .write_timeout(60)
-                    .build();
-
-                // Read initial response code.
-                let resp = codec.read_response().await.map_err(|e| {
-                    log::trace!("{:?} read_response: {}", addr, e);
-                    ioerr!(e.kind(), "{}: {}", addr, e)
-                })?;
-                log::trace!("<< {}", resp.short());
-                if resp.code != 200 {
-                    Err(ioerr!(
-                        InvalidData,
-                        "{}: initial response {}, expected 200",
-                        addr,
-                        resp.code
-                    ))?;
-                }
-                let connect_msg = resp.short().to_string();
-
-                // Send MODE STREAM.
-                log::trace!(">> MODE STREAM");
-                let resp = codec
-                    .command("MODE STREAM")
-                    .await
-                    .map_err(|e| ioerr!(e.kind(), "{}: {}", addr, e))?;
-                log::trace!("<< {}", resp.short());
-                if resp.code != 203 {
-                    Err(ioerr!(
-                        InvalidData,
-                        "{}: MODE STREAM response {}, expected 203",
-                        addr,
-                        resp.code
-                    ))?;
-                }
-
-                Ok((codec, connect_msg))
-            }
-            .await;
-
-            // On success, return. Otherwise, save the error.
-            match result {
-                Ok((codec, connect_msg)) => return Ok((codec, addr.ip(), connect_msg)),
-                Err(e) => last_err = Some(e),
-            }
-        }
-
-        // Return the last error seen.
-        Err(last_err.unwrap())
+    async fn connect(newspeer: &Peer) -> io::Result<(NntpCodec, IpAddr, String)> {
+        nntp_client::nntp_connect(
+            &newspeer.outhost,
+            newspeer.port,
+            "MODE STREAM",
+            203,
+            newspeer.bindaddress.clone(),
+        ).await
     }
 
     // Feeder loop.

@@ -17,7 +17,7 @@ use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::SessionStats;
 use crate::history::History;
-use crate::hostcache::HostCache;
+use crate::dns::HostCache;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_recv::NntpReceiver;
@@ -51,7 +51,7 @@ impl Server {
             let (bus_sender, bus_recv) = bus::new();
 
             // Start the trust-resolver task and the hostcache task.
-            HostCache::resolver_task(bus_recv.clone())
+            HostCache::start(bus_recv.clone())
                 .await
                 .map_err(|e| ioerr!(Other, "initializing trust dns resolver: {}", e))?;
 

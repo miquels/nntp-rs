@@ -24,7 +24,7 @@ use smartstring::alias::String as SmartString;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
-use crate::hostcache::HostCache;
+use crate::dns::HostCache;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
 
 use ipnet::IpNet;

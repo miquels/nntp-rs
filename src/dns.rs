@@ -1,4 +1,4 @@
-//! HostCache, a DNS lookup cache.
+//! The main function of this module is the HostCache.
 //!
 //! Why do we need this? Because it is the habit on NNTP servers to
 //! configure access based on hostname. All hostnames in the `newsfeeds`
@@ -11,6 +11,7 @@ use std::default::Default;
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -31,8 +32,28 @@ const DNS_REFRESH_SECS: Duration = Duration::from_secs(3600);
 const DNS_MAX_TEMPERROR_SECS: Duration = Duration::from_secs(86400);
 
 static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
+static RESOLVER_DONE: AtomicBool = AtomicBool::new(false);
 static RESOLVER_OPT: Lazy<Mutex<Option<TokioAsyncResolver>>> = Lazy::new(|| Mutex::new(None));
 pub static RESOLVER: Lazy<TokioAsyncResolver> = Lazy::new(|| RESOLVER_OPT.lock().take().unwrap());
+
+// Initialize trust-dns resolver.
+pub async fn init_resolver() -> Result<(), ResolveError> {
+    if RESOLVER_DONE.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    RESOLVER_DONE.store(true, Ordering::SeqCst);
+    log::trace!("initializing trust-dns-resolver.");
+    let (config, mut opts) = trust_dns_resolver::system_conf::read_system_conf()?;
+    opts.timeout = Duration::new(1, 0);
+    opts.attempts = 5;
+    opts.rotate = true;
+    opts.edns0 = true;
+    opts.use_hosts_file = true;
+    opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+    let resolver = TokioAsyncResolver::tokio(config, opts).await?;
+    RESOLVER_OPT.lock().replace(resolver);
+    Ok(())
+}
 
 #[derive(Clone, Default, Debug)]
 struct HostEntry {
@@ -123,25 +144,14 @@ impl HostCache {
     }
 
     // Spawn the resolver task.
-    pub async fn resolver_task(mut bus_recv: bus::Receiver) -> Result<(), ResolveError> {
-        log::debug!("resolver_task: starting");
-        {
-            // Initialize trust-dns resolver, and start first resolving pass.
-            let (config, mut opts) = trust_dns_resolver::system_conf::read_system_conf()?;
-            opts.timeout = Duration::new(1, 0);
-            opts.attempts = 5;
-            opts.rotate = true;
-            opts.edns0 = true;
-            opts.use_hosts_file = true;
-            opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-            let resolver = TokioAsyncResolver::tokio(config, opts).await?;
-            RESOLVER_OPT.lock().replace(resolver);
+    pub async fn start(mut bus_recv: bus::Receiver) -> Result<(), ResolveError> {
+        log::debug!("HostCache::start: initializing");
+        init_resolver().await?;
 
-            let this = Self::get().clone();
-            task::spawn(async move {
-                this.resolve(true).await;
-            });
-        }
+        let this = Self::get().clone();
+        task::spawn(async move {
+            this.resolve(true).await;
+        });
 
         let this = Self::get().clone();
         task::spawn(async move {
