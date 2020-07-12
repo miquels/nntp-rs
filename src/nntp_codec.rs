@@ -328,7 +328,7 @@ where
 
             // State machine.
             while bufpos < buflen {
-                log::trace!("bufpos {}, buflen {}, state {:?}", bufpos, buflen, self.rd_state);
+                // log::trace!("bufpos {}, buflen {}, state {:?}", bufpos, buflen, self.rd_state);
                 match self.rd_state {
                     State::Data => {
                         match memchr(b'\r', &buf[bufpos..buflen]) {
@@ -389,7 +389,7 @@ where
         }
         self.rd_pos = bufpos;
 
-        log::trace!("final bufpos {}, state {:?}", bufpos, self.rd_state);
+        // log::trace!("final bufpos {}, state {:?}", bufpos, self.rd_state);
 
         // are we done?
         if self.rd_state == State::Lf2Seen {
@@ -599,7 +599,7 @@ where
             //
             // See if we can write more data to the socket.
             //
-            log::trace!("writing; remaining={}", buf.remaining());
+            // log::trace!("writing; remaining={}", buf.remaining());
             let socket = &mut self.socket;
             pin!(socket);
             match socket.poll_write(cx, buf.bytes()) {
@@ -726,33 +726,24 @@ where S: AsyncWrite + Unpin
     type Error = io::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        log::trace!("XXX poll_ready");
         let mut this = self.as_mut();
         if this.wr_bufs.len() == 0 {
-            log::trace!("XXX poll_ready OK [1]");
             return Poll::Ready(Ok(()));
         }
 
         let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
         loop {
-            log::trace!(
-                "XXX poll_ready loop bufs.len() {} bufs[0].remaining {}",
-                bufs.len(),
-                bufs[0].remaining()
-            );
             let res = this.poll_write(cx, &mut bufs[0]);
             if bufs[0].remaining() == 0 {
                 bufs.remove(0);
             }
             if bufs.len() == 0 {
-                log::trace!("XXX poll_ready OK [2]");
                 return Poll::Ready(Ok(()));
             }
             if let Poll::Pending = res {
                 break;
             }
         }
-        log::trace!("XXX poll_ready pending");
         this.wr_bufs = bufs;
         Poll::Pending
     }
