@@ -412,6 +412,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     write!(buf, "{}\r\n", cmd)?;
     write!(buf, "Path: {}!test!not-for-mail\r\n", hostname)?;
     write!(buf, "Newsgroups: {}\r\n", opts.group)?;
+    write!(buf, "Distribution: local\r\n")?;
     write!(buf, "Message-Id: <{}>\r\n", msgid)?;
     write!(buf, "Date: {}\r\n", util::UnixTime::now().to_rfc2822())?;
     write!(buf, "From: test@{}\r\n", hostname)?;

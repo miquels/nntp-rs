@@ -189,7 +189,7 @@ impl MasterFeed {
                             log::debug!("MasterFeed: broadcasting ExitGraceful to peerfeeds");
                             self.broadcast(PeerFeedItem::ExitGraceful).await;
                         }
-                        Some(Notification::ExitNow) | None => {
+                        Some(Notification::ExitNow) => {
                             // Time's up!
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
                             self.broadcast(PeerFeedItem::ExitNow).await;
@@ -646,15 +646,23 @@ impl Connection {
     async fn feed(&mut self) -> io::Result<()> {
         let mut xmit_busy = false;
         let mut maxstream = self.newspeer.maxstream as usize;
+        if maxstream == 0 {
+            maxstream = 1;
+        }
 
         loop {
+
             // If there is an item in the send queue, and we're not still busy
             // sending the previous item, pop it from the queue and start
             // sending it to the remote peer.
             if !xmit_busy {
-                log::trace!("Connection::feed: XXX 1");
                 if let Some(item) = self.send_queue.pop_front() {
-                    log::trace!("Connection::feed: send and push CHECK onto recv queue [2]");
+                    log::trace!(
+                        "Connection::feed: {}:{}: sending {:?}",
+                        self.newspeer.label,
+                        self.id,
+                        item,
+                    );
                     self.recv_queue.push_back(item.clone());
                     self.transmit_item(item).await?;
                     xmit_busy = true;
@@ -662,20 +670,28 @@ impl Connection {
             }
 
             let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let mut need_item = !xmit_busy && queue_len < maxstream;
-            log::trace!("XXX maxstream={} queue_len={}", maxstream, queue_len);
+            let need_item = !xmit_busy && queue_len < maxstream;
 
             if need_item {
                 // Try to get one item from the queue. If it's empty,
                 // signal the PeerFeed that we hit an empty queue.
                 match self.rx_queue.try_recv() {
                     Ok(art) => {
-                        log::trace!("Connection::feed: push CHECK onto send queue [2]");
+                        log::trace!(
+                            "Connection::feed: {}:{}: push onto send queue: CHECK {}",
+                            self.newspeer.label,
+                            self.id,
+                            art.msgid,
+                        );
                         self.send_queue.push_back(ConnItem::Check(art));
                         continue;
                     },
                     Err(async_channel::TryRecvError::Empty) => {
-                        log::trace!("Connection::feed: signaling empty queue");
+                        log::trace!(
+                            "Connection::feed: {}:{}: signaling empty queue",
+                            self.newspeer.label,
+                            self.id,
+                        );
                         let _ = self.tx_empty.try_send(());
                     },
                     _ => {},
@@ -686,13 +702,22 @@ impl Connection {
 
                 // If we need to, get an item from the global queue for this feed.
                 res = self.rx_queue.recv(), if need_item => {
-                    log::trace!("XXX rx_queue.recv");
                     match res {
                         Ok(art) => {
-                            log::trace!("Connection::feed: push CHECK onto send queue [1]");
+                            log::trace!(
+                                "Connection::feed: {}:{}: pushing CHECK {} onto send queue",
+                                self.newspeer.label,
+                                self.id,
+                                art.msgid,
+                            );
                             self.send_queue.push_back(ConnItem::Check(art))
                         },
                         Err(_) => {
+                            log::trace!(
+                                "Connection::feed: {}:{}: queue closed, sending QUIT",
+                                self.newspeer.label,
+                                self.id,
+                            );
                             // channel closed. shutdown in progress.
                             // drop anything in the send_queue and send quit.
                             self.dropped.extend(self.send_queue.drain(..));
@@ -705,7 +730,12 @@ impl Connection {
 
                 // check for notifications from the broadcast channel.
                 res = self.broadcast.recv() => {
-                    log::trace!("XXX broadcast.recv");
+                    log::trace!(
+                        "Connection::feed: {}:{}: received broadcast {:?}",
+                        self.newspeer.label,
+                        self.id,
+                        res
+                    );
                     match res {
                         Ok(PeerFeedItem::ExitNow) => {
                             return Err(ioerr!(Interrupted, "forced exit"));
@@ -718,7 +748,6 @@ impl Connection {
                         },
                         Ok(PeerFeedItem::Reconfigure) => {
                             // config changed. drain slowly and quit.
-                            log::info!("outfeed: {}:{}: reconfigure", self.newspeer.label, self.id);
                             self.send_queue.push_back(ConnItem::Quit);
                             maxstream = 0;
                         },
@@ -736,7 +765,6 @@ impl Connection {
 
                 // If we're writing, keep driving it.
                 res = self.writer.flush(), if xmit_busy => {
-                    log::trace!("XXX flush");
                     // Done sending either CHECK or TAKETHIS.
                     if let Err(e) = res {
                         return Err(ioerr!(e.kind(), "writing to socket: {}", e));
@@ -744,9 +772,9 @@ impl Connection {
                     xmit_busy = false;
                 }
 
-                // process a reply from the remote server.
+                // process a response from the remote server.
                 res = self.reader.next() => {
-                    log::trace!("XXX reader.next");
+
                     // Remap None (end of stream) to EOF.
                     let res = res.unwrap_or_else(|| Err(ioerr!(UnexpectedEof, "Connection closed")));
 
@@ -755,7 +783,11 @@ impl Connection {
                         Err(e) => {
                             if e.kind() == io::ErrorKind::UnexpectedEof {
                                 if self.recv_queue.len() == 0 {
-                                    log::info!("outfeed: {}:{}: connection closed by remote", self.newspeer.label, self.id);
+                                    log::info!(
+                                        "{}:{}: connection closed by remote",
+                                        self.newspeer.label,
+                                        self.id
+                                    );
                                     return Ok(());
                                 }
                                 return Err(ioerr!(e.kind(), "connection closed unexpectedly"));
@@ -763,63 +795,100 @@ impl Connection {
                             return Err(ioerr!(e.kind(), "reading from socket: {}", e));
                         },
                         Ok(resp) => {
-                            // Got a valid reply. Find matching command.
-                            let mut unexpected = false;
-                            match self.recv_queue.pop_front() {
-                                None => {
-                                    if resp.code == 400 {
-                                        log::info!("outfeed: {}:{}: connection closed by remote ({})", self.newspeer.label, self.id, resp.short());
-                                        return Ok(());
-                                    }
-                                    return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short()));
-                                },
-                                Some(ConnItem::Check(art)) => {
-                                    log::trace!("Connection::feed: CHECK response {}", resp.short());
-                                    match resp.code {
-                                        238 => {
-                                            self.send_queue.push_back(ConnItem::Takethis(art));
-                                        },
-                                        431 => {
-                                            // XXX TODO req-queue article.
-                                            //self.stats.art_deferred(None);
-                                            self.stats.art_deferred_fail(None); // XXX
-                                        },
-                                        438 => {
-                                            self.stats.art_refused();
-                                        },
-                                        _ => unexpected = true,
-                                    }
-                                },
-                                Some(ConnItem::Takethis(art)) => {
-                                    log::trace!("Connection::feed: TAKETHIS response {}", resp.short());
-                                    match resp.code {
-                                        239 => {
-                                            self.stats.art_accepted(art.size);
-                                        },
-                                        431 => {
-                                            // this is an invalid TAKETHIS reply!
-                                            // XXX TODO req-queue article.
-                                            //self.stats.art_deferred(Some(art.size));
-                                            self.stats.art_deferred_fail(Some(art.size)); // XXX
-                                        },
-                                        439 => {
-                                            self.stats.art_rejected(art.size);
-                                        },
-                                        _ => unexpected = true,
-                                    }
-                                },
-                                Some(ConnItem::Quit) => {
-                                    return Ok(());
-                                },
-                            }
-                            if unexpected {
-                                return Err(ioerr!(InvalidData, "unexpected response: {}", resp.short()));
+                            if self.handle_response(resp).await? {
+                                return Ok(());
                             }
                         },
                     }
                 }
             }
         }
+    }
+
+    // The remote server sent a response. Process it.
+    async fn handle_response(&mut self, resp: NntpResponse) -> io::Result<bool> {
+
+        // It's a response to the item at the front of the queue.
+        let item = match self.recv_queue.pop_front() {
+            None => {
+                if resp.code == 400 {
+                    log::info!(
+                        "{}:{}: connection closed by remote ({})",
+                        self.newspeer.label,
+                        self.id,
+                        resp.short()
+                    );
+                    return Ok(true);
+                }
+                return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short()));
+            },
+            Some(item) => item,
+        };
+
+        // Now we have the request item and the response.
+        // Decide what the next step is.
+        let mut unexpected = false;
+        match item {
+            ConnItem::Check(art) => {
+                log::trace!(
+                    "Connection::handle_response {}:{}: CHECK response: {}",
+                    self.newspeer.label,
+                    self.id,
+                    resp.short(),
+                );
+                match resp.code {
+                    238 => {
+                        // remote wants it. queue a takethis command.
+                        self.send_queue.push_back(ConnItem::Takethis(art));
+                    },
+                    431 => {
+                        // remote deferred it (aka "try again a bit later")
+                        // XXX TODO req-queue article.
+                        //self.stats.art_deferred(None);
+                        self.stats.art_deferred_fail(None); // XXX
+                    },
+                    438 => {
+                        // remote doesn't want it.
+                        self.stats.art_refused();
+                    },
+                    _ => unexpected = true,
+                }
+            },
+            ConnItem::Takethis(art) => {
+                log::trace!(
+                    "Connection::handle_response {}:{}: TAKETHIS response: {}",
+                    self.newspeer.label,
+                    self.id,
+                    resp.short(),
+                );
+                match resp.code {
+                    239 => {
+                        // Nice, remote accepted it.
+                        self.stats.art_accepted(art.size);
+                    },
+                    431 => {
+                        // this is an invalid TAKETHIS reply!
+                        // XXX TODO req-queue article.
+                        //self.stats.art_deferred(Some(art.size));
+                        self.stats.art_deferred_fail(Some(art.size)); // XXX
+                    },
+                    439 => {
+                        // Remote already got it.
+                        self.stats.art_rejected(art.size);
+                    },
+                    _ => unexpected = true,
+                }
+            },
+            ConnItem::Quit => {
+                // Response to the QUIT we sent.
+                return Ok(true);
+            },
+        }
+
+        if unexpected {
+            return Err(ioerr!(InvalidData, "unexpected response: {}", resp.short()));
+        }
+        Ok(false)
     }
 
     // Put the ConnItem in the Sink.
