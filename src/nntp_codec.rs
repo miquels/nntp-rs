@@ -726,18 +726,35 @@ where S: AsyncWrite + Unpin
     type Error = io::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        log::trace!("XXX poll_ready");
         let mut this = self.as_mut();
         if this.wr_bufs.len() == 0 {
-            Poll::Ready(Ok(()))
-        } else {
-            let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
+            log::trace!("XXX poll_ready OK [1]");
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
+        loop {
+            log::trace!(
+                "XXX poll_ready loop bufs.len() {} bufs[0].remaining {}",
+                bufs.len(),
+                bufs[0].remaining()
+            );
             let res = this.poll_write(cx, &mut bufs[0]);
-            if bufs[0].len() == 0 {
+            if bufs[0].remaining() == 0 {
                 bufs.remove(0);
             }
-            this.wr_bufs = bufs;
-            res
+            if bufs.len() == 0 {
+                log::trace!("XXX poll_ready OK [2]");
+                return Poll::Ready(Ok(()));
+            }
+            if let Poll::Pending = res {
+                break;
+            }
         }
+        log::trace!("XXX poll_ready pending");
+        this.wr_bufs = bufs;
+        Poll::Pending
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Buffer) -> Result<(), Self::Error> {

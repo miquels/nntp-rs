@@ -172,6 +172,7 @@ impl NewsPeer {
         NewsPeer {
             port: 119,
             maxparallel: 2,
+            maxstream: 100,
             ..Default::default()
         }
     }

@@ -201,7 +201,7 @@ impl NntpReceiver {
             size:     art.len,
             peers:    outpeers,
         };
-        let _ = self.outfeed.send(feed_art);
+        let _ = self.outfeed.send(feed_art).await;
 
         Ok(ArtAccept::Accept)
     }

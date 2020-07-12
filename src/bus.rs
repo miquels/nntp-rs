@@ -172,7 +172,8 @@ pub fn new() -> (Sender, Receiver) {
                 state.0.resize(i + 1, 0);
             }
             state.0[i] += 1;
-            if let Err(_) = notifier_master.broadcast(state.clone()) {
+            if let Err(e) = notifier_master.broadcast(state.clone()) {
+                log::error!("bus::broadcast_task: exit");
                 break;
             }
         }

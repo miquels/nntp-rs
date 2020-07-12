@@ -4,10 +4,14 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use tokio::net::TcpStream;
 
 use crate::dns;
 use crate::nntp_codec::NntpCodec;
+use crate::util::{self, hostname};
+
+static HOSTNAME: Lazy<String> = Lazy::new(|| hostname().unwrap_or(String::from("unconfigured")));
 
 /// Connect to remote server.
 ///
@@ -41,7 +45,7 @@ pub async fn nntp_connect(
     // Try to connect to the peer.
     let mut last_err = None;
     for addr in &addrs {
-        log::debug!("Trying to connect to {:?}", addr);
+        log::debug!("Trying to connect to {}", addr);
         let result = async move {
             // Create socket.
             let is_ipv6 = bindaddr.map(|ref a| a.is_ipv6()).unwrap_or(addr.is_ipv6());
@@ -78,7 +82,7 @@ pub async fn nntp_connect(
                         // for this, but it's undocumented. I'm leaving this
                         // here in case it gets removed without a replacement.
                         //
-                        log::trace!("Trying to connect to {:?}", addr);
+                        log::trace!("Trying to connect to {}", addr);
                         let addr2: socket2::SockAddr = addr.to_owned().into();
                         let res = task::spawn_blocking(move || {
                             // 10 second timeout for a connect is more than enough.
@@ -162,4 +166,20 @@ pub async fn nntp_connect(
 
     // Return the last error seen.
     Err(last_err.unwrap())
+}
+
+/// Generate a unique message-id.
+///
+/// If `hostname` is `None`, the system hostname will be used.
+pub fn message_id(hostname: Option<&str>) -> String {
+    let mut hostname = hostname.unwrap_or(HOSTNAME.as_str()).to_string();
+    if !hostname.contains(".") {
+        hostname.push_str(".invalid");
+    }
+    let now = util::monotime_ms();
+    let mut rnd = 0;
+    while rnd < u32::MAX as u64 {
+        rnd = rand::random::<u64>();
+    }
+    format!("{}.{}@{}", util::base50(now), util::base50(rnd), hostname)
 }

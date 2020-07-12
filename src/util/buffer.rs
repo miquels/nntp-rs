@@ -179,6 +179,12 @@ impl Buffer {
         self.data.extend_from_slice(extend);
     }
 
+    /// Add text data to this buffer.
+    #[inline]
+    pub fn push_str(&mut self, s: &str) {
+        self.data.extend_from_slice(s.as_bytes());
+    }
+
     /// Make sure at least `size` bytes are available.
     #[inline]
     pub fn reserve(&mut self, size: usize) {
@@ -268,6 +274,13 @@ impl DerefMut for Buffer {
     }
 }
 
+impl fmt::Write for Buffer {
+    fn write_str(&mut self, s: &str) -> Result<(), fmt::Error> {
+        self.push_str(s);
+        Ok(())
+    }
+}
+
 impl From<&[u8]> for Buffer {
     fn from(src: &[u8]) -> Self {
         let mut buffer = Buffer::new();
@@ -278,7 +291,11 @@ impl From<&[u8]> for Buffer {
 
 impl From<Vec<u8>> for Buffer {
     fn from(src: Vec<u8>) -> Self {
-        Buffer::from(&src[..])
+        Buffer {
+            start_offset: 0,
+            rd_pos:       0,
+            data:         src,
+        }
     }
 }
 
@@ -290,7 +307,7 @@ impl From<&str> for Buffer {
 
 impl From<String> for Buffer {
     fn from(src: String) -> Self {
-        Buffer::from(src.as_str().as_bytes())
+        Buffer::from(src.into_bytes())
     }
 }
 

@@ -71,26 +71,30 @@ macro_rules! _ioerr {
     };
 }
 
+#[macro_export]
 macro_rules! ioerr {
-    (@NotFound, $arg:expr) => ( _ioerr!(std::io::ErrorKind::NotFound, $arg) );
-    (@PermissionDenied, $arg:expr) => ( _ioerr!(std::io::ErrorKind::PermissionDenied, $arg) );
-    (@ConnectionRefused, $arg:expr) => ( _ioerr!(std::io::ErrorKind::ConnectionRefused, $arg) );
-    (@ConnectionReset, $arg:expr) => ( _ioerr!(std::io::ErrorKind::ConnectionReset, $arg) );
-    (@ConnectionAborted, $arg:expr) => ( _ioerr!(std::io::ErrorKind::ConnectionAborted, $arg) );
-    (@NotConnected, $arg:expr) => ( _ioerr!(std::io::ErrorKind::NotConnected, $arg) );
-    (@AddrInUse, $arg:expr) => ( _ioerr!(std::io::ErrorKind::AddrInUse, $arg) );
-    (@AddrNotAvailable, $arg:expr) => ( _ioerr!(std::io::ErrorKind::AddrNotAvailable, $arg) );
-    (@BrokenPipe, $arg:expr) => ( _ioerr!(std::io::ErrorKind::BrokenPipe, $arg) );
-    (@AlreadyExists, $arg:expr) => ( _ioerr!(std::io::ErrorKind::AlreadyExists, $arg) );
-    (@WouldBlock, $arg:expr) => ( _ioerr!(std::io::ErrorKind::WouldBlock, $arg) );
-    (@InvalidInput, $arg:expr) => ( _ioerr!(std::io::ErrorKind::InvalidInput, $arg) );
-    (@InvalidData, $arg:expr) => ( _ioerr!(std::io::ErrorKind::InvalidData, $arg) );
-    (@TimedOut, $arg:expr) => ( _ioerr!(std::io::ErrorKind::TimedOut, $arg) );
-    (@WriteZero, $arg:expr) => ( _ioerr!(std::io::ErrorKind::WriteZero, $arg) );
-    (@Interrupted, $arg:expr) => ( _ioerr!(std::io::ErrorKind::Interrupted, $arg) );
-    (@Other, $arg:expr) => ( _ioerr!(std::io::ErrorKind::Other, $arg) );
-    (@UnexpectedEof, $arg:expr) => ( _ioerr!(std::io::ErrorKind::UnexpectedEof, $arg) );
-    (@$kind:expr, $arg:expr) => ( _ioerr!($kind, $arg) );
+    (@E $kind:expr, $arg:expr) => {
+        std::io::Error::new($kind, $arg)
+    };
+    (@NotFound, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::NotFound, $arg) );
+    (@PermissionDenied, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::PermissionDenied, $arg) );
+    (@ConnectionRefused, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::ConnectionRefused, $arg) );
+    (@ConnectionReset, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::ConnectionReset, $arg) );
+    (@ConnectionAborted, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::ConnectionAborted, $arg) );
+    (@NotConnected, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::NotConnected, $arg) );
+    (@AddrInUse, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::AddrInUse, $arg) );
+    (@AddrNotAvailable, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::AddrNotAvailable, $arg) );
+    (@BrokenPipe, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::BrokenPipe, $arg) );
+    (@AlreadyExists, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::AlreadyExists, $arg) );
+    (@WouldBlock, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::WouldBlock, $arg) );
+    (@InvalidInput, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::InvalidInput, $arg) );
+    (@InvalidData, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::InvalidData, $arg) );
+    (@TimedOut, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::TimedOut, $arg) );
+    (@WriteZero, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::WriteZero, $arg) );
+    (@Interrupted, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::Interrupted, $arg) );
+    (@Other, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::Other, $arg) );
+    (@UnexpectedEof, $arg:expr) => ( ioerr!(@E std::io::ErrorKind::UnexpectedEof, $arg) );
+    (@$kind:expr, $arg:expr) => ( ioerr!(@E $kind, $arg) );
 
     ($kind:ident, $fmt:expr, $($tt:tt)+) => (
         ioerr!(@$kind, format!($fmt, $($tt)+))

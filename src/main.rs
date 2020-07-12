@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io;
 use std::panic;
 use std::process::exit;
@@ -7,8 +8,11 @@ use structopt::StructOpt;
 
 use nntp_rs::blocking::BlockingType;
 use nntp_rs::config;
+use nntp_rs::dns;
 use nntp_rs::history::{self, History};
+use nntp_rs::ioerr;
 use nntp_rs::logger::{self, LogTarget};
+use nntp_rs::nntp_client;
 use nntp_rs::server;
 use nntp_rs::spool::{self, Spool};
 use nntp_rs::util::{self, TcpListenerSets};
@@ -54,6 +58,9 @@ pub enum Command {
     #[structopt(display_order = 5)]
     /// Read article from spool.
     SpoolRead(SpoolReadOpts),
+    #[structopt(display_order = 6)]
+    /// Generate a test article and send it out.
+    TestArticle(TestArticleOpts),
 }
 
 #[derive(StructOpt, Debug)]
@@ -101,7 +108,25 @@ pub struct SpoolReadOpts {
     pub msgid: String,
 }
 
-fn main() -> io::Result<()> {
+#[derive(StructOpt, Debug)]
+pub struct TestArticleOpts {
+    #[structopt(short, long)]
+    /// Newsgroup to post to (must be *.test)
+    pub group:    String,
+    #[structopt(short, long)]
+    /// Subject (default: test <MSGID>)
+    pub subject:  Option<String>,
+    #[structopt(short, long)]
+    /// Port to use (default: 119)
+    pub port:     Option<u16>,
+    /// Server to connect to
+    pub hostname: String,
+}
+
+type Error = Box<dyn std::error::Error + Send + Sync>;
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+fn main() -> Result<()> {
     let opts = MainOpts::from_args();
 
     if opts.trace {
@@ -111,6 +136,12 @@ fn main() -> io::Result<()> {
     } else {
         log::set_max_level(log::LevelFilter::Info);
     }
+
+    // early check for commands that do not need to read the config file.
+    match opts.cmd {
+        cmd @ Command::TestArticle(..) => run_subcommand(cmd, None, opts.pretty),
+        _ => {},
+    };
 
     // first read the config file.
     let load_newsfeeds = match opts.cmd {
@@ -130,7 +161,7 @@ fn main() -> io::Result<()> {
 
     let run_opts = match opts.cmd {
         Command::Serve(opts) => opts,
-        other => run_subcommand(other, &*config, opts.pretty),
+        other => run_subcommand(other, Some(&*config), opts.pretty),
     };
 
     let mut listenaddrs = &config.server.listen;
@@ -226,25 +257,33 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn run_subcommand(cmd: Command, config: &config::Config, pretty: bool) -> ! {
+fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -> ! {
     // set up the logger.
-    let target = LogTarget::new_with("stderr", &config).unwrap();
+    let target = LogTarget::new_stderr();
     logger::logger_init(target);
 
-    // run subcommand.
-    let res = match cmd {
-        Command::Serve(_) => unreachable!(),
-        Command::HistLookup(opts) => history_lookup(&*config, opts, pretty),
-        Command::HistExpire(opts) => history_expire(&*config, opts),
-        Command::HistInspect(opts) => history_inspect(&*config, opts),
-        Command::SpoolRead(opts) => spool_read(&*config, opts),
-    };
+    let mut runtime = tokio::runtime::Runtime::new().unwrap();
+    let res = runtime.block_on(async move {
+        // run subcommand.
+        let config = config.map(|c| &*c);
+        match cmd {
+            Command::Serve(_) => unreachable!(),
+            Command::HistLookup(opts) => history_lookup(config.unwrap(), opts, pretty).await,
+            Command::HistExpire(opts) => history_expire(config.unwrap(), opts).await,
+            Command::HistInspect(opts) => history_inspect(config.unwrap(), opts).await,
+            Command::SpoolRead(opts) => spool_read(config.unwrap(), opts).await,
+            Command::TestArticle(opts) => test_article(opts).await,
+        }
+    });
 
     // flush and exit.
     logger::logger_flush();
     match res {
         Ok(_) => exit(0),
-        Err(_) => exit(1),
+        Err(e) => {
+            eprintln!("{}", e);
+            exit(1);
+        },
     }
 }
 
@@ -262,127 +301,132 @@ fn history_common(
         None,
         Some(BlockingType::Blocking),
     )
-    .map_err(|e| {
-        eprintln!("nntp-rs: history {}: {}", hpath, e);
-        e
-    })?;
+    .map_err(|e| ioerr!(e.kind(), "nntp-rs: history {}: {}", hpath, e))?;
 
     // open spool.
-    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking)).map_err(|e| {
-        eprintln!("nntp-rs: initializing spool: {}", e);
-        e
-    })?;
+    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
+        .map_err(|e| ioerr!(e.kind(), "nntp-rs: initializing spool: {}", e))?;
 
     Ok((hist, spool))
 }
 
-fn history_inspect(config: &config::Config, opts: HistInspectOpts) -> io::Result<()> {
+async fn history_inspect(config: &config::Config, opts: HistInspectOpts) -> Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async move {
-        hist.inspect(&spool).await.map_err(|e| {
-            eprintln!("{}", e);
-            e
-        })
-    })
+    hist.inspect(&spool).await?;
+    Ok(())
 }
 
-fn history_expire(config: &config::Config, opts: HistExpireOpts) -> io::Result<()> {
+async fn history_expire(config: &config::Config, opts: HistExpireOpts) -> Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async move {
-        hist.expire(&spool, config.history.remember.clone(), true, true)
-            .await
-            .map_err(|e| {
-                eprintln!("{}", e);
-                e
-            })
-    })
+    let res = hist
+        .expire(&spool, config.history.remember.clone(), true, true)
+        .await?;
+    Ok(res)
 }
 
-fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -> io::Result<()> {
+async fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -> Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async move {
-        let he = hist.lookup(&opts.msgid).await.map_err(|e| {
-            eprintln!("{}", e);
-            e
-        })?;
-        let json = he
-            .map(|h| h.to_json(&spool))
-            .unwrap_or(serde_json::json!({"status":"notfound"}));
-        println!(
-            "{}",
-            if pretty {
-                serde_json::to_string_pretty(&json).unwrap()
-            } else {
-                json.to_string()
-            }
-        );
-        Ok(())
-    })
+    let he = hist.lookup(&opts.msgid).await?;
+    let json = he
+        .map(|h| h.to_json(&spool))
+        .unwrap_or(serde_json::json!({"status":"notfound"}));
+    println!(
+        "{}",
+        if pretty {
+            serde_json::to_string_pretty(&json).unwrap()
+        } else {
+            json.to_string()
+        }
+    );
+    Ok(())
 }
 
 // Read an article from the spool.
-fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> io::Result<()> {
+async fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> Result<()> {
     let (hist, spool) = history_common(config, opts.file.as_ref())?;
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
-    runtime.block_on(async move {
-        // For now, lookup goes through the history file. We might add
-        // lookup by "storage token" or hash.
-        let he = match hist.lookup(&opts.msgid).await {
-            Ok(Some(he)) => he,
-            Ok(None) => {
-                eprintln!("{} not found", opts.msgid);
-                return Err(io::ErrorKind::NotFound.into());
-            },
-            Err(e) => {
-                eprintln!("{}", e);
-                return Err(e);
-            },
-        };
-        let loc = match he.location {
-            Some(loc) => loc,
-            None => {
-                eprintln!("{} {}", opts.msgid, he.status.name());
-                return Err(io::ErrorKind::NotFound.into());
-            },
-        };
 
-        // just headers or whole article?
-        let part = match opts.body {
-            true => spool::ArtPart::Article,
-            false => spool::ArtPart::Head,
-        };
+    // For now, lookup goes through the history file. We might add
+    // lookup by "storage token" or hash.
+    let he = match hist.lookup(&opts.msgid).await {
+        Ok(Some(he)) => Ok(he),
+        Ok(None) => Err(ioerr!(NotFound, "{} not found", opts.msgid)),
+        Err(e) => Err(e),
+    }?;
+    let status = he.status.name();
+    let loc = he
+        .location
+        .ok_or_else(|| ioerr!(NotFound, "{} {}", opts.msgid, status))?;
 
-        // find it
-        let buffer = util::Buffer::new();
-        let mut buf = spool.read(loc, part, buffer).await.map_err(|e| {
-            eprintln!("spool_read {}: {}", opts.msgid, e);
-            e
-        })?;
+    // just headers or whole article?
+    let part = match opts.body {
+        true => spool::ArtPart::Article,
+        false => spool::ArtPart::Head,
+    };
 
-        // Output article
-        use std::io::Write;
-        if opts.raw {
-            // wire-format
-            io::stdout().write_all(&buf[..])?;
-        } else {
-            // translate from on-the-wire format to normal format.
-            for line in buf.split_mut(|&b| b == b'\n') {
-                if line.ends_with(b"\r") {
-                    line[line.len() - 1] = b'\n';
-                }
-                if line == b".\n" {
-                    break;
-                }
-                let start = if line.starts_with(b".") { 1 } else { 0 };
-                io::stdout().write_all(&line[start..])?;
+    // find it
+    let buffer = util::Buffer::new();
+    let mut buf = spool
+        .read(loc, part, buffer)
+        .await
+        .map_err(|e| ioerr!(e.kind(), "spool_read {}: {}", opts.msgid, e))?;
+
+    // Output article
+    use std::io::Write;
+    if opts.raw {
+        // wire-format
+        io::stdout().write_all(&buf[..])?;
+    } else {
+        // translate from on-the-wire format to normal format.
+        for line in buf.split_mut(|&b| b == b'\n') {
+            if line.ends_with(b"\r") {
+                line[line.len() - 1] = b'\n';
             }
+            if line == b".\n" {
+                break;
+            }
+            let start = if line.starts_with(b".") { 1 } else { 0 };
+            io::stdout().write_all(&line[start..])?;
         }
+    }
+    Ok(())
+}
 
-        Ok(())
-    })
+async fn test_article(opts: TestArticleOpts) -> Result<()> {
+    if !opts.group.ends_with(".test") {
+        Err(ioerr!(InvalidData, "test-article: newsgroup must end in '.test'"))?;
+    }
+
+    dns::init_resolver().await?;
+
+    let port = opts.port.unwrap_or(119);
+    let (mut codec, _, welcome) =
+        nntp_client::nntp_connect(&opts.hostname, port, "MODE STREAM", 203, None).await?;
+    println!("<< {}", welcome);
+
+    let msgid = nntp_client::message_id(None);
+    let hostname = msgid.split("@").nth(1).unwrap();
+
+    let mut buf = String::new();
+    let cmd = format!("TAKETHIS <{}>", msgid);
+
+    write!(buf, "{}\r\n", cmd)?;
+    write!(buf, "Path: {}!test!not-for-mail\r\n", hostname)?;
+    write!(buf, "Newsgroups: {}\r\n", opts.group)?;
+    write!(buf, "Message-Id: <{}>\r\n", msgid)?;
+    write!(buf, "Date: {}\r\n", util::UnixTime::now().to_rfc2822())?;
+    write!(buf, "From: test@{}\r\n", hostname)?;
+    write!(
+        buf,
+        "Subject: {}\r\n",
+        opts.subject.unwrap_or(format!("test {}", msgid))
+    )?;
+    write!(buf, "\r\ntest, ignore.\r\n.")?;
+
+    println!(">> {}", cmd);
+    let resp = codec.command(buf).await?;
+    println!("<< {}", resp.short());
+
+    Ok(())
 }
 
 fn handle_panic() {

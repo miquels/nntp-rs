@@ -1,5 +1,6 @@
 //! A bunch of helper and utility functions.
 
+mod base50;
 mod bind_socket;
 mod buffer;
 pub(crate) mod byteorder;
@@ -13,6 +14,7 @@ mod mmap;
 mod wildmat;
 mod wildmat_fn;
 
+pub use self::base50::*;
 pub use self::bind_socket::*;
 pub use self::buffer::*;
 pub use self::byteorder::*;

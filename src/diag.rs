@@ -355,7 +355,7 @@ impl TxSessionStats {
     pub fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
         let secs = self.mark.saturating_duration_since(start).as_secs();
         format!(
-            "secs={:-4} acc={:-4} dup={:-4} rej={:-4} tot={:-4} bytes={:-4} ({}/min) avpend={:-4.1}",
+            "secs={} acc={} dup={} rej={} tot={} bytes={} ({}/min) avpend={:.1}",
             secs,
             stats[TxStats::Accepted as usize],
             stats[TxStats::Refused as usize],
@@ -374,7 +374,7 @@ impl TxSessionStats {
     pub fn log_defer(&self, start: Instant, stats: &[u64]) -> String {
         let secs = self.mark.saturating_duration_since(start).as_secs();
         format!(
-            "secs={:-4} defer={:-4} deferfail={:-4}",
+            "secs={} defer={} deferfail={}",
             secs,
             stats[TxStats::Deferred as usize],
             stats[TxStats::DeferredFail as usize],

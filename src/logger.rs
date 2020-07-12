@@ -404,6 +404,13 @@ impl LogTarget {
         Ok(LogTarget { dest })
     }
 
+    /// Simple logtarget for CLI utils.
+    pub fn new_stderr() -> LogTarget {
+        LogTarget {
+            dest: LogDest::Stderr,
+        }
+    }
+
     /// Create a new LogTarget.
     pub fn new(d: &str) -> io::Result<LogTarget> {
         LogTarget::new_with(d, &config::get_config())

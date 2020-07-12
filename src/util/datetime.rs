@@ -104,6 +104,12 @@ impl UnixTime {
             .to_rfc3339()
     }
 
+    pub fn to_rfc2822(&self) -> String {
+        Local
+            .timestamp(self.as_secs() as i64, self.subsec_millis() * 1_000_000)
+            .to_rfc2822()
+    }
+
     pub fn seconds_since(&self, earlier: impl AsRef<UnixTime>) -> u64 {
         let earlier = earlier.as_ref();
         if self.0 >= earlier.0 {

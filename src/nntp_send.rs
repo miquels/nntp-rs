@@ -52,7 +52,7 @@ pub struct FeedArticle {
 }
 
 // Sent from masterfeed -> peerfeed -> connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum PeerFeedItem {
     Article(PeerArticle),
     ConnExit(Vec<PeerArticle>),
@@ -64,7 +64,7 @@ enum PeerFeedItem {
 }
 
 // Article queued for an outgoing connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct PeerArticle {
     // Message-Id.
     msgid:    String,
@@ -185,6 +185,10 @@ impl MasterFeed {
                 }
                 notification = self.bus.recv() => {
                     match notification {
+                        Some(Notification::ExitGraceful) | None => {
+                            log::debug!("MasterFeed: broadcasting ExitGraceful to peerfeeds");
+                            self.broadcast(PeerFeedItem::ExitGraceful).await;
+                        }
                         Some(Notification::ExitNow) | None => {
                             // Time's up!
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
@@ -252,7 +256,7 @@ impl MasterFeed {
 }
 
 // A shorter version of newsfeeds::NewsPeer.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Peer {
     label:         SmartString,
     outhost:       String,
@@ -368,16 +372,22 @@ impl PeerFeed {
 
     /// Run the PeerFeed.
     async fn run(mut self) {
+        log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut closed = false;
         let mut exiting = false;
 
-        // NOTE: since we have a clone of tx_chan ourselves, this will loop forever.
-        // Or at least until we receive ExitGraceful or ExitNow.
-
-        while let Some(item) = self.rx_chan.recv().await {
+        loop {
             if exiting && self.num_conns == 0 {
                 break;
             }
+
+            // NOTE: since we have a clone of tx_chan ourselves, this will loop forever.
+            // Or at least until we receive ExitGraceful or ExitNow.
+            let item = match self.rx_chan.recv().await {
+                Some(item) => item,
+                None => break,
+            };
+            log::trace!("PeerFeed::run: {}: recv {:?}", self.label, item);
 
             match item {
                 PeerFeedItem::Article(art) => {
@@ -433,6 +443,8 @@ impl PeerFeed {
             }
         }
 
+        log::trace!("PeerFeed::run: {}: exit", self.label);
+
         // save queue to disk.
         // XXX TODO
         //self.send_queue_to_backlog(true);
@@ -469,7 +481,7 @@ impl PeerFeed {
                 },
                 Err(_) => {
                     // notify PeerFeed that we failed.
-                    let _ = tx_chan.send(PeerFeedItem::ConnExit(Vec::new()));
+                    let _ = tx_chan.send(PeerFeedItem::ConnExit(Vec::new())).await;
                 },
             }
         });
@@ -640,7 +652,9 @@ impl Connection {
             // sending the previous item, pop it from the queue and start
             // sending it to the remote peer.
             if !xmit_busy {
+                log::trace!("Connection::feed: XXX 1");
                 if let Some(item) = self.send_queue.pop_front() {
+                    log::trace!("Connection::feed: send and push CHECK onto recv queue [2]");
                     self.recv_queue.push_back(item.clone());
                     self.transmit_item(item).await?;
                     xmit_busy = true;
@@ -649,16 +663,19 @@ impl Connection {
 
             let queue_len = self.recv_queue.len() + self.send_queue.len();
             let mut need_item = !xmit_busy && queue_len < maxstream;
+            log::trace!("XXX maxstream={} queue_len={}", maxstream, queue_len);
 
             if need_item {
                 // Try to get one item from the queue. If it's empty,
                 // signal the PeerFeed that we hit an empty queue.
                 match self.rx_queue.try_recv() {
                     Ok(art) => {
+                        log::trace!("Connection::feed: push CHECK onto send queue [2]");
                         self.send_queue.push_back(ConnItem::Check(art));
-                        need_item = queue_len + 1 < maxstream;
+                        continue;
                     },
                     Err(async_channel::TryRecvError::Empty) => {
+                        log::trace!("Connection::feed: signaling empty queue");
                         let _ = self.tx_empty.try_send(());
                     },
                     _ => {},
@@ -669,8 +686,12 @@ impl Connection {
 
                 // If we need to, get an item from the global queue for this feed.
                 res = self.rx_queue.recv(), if need_item => {
+                    log::trace!("XXX rx_queue.recv");
                     match res {
-                        Ok(art) => self.send_queue.push_back(ConnItem::Check(art)),
+                        Ok(art) => {
+                            log::trace!("Connection::feed: push CHECK onto send queue [1]");
+                            self.send_queue.push_back(ConnItem::Check(art))
+                        },
                         Err(_) => {
                             // channel closed. shutdown in progress.
                             // drop anything in the send_queue and send quit.
@@ -684,6 +705,7 @@ impl Connection {
 
                 // check for notifications from the broadcast channel.
                 res = self.broadcast.recv() => {
+                    log::trace!("XXX broadcast.recv");
                     match res {
                         Ok(PeerFeedItem::ExitNow) => {
                             return Err(ioerr!(Interrupted, "forced exit"));
@@ -714,6 +736,7 @@ impl Connection {
 
                 // If we're writing, keep driving it.
                 res = self.writer.flush(), if xmit_busy => {
+                    log::trace!("XXX flush");
                     // Done sending either CHECK or TAKETHIS.
                     if let Err(e) = res {
                         return Err(ioerr!(e.kind(), "writing to socket: {}", e));
@@ -723,6 +746,7 @@ impl Connection {
 
                 // process a reply from the remote server.
                 res = self.reader.next() => {
+                    log::trace!("XXX reader.next");
                     // Remap None (end of stream) to EOF.
                     let res = res.unwrap_or_else(|| Err(ioerr!(UnexpectedEof, "Connection closed")));
 
@@ -750,6 +774,7 @@ impl Connection {
                                     return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short()));
                                 },
                                 Some(ConnItem::Check(art)) => {
+                                    log::trace!("Connection::feed: CHECK response {}", resp.short());
                                     match resp.code {
                                         238 => {
                                             self.send_queue.push_back(ConnItem::Takethis(art));
@@ -766,10 +791,10 @@ impl Connection {
                                     }
                                 },
                                 Some(ConnItem::Takethis(art)) => {
+                                    log::trace!("Connection::feed: TAKETHIS response {}", resp.short());
                                     match resp.code {
                                         239 => {
                                             self.stats.art_accepted(art.size);
-                                            self.send_queue.push_back(ConnItem::Takethis(art));
                                         },
                                         431 => {
                                             // this is an invalid TAKETHIS reply!
@@ -801,10 +826,12 @@ impl Connection {
     async fn transmit_item(&mut self, item: ConnItem) -> io::Result<()> {
         match item {
             ConnItem::Check(art) => {
+                log::trace!("Connection::transmit_item: CHECK {}", art.msgid);
                 let line = format!("CHECK {}\r\n", art.msgid);
                 Pin::new(&mut self.writer).start_send(line.into())
             },
             ConnItem::Takethis(art) => {
+                log::trace!("Connection::transmit_item: TAKETHIS {}", art.msgid);
                 let tmpbuf = Buffer::new();
                 let buffer = match self.spool.read(art.location, ArtPart::Article, tmpbuf).await {
                     Ok(buf) => buf,
