@@ -33,13 +33,20 @@ pub enum ArtPart {
     Stat,
 }
 
+/// Returned by `read`.
+pub struct SpoolArt {
+    pub data:   Buffer,
+    pub header_size:    u32,
+    pub body_size:      Option<u32>,
+}
+
 /// Trait implemented by all spool backends.
 pub trait SpoolBackend: Send + Sync {
     /// Get the type. E.g. Backend::Diablo.
     fn get_type(&self) -> Backend;
 
-    /// Read one article from the spool.
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer>;
+    /// Read one article and metadata from the spool.
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<SpoolArt>;
 
     /// Write an article to the spool.
     fn write(&self, headers: Buffer, body: Buffer) -> io::Result<ArtLoc>;
@@ -418,6 +425,10 @@ impl Spool {
     }
 
     pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer> {
+        self.read_art(art_loc, part, buffer).await.map(|art| art.data)
+    }
+
+    pub async fn read_art(&self, art_loc: ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<SpoolArt> {
         let inner = self.inner.clone();
         self.pool
             .spawn_fn(move || {

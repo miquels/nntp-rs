@@ -158,8 +158,8 @@ pub struct NewsPeer {
     pub maxstream:          u32,
     pub nobatch:            bool,
     pub maxqueue:           u32,
-    pub headfeed:           bool,
-    pub genlines:           bool,
+    pub send_headfeed:      bool,
+    pub accept_headfeed:    bool,
     pub preservebytes:      bool,
 
     /// non-config items.
@@ -185,10 +185,16 @@ impl NewsPeer {
         path: &[&str],
         newsgroups: &mut MatchList,
         dist: Option<&Vec<&str>>,
+        headonly: bool,
     ) -> bool
     {
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
+            return false;
+        }
+
+        // don't send headers-only articles to normal peers.
+        if headonly && !self.send_headfeed {
             return false;
         }
 

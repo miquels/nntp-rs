@@ -135,7 +135,7 @@ pub async fn nntp_connect(
             let connect_msg = resp.short().to_string();
 
             if cmd != "" {
-                // Send MODE STREAM.
+                // Send command (e.g. MODE STREAM).
                 log::trace!(">> {}", cmd);
                 let resp = codec
                     .command(cmd)
@@ -145,8 +145,9 @@ pub async fn nntp_connect(
                 if resp.code != respcode {
                     Err(ioerr!(
                         InvalidData,
-                        "{}: MODE STREAM response {}, expected {}",
+                        "{}: {} response {}, expected {}",
                         addr,
+                        cmd,
                         resp.code,
                         respcode,
                     ))?;

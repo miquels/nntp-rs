@@ -11,7 +11,7 @@ use std::os::unix::fs::FileExt;
 use libc;
 use parking_lot::Mutex;
 
-use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolBackend, SpoolDef};
+use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolArt, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
 use crate::util::Buffer;
 use crate::util::UnixTime;
@@ -231,8 +231,9 @@ impl DSpool {
                 "unsupported store type",
             ));
         }
-        if dh.arthdr_len > dh.art_len {
-            log::warn!("read({:?}): arthdr_len > art_len", dh);
+        let linesep_sz = 1 + (dh.store_type != 1) as u32;
+        if dh.arthdr_len + linesep_sz > dh.art_len {
+            log::warn!("read({:?}): arthdr_len + line-seperator > art_len", dh);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid art_len or arthdr_len",
@@ -259,21 +260,32 @@ impl DSpool {
 
     // Read an article.
     // SpoolBackend::read() forwards to this method.
-    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buffer: Buffer) -> io::Result<Buffer> {
+    fn do_read(&self, art_loc: &ArtLoc, part: ArtPart, mut buffer: Buffer) -> io::Result<SpoolArt> {
         let (head, loc, mut file) = self.open(art_loc, &part)?;
 
+        // Body offset.
+        let linesep_sz = 1 + (head.store_type != 1) as u32; // LF or CRLF.
+        let body_off = head.arthdr_len + linesep_sz;
+
+        // If there is a body, it's at least DOT LF or DOT CRLF
+        let mut body_size = None;
+        let len = head.art_len - body_off;
+        if len >= 1 + linesep_sz {
+            // remove final .\r\n from the size.
+            body_size = Some(len - 1 - linesep_sz);
+        }
+
         let (start, len) = match part {
-            ArtPart::Stat => return Ok(Buffer::new()),
+            ArtPart::Stat => {
+                return Ok(SpoolArt{
+                    data: buffer,
+                    header_size: head.arthdr_len,
+                    body_size,
+                });
+            },
             ArtPart::Head => (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len),
             ArtPart::Article => (loc.pos + DARTHEAD_SIZE as u32, head.art_len),
-            ArtPart::Body => {
-                let body_off = if head.store_type == 1 {
-                    head.arthdr_len + 1
-                } else {
-                    head.arthdr_len + 2
-                };
-                (loc.pos + DARTHEAD_SIZE as u32 + body_off, head.art_len - body_off)
-            },
+            ArtPart::Body => (loc.pos + DARTHEAD_SIZE as u32 + body_off, head.art_len - body_off),
         };
         file.seek(SeekFrom::Start(start as u64))?;
 
@@ -285,7 +297,28 @@ impl DSpool {
         } else {
             buffer.read_exact(file, len as usize)?;
         }
-        Ok(buffer)
+
+        match part {
+            ArtPart::Article|ArtPart::Body => {
+                if body_off == head.art_len {
+                    // This is a header-only article. Those are
+                    // stored without the final DOT CRLF. Add it.
+                    buffer.push_str(".\r\n");
+                }
+                // Final check, what we have MUST end in \r\n.\r\n,
+                // a lot of things depend on it.
+                if !buffer.ends_with(b"\r\n.\r\n") {
+                    return Err(ioerr!(InvalidData, "article corrupt on disk: {:?}", art_loc));
+                }
+            },
+            _ => {},
+        }
+
+        Ok(SpoolArt{
+            data: buffer,
+            header_size: head.arthdr_len,
+            body_size,
+        })
     }
 
     // Finds the most recently modified spoolfile in the directory.
@@ -530,7 +563,7 @@ impl SpoolBackend for DSpool {
         Backend::Diablo
     }
 
-    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer> {
+    fn read(&self, art_loc: &ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<SpoolArt> {
         self.do_read(art_loc, part, buffer)
     }
 

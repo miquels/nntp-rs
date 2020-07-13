@@ -202,6 +202,8 @@ impl SessionStats {
     }
 
     pub fn art_error(&mut self, art: &Article, e: &ArtError) {
+        log::trace!("art_error: {}: {:?}", art.msgid, e);
+
         #[rustfmt::skip]
         let rej = match e {
             &ArtError::PostDuplicate      => Stats::RejPosDup,
@@ -211,6 +213,7 @@ impl SessionStats {
             &ArtError::NotInActive        => Stats::RejNotInActv,
             &ArtError::TooOld             => Stats::RejTooOld,
             &ArtError::HdrOnlyNoBytes     => Stats::RejNoBytes,
+            &ArtError::HdrOnlyWithBody    => Stats::RejTooBig,
             &ArtError::GroupFilter        => Stats::RejGrpFilter,
             &ArtError::IncomingFilter     => Stats::RejIncFilter,
             &ArtError::InternalSpamFilter => Stats::RejIntSpamFilter,

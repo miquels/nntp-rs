@@ -13,6 +13,8 @@ pub enum ArtError {
     TooOld,
     /// header-only feed article is missing Bytes: header.
     HdrOnlyNoBytes,
+    /// header-only feed article has a body.
+    HdrOnlyWithBody,
     /// matched "filter" in dnewsfeeds entry
     GroupFilter,
     /// matched IFILTER label

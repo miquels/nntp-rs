@@ -399,8 +399,9 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "nobatch" => peer.nobatch = parse_bool(words)?,
         "maxqueue" => peer.maxqueue = parse_num::<u32>(words)?,
         "maxqueuefile" => peer.maxqueue = parse_num::<u32>(words)?,
-        "headfeed" => peer.headfeed = parse_bool(words)?,
-        "genlines" => peer.genlines = parse_bool(words)?,
+        "headfeed" => peer.send_headfeed = parse_bool(words)?,
+        "send-headfeed" => peer.send_headfeed = parse_bool(words)?,
+        "accept-headfeed" => peer.accept_headfeed = parse_bool(words)?,
         "preservebytes" => peer.preservebytes = parse_bool(words)?,
 
         // we do not support this, fatal.
@@ -438,6 +439,7 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "queueskip"|
         "delayfeed"|
         "delayinfeed"|
+        "genlines"|
         "setqos"|
         "settos" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
 

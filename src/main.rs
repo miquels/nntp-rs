@@ -119,6 +119,9 @@ pub struct TestArticleOpts {
     #[structopt(short, long)]
     /// Port to use (default: 119)
     pub port:     Option<u16>,
+    #[structopt(short, long)]
+    /// Use MODE HEADFEED
+    pub headfeed: bool,
     /// Server to connect to
     pub hostname: String,
 }
@@ -365,7 +368,7 @@ async fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> Result<()> 
 
     // find it
     let buffer = util::Buffer::new();
-    let mut buf = spool
+    let mut data = spool
         .read(loc, part, buffer)
         .await
         .map_err(|e| ioerr!(e.kind(), "spool_read {}: {}", opts.msgid, e))?;
@@ -374,10 +377,10 @@ async fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> Result<()> 
     use std::io::Write;
     if opts.raw {
         // wire-format
-        io::stdout().write_all(&buf[..])?;
+        io::stdout().write_all(&data)?;
     } else {
         // translate from on-the-wire format to normal format.
-        for line in buf.split_mut(|&b| b == b'\n') {
+        for line in data.split_mut(|&b| b == b'\n') {
             if line.ends_with(b"\r") {
                 line[line.len() - 1] = b'\n';
             }
@@ -399,8 +402,13 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     dns::init_resolver().await?;
 
     let port = opts.port.unwrap_or(119);
+    let (cmd, code) = if opts.headfeed {
+        ("MODE HEADFEED", 250)
+    } else {
+        ("MODE STREAM", 203)
+    };
     let (mut codec, _, welcome) =
-        nntp_client::nntp_connect(&opts.hostname, port, "MODE STREAM", 203, None).await?;
+        nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None).await?;
     println!("<< {}", welcome);
 
     let msgid = nntp_client::message_id(None);
@@ -414,6 +422,9 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     write!(buf, "Newsgroups: {}\r\n", opts.group)?;
     write!(buf, "Distribution: local\r\n")?;
     write!(buf, "Message-Id: <{}>\r\n", msgid)?;
+    if opts.headfeed {
+        write!(buf, "Bytes: 17\r\n")?;
+    }
     write!(buf, "Date: {}\r\n", util::UnixTime::now().to_rfc2822())?;
     write!(buf, "From: test@{}\r\n", hostname)?;
     write!(
@@ -421,7 +432,10 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
         "Subject: {}\r\n",
         opts.subject.unwrap_or(format!("test {}", msgid))
     )?;
-    write!(buf, "\r\ntest, ignore.\r\n.")?;
+    if !opts.headfeed {
+        write!(buf, "\r\ntest, ignore.")?;
+    }
+    write!(buf, "\r\n.")?;
 
     println!(">> {}", cmd);
     let resp = codec.command(buf).await?;

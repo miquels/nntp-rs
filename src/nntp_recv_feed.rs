@@ -101,11 +101,13 @@ impl NntpReceiver {
         // parse article.
         let (headers, body, wantpeers) = match self.process_headers(&mut art) {
             Err(e) => {
+                self.stats.art_error(&art, &e);
                 return match e {
                     // article was mangled on the way. do not store the message-id
                     // in the history file, another peer may send a correct version.
                     ArtError::TooSmall |
                     ArtError::HdrOnlyNoBytes |
+                    ArtError::HdrOnlyWithBody |
                     ArtError::NoHdrEnd |
                     ArtError::MsgIdMismatch |
                     ArtError::NoPath => {
@@ -173,7 +175,7 @@ impl NntpReceiver {
         let he = HistEnt {
             status:    HistStatus::Present,
             time:      recv_time,
-            head_only: false,
+            head_only: self.headfeed,
             location:  Some(artloc.clone()),
         };
 
@@ -215,6 +217,13 @@ impl NntpReceiver {
             return Err(ArtError::TooSmall);
         }
 
+        // Check the maximum article size.
+        if let Some(maxsize) = self.config.server.maxartsize {
+            if art.data.len() as u64 > maxsize {
+                return Err(ArtError::TooBig);
+            }
+        }
+
         // Make sure the message-id we got from TAKETHIS is valid.
         // We cannot check this in advance; TAKETHIS must read the whole article first.
         if !commands::is_msgid(&art.msgid) {
@@ -231,13 +240,28 @@ impl NntpReceiver {
             Some(Err(e)) => return Err(e),
             Some(Ok(_)) => {},
         }
-        let (mut headers, body) = parser.into_headers(buffer);
+        let (mut headers, mut body) = parser.into_headers(buffer);
+
+        // Header-only feed cannot have a body.
+        if self.headfeed {
+            // "\r\n.\r\n" == 5 bytes.
+            if body.len() > 5 {
+                return Err(ArtError::HdrOnlyWithBody);
+            }
+            // truncate to just "\r\n".
+            body.truncate(2);
+        }
 
         let mut pathelems = headers.path().ok_or(ArtError::NoPath)?;
         art.pathhost = Some(pathelems[0].to_string());
 
         // some more header checks.
         {
+            if self.headfeed {
+                let bytes = headers.get_str(HeaderName::Bytes).ok_or(ArtError::HdrOnlyNoBytes)?;
+                bytes.parse::<u64>().map_err(|_| ArtError::HdrOnlyNoBytes)?;
+            }
+
             let msgid_ok = match headers.message_id() {
                 None => false,
                 Some(msgid) => msgid == &art.msgid,
@@ -280,6 +304,7 @@ impl NntpReceiver {
                 &[],
                 &mut grouplist,
                 distribution.as_ref(),
+                false,
             ) {
                 return Err(ArtError::IncomingFilter);
             }
@@ -296,6 +321,7 @@ impl NntpReceiver {
                 &pathelems,
                 &mut grouplist,
                 distribution.as_ref(),
+                self.headfeed,
             ) {
                 v.push(idx as u32);
             }
@@ -343,12 +369,16 @@ impl NntpReceiver {
         let loc = match result {
             None => return Ok(NntpResult::text("430 Not found")),
             Some(he) => {
+                if he.head_only && part != ArtPart::Head {
+                    return Ok(NntpResult::text("430 Not found"));
+                }
                 match (he.status, he.location) {
                     (HistStatus::Present, Some(loc)) => loc,
                     _ => return Ok(NntpResult::text(&format!("430 {:?}", he.status))),
                 }
             },
         };
+
         match self.server.spool.read(loc, part, buf).await {
             Ok(mut buf) => {
                 if part == ArtPart::Head {

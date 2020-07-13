@@ -19,11 +19,12 @@ use tokio::task;
 use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::TxSessionStats;
+use crate::article::{HeaderName, HeadersParser};
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::server;
-use crate::spool::{ArtLoc, ArtPart, Spool};
+use crate::spool::{ArtLoc, ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
 // Size of the command channel for the peerfeed.
@@ -231,11 +232,16 @@ impl MasterFeed {
         // Forward to all peerfeeds.
         for (name, peer) in self.peerfeeds.iter_mut() {
             if let Err(e) = peer.send(item.clone()).await {
-                log::error!(
-                    "MasterFeed::broadcast: internal error: send to PeerFeed({}): {}",
-                    name,
-                    e
-                );
+                match item {
+                    PeerFeedItem::ExitNow => {},
+                    _ => {
+                        log::error!(
+                            "MasterFeed::broadcast: internal error: send to PeerFeed({}): {}",
+                            name,
+                            e
+                        );
+                    },
+                }
             }
         }
 
@@ -267,7 +273,6 @@ struct Peer {
     nobatch:       bool,
     maxqueue:      u32,
     headfeed:      bool,
-    genlines:      bool,
     preservebytes: bool,
 }
 
@@ -282,8 +287,7 @@ impl Peer {
             nobatch:       nfpeer.nobatch,
             maxqueue:      nfpeer.maxqueue,
             maxstream:     nfpeer.maxstream,
-            headfeed:      nfpeer.headfeed,
-            genlines:      nfpeer.genlines,
+            headfeed:      nfpeer.send_headfeed,
             preservebytes: nfpeer.preservebytes,
         }
     }
@@ -393,7 +397,11 @@ impl PeerFeed {
                 PeerFeedItem::Article(art) => {
                     // if we have no connections, or less than maxconn, create a connection here.
                     if self.num_conns < self.newspeer.maxparallel {
-                        self.add_connection().await;
+                        let qlen = self.tx_queue.len();
+                        // TODO: use average queue length.
+                        if self.num_conns == 0 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
+                            self.add_connection().await;
+                        }
                     }
 
                     loop {
@@ -452,6 +460,8 @@ impl PeerFeed {
 
     async fn add_connection(&mut self) {
         let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
+
+        // TODO: retry loop, with exponential backoff.
         let newspeer = self.newspeer.clone();
         let mut tx_chan = self.tx_chan.clone();
         let rx_queue = self.rx_queue.clone();
@@ -479,7 +489,8 @@ impl PeerFeed {
                     drop(tx_chan);
                     conn.run().await;
                 },
-                Err(_) => {
+                Err(e) => {
+                    log::warn!("connection {}", e);
                     // notify PeerFeed that we failed.
                     let _ = tx_chan.send(PeerFeedItem::ConnExit(Vec::new())).await;
                 },
@@ -530,6 +541,8 @@ struct Connection {
     broadcast:  broadcast::Receiver<PeerFeedItem>,
     // used to wake up the fill-the-queue-from-the-backlog task.
     tx_empty:   mpsc::Sender<()>,
+    // do we need to rewrite the headers?
+    rewrite:    bool,
 }
 
 impl Connection {
@@ -560,6 +573,7 @@ impl Connection {
                     let (codec, ipaddr, connect_msg) = conn.map_err(|e| {
                         ioerr!(e.kind(), "{}:{}: {}", newspeer.label, id, e)
                     })?;
+                    let rewrite = newspeer.headfeed && !newspeer.preservebytes;
 
                     // Build and return a new Connection struct.
                     let (reader, writer) = codec.split();
@@ -578,6 +592,7 @@ impl Connection {
                         rx_queue,
                         broadcast: broadcast_rx,
                         tx_empty,
+                        rewrite,
                     };
 
                     // Initialize stats logger and log connect message.
@@ -632,11 +647,16 @@ impl Connection {
 
     // Connect to remote peer.
     async fn connect(newspeer: &Peer) -> io::Result<(NntpCodec, IpAddr, String)> {
+        let (cmd, code) = if newspeer.headfeed {
+            ("MODE HEADFEED", 250)
+        } else {
+            ("MODE STREAM", 203)
+        };
         nntp_client::nntp_connect(
             &newspeer.outhost,
             newspeer.port,
-            "MODE STREAM",
-            203,
+            cmd,
+            code,
             newspeer.bindaddress.clone(),
         )
         .await
@@ -649,6 +669,11 @@ impl Connection {
         if maxstream == 0 {
             maxstream = 1;
         }
+        let part = if self.newspeer.headfeed {
+            ArtPart::Head
+        } else {
+            ArtPart::Article
+        };
 
         loop {
 
@@ -664,7 +689,7 @@ impl Connection {
                         item,
                     );
                     self.recv_queue.push_back(item.clone());
-                    self.transmit_item(item).await?;
+                    self.transmit_item(item, part).await?;
                     xmit_busy = true;
                 }
             }
@@ -892,7 +917,7 @@ impl Connection {
     }
 
     // Put the ConnItem in the Sink.
-    async fn transmit_item(&mut self, item: ConnItem) -> io::Result<()> {
+    async fn transmit_item(&mut self, item: ConnItem, part: ArtPart) -> io::Result<()> {
         match item {
             ConnItem::Check(art) => {
                 log::trace!("Connection::transmit_item: CHECK {}", art.msgid);
@@ -902,8 +927,8 @@ impl Connection {
             ConnItem::Takethis(art) => {
                 log::trace!("Connection::transmit_item: TAKETHIS {}", art.msgid);
                 let tmpbuf = Buffer::new();
-                let buffer = match self.spool.read(art.location, ArtPart::Article, tmpbuf).await {
-                    Ok(buf) => buf,
+                let mut sp_art = match self.spool.read_art(art.location, part, tmpbuf).await {
+                    Ok(sp_art) => sp_art,
                     Err(e) => {
                         if e.kind() == io::ErrorKind::NotFound {
                             self.stats.art_notfound();
@@ -912,13 +937,46 @@ impl Connection {
                         return Err(e);
                     },
                 };
+                if part == ArtPart::Head {
+                    sp_art.data.push_str("\r\n.\r\n");
+                }
                 let line = format!("TAKETHIS {}\r\n", art.msgid);
                 Pin::new(&mut self.writer).start_send(line.into())?;
-                Pin::new(&mut self.writer).start_send(buffer)
+                if self.rewrite {
+                    let (head, body) = self.rewrite_headers(sp_art);
+                    Pin::new(&mut self.writer).start_send(head)?;
+                    Pin::new(&mut self.writer).start_send(body)
+                } else {
+                    Pin::new(&mut self.writer).start_send(sp_art.data)
+                }
             },
             ConnItem::Quit => Pin::new(&mut self.writer).start_send("QUIT\r\n".into()),
         }
     }
+
+    fn rewrite_headers(&self, sp_art: SpoolArt) -> (Buffer, Buffer) {
+        let mut parser = HeadersParser::new();
+        match parser.parse(&sp_art.data, false, true) {
+            Some(Ok(_)) => {},
+            _ => {
+                // Never happens.
+                return (sp_art.data, Buffer::new());
+            },
+        }
+        let SpoolArt { body_size, data, .. } = sp_art;
+        let (mut headers, body) = parser.into_headers(data);
+
+        if self.newspeer.headfeed && !self.newspeer.preservebytes {
+            if let Some(size) = body_size {
+                let b = size.to_string().into_bytes();
+                headers.update(HeaderName::Bytes, &b);
+            }
+        }
+        let mut hb = Buffer::new();
+        headers.header_bytes(&mut hb);
+        (hb, body)
+    }
+
 }
 
 // Item in the Connection queue.

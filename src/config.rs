@@ -66,6 +66,8 @@ pub struct Server {
     pub gid:            Option<users::gid_t>,
     #[serde(default)]
     pub log_panics:     bool,
+    #[serde(default,deserialize_with = "util::option_deserialize_size")]
+    pub maxartsize:     Option<u64>,
 }
 
 /// Paths.
@@ -156,6 +158,12 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
 
     if cfg.server.hostname == "" {
         cfg.server.hostname = util::hostname();
+    }
+
+    match cfg.server.maxartsize {
+        None => cfg.server.maxartsize = Some(10_000_000),
+        Some(0) => cfg.server.maxartsize = None,
+        _ => {},
     }
 
     match cfg.server.runtime.as_str() {

@@ -28,6 +28,7 @@ pub struct NntpReceiver {
     pub(crate) outfeed:         mpsc::Sender<FeedArticle>,
     pub(crate) incoming_logger: logger::Incoming,
     pub(crate) peer_idx:        usize,
+    pub(crate) headfeed:        bool,
     pub(crate) active:          bool,
     pub(crate) stats:           SessionStats,
     pub(crate) quit:            bool,
@@ -91,6 +92,7 @@ impl NntpReceiver {
             peer_idx: 0,
             active: false,
             stats: stats,
+            headfeed: false,
             quit: false,
         }
     }
@@ -194,7 +196,7 @@ impl NntpReceiver {
             self.parser.add_cap(Capb::Streaming);
             200
         };
-        if peer.headfeed {
+        if peer.accept_headfeed {
             self.parser.add_cap(Capb::ModeHeadfeed);
         }
         let msg = format!("{} {} hello {}", code, self.config.server.hostname, peer.label);
@@ -308,7 +310,7 @@ impl NntpReceiver {
                     _ => unreachable!(),
                 };
                 let buf = Buffer::from(format!("{} 0 {}\r\n", code, args[0]));
-                return self.read_article(part, args[0], buf).await;
+                return self.read_article(part, args[0], buf).await
             },
             Cmd::Capabilities => {
                 if args.len() > 0 && !self.parser.is_keyword(args[0]) {
@@ -413,6 +415,10 @@ impl NntpReceiver {
             },
             Cmd::Mode_Stream => {
                 return Ok(NntpResult::text("203 Streaming permitted"));
+            },
+            Cmd::Mode_Headfeed => {
+                self.headfeed = true;
+                return Ok(NntpResult::text("250 Mode command OK"));
             },
             Cmd::NewGroups => {
                 return Ok(NntpResult::text("503 Not maintaining an active file"));
