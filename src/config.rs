@@ -155,10 +155,7 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     };
 
     if cfg.server.hostname == "" {
-        cfg.server.hostname = match util::hostname() {
-            Some(h) => h,
-            None => "unconfigured".to_string(),
-        }
+        cfg.server.hostname = util::hostname();
     }
 
     match cfg.server.runtime.as_str() {

@@ -11,7 +11,7 @@ use crate::dns;
 use crate::nntp_codec::NntpCodec;
 use crate::util::{self, hostname};
 
-static HOSTNAME: Lazy<String> = Lazy::new(|| hostname().unwrap_or(String::from("unconfigured")));
+static HOSTNAME: Lazy<String> = Lazy::new(|| hostname());
 
 /// Connect to remote server.
 ///

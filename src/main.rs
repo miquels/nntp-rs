@@ -410,7 +410,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     let cmd = format!("TAKETHIS <{}>", msgid);
 
     write!(buf, "{}\r\n", cmd)?;
-    write!(buf, "Path: {}!test!not-for-mail\r\n", hostname)?;
+    write!(buf, "Path: test!not-for-mail\r\n")?;
     write!(buf, "Newsgroups: {}\r\n", opts.group)?;
     write!(buf, "Distribution: local\r\n")?;
     write!(buf, "Message-Id: <{}>\r\n", msgid)?;
