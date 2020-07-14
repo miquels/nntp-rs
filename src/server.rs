@@ -20,8 +20,8 @@ use crate::dns::HostCache;
 use crate::history::History;
 use crate::logger;
 use crate::nntp_codec::{self, NntpCodec};
-use crate::nntp_recv::NntpReceiver;
 use crate::nntp_send::{FeedArticle, MasterFeed};
+use crate::nntp_server::NntpServer;
 use crate::spool::Spool;
 use crate::util::TcpListenerSets;
 
@@ -255,7 +255,7 @@ impl Server {
             };
 
             // build and run an nntp session.
-            let session = NntpReceiver::new(peer, codec, self.clone(), stats);
+            let session = NntpServer::new(peer, codec, self.clone(), stats);
             task::spawn(session.run());
         }
     }
