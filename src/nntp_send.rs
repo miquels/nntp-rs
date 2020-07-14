@@ -6,8 +6,8 @@ use std::fmt;
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
 use smartstring::alias::String as SmartString;
@@ -15,6 +15,7 @@ use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
+use tokio::time::delay_for;
 
 use crate::bus::{self, Notification};
 use crate::config;
@@ -303,7 +304,7 @@ struct PeerFeed {
     label: SmartString,
 
     // Unique id for every connection.
-    id_counter: AtomicU64,
+    next_id: u64,
 
     // The relevant parts of newsfeed::NewsPeer.
     newspeer: Arc<Peer>,
@@ -355,7 +356,7 @@ impl PeerFeed {
 
         PeerFeed {
             label: peer.label.clone(),
-            id_counter: AtomicU64::new(1),
+            next_id: 1,
             rx_chan,
             tx_chan,
             rx_queue,
@@ -459,7 +460,6 @@ impl PeerFeed {
     }
 
     async fn add_connection(&mut self) {
-        let id = self.id_counter.fetch_add(1, Ordering::SeqCst);
 
         // TODO: retry loop, with exponential backoff.
         let newspeer = self.newspeer.clone();
@@ -468,7 +468,9 @@ impl PeerFeed {
         let spool = self.spool.clone();
         let broadcast = self.broadcast.clone();
         let tx_empty = self.tx_empty.clone();
+        let id = self.next_id;
 
+        self.next_id += 1;
         self.num_conns += 1;
 
         // We spawn a new Connection task.
@@ -547,6 +549,10 @@ struct Connection {
 
 impl Connection {
     // Create a new connection.
+    //
+    // If we fail, we delay bit then try again. This function
+    // only returns when we succeed or when a Reconfigure/Exit
+    // notification was received.
     async fn new(
         id: u64,
         newspeer: Arc<Peer>,
@@ -558,57 +564,70 @@ impl Connection {
     ) -> io::Result<Connection>
     {
         let mut broadcast_rx = broadcast.subscribe();
+        let mut fail_delay = 1;
 
-        log::info!(
-            "outfeed: {}:{}: connecting to {}",
-            newspeer.label,
-            id,
-            newspeer.outhost
-        );
-
-        // Start connecting, but also listen to broadcasts while connecting.
         loop {
-            tokio::select! {
-                conn = Connection::connect(newspeer.as_ref()) => {
-                    let (codec, ipaddr, connect_msg) = conn.map_err(|e| {
-                        ioerr!(e.kind(), "{}:{}: {}", newspeer.label, id, e)
-                    })?;
-                    let rewrite = newspeer.headfeed && !newspeer.preservebytes;
+            log::info!(
+                "outfeed: {}:{}: connecting to {}",
+                newspeer.label,
+                id,
+                newspeer.outhost
+            );
+            let conn_fut = Connection::connect(newspeer.clone(), id, fail_delay);
+            tokio::pin!(conn_fut);
 
-                    // Build and return a new Connection struct.
-                    let (reader, writer) = codec.split();
-                    let mut conn = Connection {
-                        id,
-                        ipaddr,
-                        newspeer,
-                        reader,
-                        writer,
-                        send_queue: VecDeque::new(),
-                        recv_queue: VecDeque::new(),
-                        dropped: Vec::new(),
-                        stats: TxSessionStats::default(),
-                        spool,
-                        tx_chan,
-                        rx_queue,
-                        broadcast: broadcast_rx,
-                        tx_empty,
-                        rewrite,
-                    };
+            // exponential backoff, max delay 256 secs.
+            fail_delay = std::cmp::min(fail_delay * 2, 256);
 
-                    // Initialize stats logger and log connect message.
-                    conn.stats.on_connect(&conn.newspeer.label, id, &conn.newspeer.outhost, conn.ipaddr,  &connect_msg);
-                    return Ok(conn);
-                }
-                item = broadcast_rx.recv() => {
-                    // if any of these events happen, cancel the connect.
-                    match item {
-                        Ok(PeerFeedItem::Reconfigure) |
-                        Ok(PeerFeedItem::ExitGraceful) |
-                        Ok(PeerFeedItem::ExitNow) |
-                        Err(_) => {
-                            return Err(ioerr!(ConnectionAborted, "{}:{}: connection cancelled", newspeer.label, id));
-                        },
-                        _ => {},
+            // Start connecting, but also listen to broadcasts while connecting.
+            loop {
+                tokio::select! {
+                    conn = &mut conn_fut => {
+                        let (codec, ipaddr, connect_msg) = match conn {
+                            Ok(c) => c,
+                            Err(e) => {
+                                // break out of the inner loop and retry.
+                                log::warn!("{}:{}: {}", newspeer.label, id, e);
+                                break;
+                            },
+                        };
+                        let rewrite = newspeer.headfeed && !newspeer.preservebytes;
+
+                        // Build and return a new Connection struct.
+                        let (reader, writer) = codec.split();
+                        let mut conn = Connection {
+                            id,
+                            ipaddr,
+                            newspeer,
+                            reader,
+                            writer,
+                            send_queue: VecDeque::new(),
+                            recv_queue: VecDeque::new(),
+                            dropped: Vec::new(),
+                            stats: TxSessionStats::default(),
+                            spool,
+                            tx_chan,
+                            rx_queue,
+                            broadcast: broadcast_rx,
+                            tx_empty,
+                            rewrite,
+                        };
+
+                        // Initialize stats logger and log connect message.
+                        conn.stats.on_connect(&conn.newspeer.label, id, &conn.newspeer.outhost, conn.ipaddr,  &connect_msg);
+                        return Ok(conn);
+                    }
+                    item = broadcast_rx.recv() => {
+                        // if any of these events happen, cancel the connect.
+                        match item {
+                            Ok(PeerFeedItem::Reconfigure) |
+                            Ok(PeerFeedItem::ExitGraceful) |
+                            Ok(PeerFeedItem::ExitNow) |
+                            Err(_) => {
+                                return Err(ioerr!(ConnectionAborted, "{}:{}: connection cancelled", newspeer.label, id));
+                            },
+                            _ => {},
+                        }
                     }
                 }
             }
@@ -621,6 +640,9 @@ impl Connection {
             // call feeder loop.
             if let Err(e) = self.feed().await {
                 log::error!("outfeed: {}:{}: fatal: {}", self.newspeer.label, self.id, e);
+                // We got an error, delay a bit so the main loop doesn't
+                // reconnect right away. We should have a better strategy.
+                delay_for(Duration::new(1, 0)).await;
             }
 
             // log stats.
@@ -646,20 +668,28 @@ impl Connection {
     }
 
     // Connect to remote peer.
-    async fn connect(newspeer: &Peer) -> io::Result<(NntpCodec, IpAddr, String)> {
+    async fn connect(newspeer: Arc<Peer>, id: u64, fail_delay: u64) -> io::Result<(NntpCodec, IpAddr, String)> {
         let (cmd, code) = if newspeer.headfeed {
             ("MODE HEADFEED", 250)
         } else {
             ("MODE STREAM", 203)
         };
-        nntp_client::nntp_connect(
+        let res = nntp_client::nntp_connect(
             &newspeer.outhost,
             newspeer.port,
             cmd,
             code,
             newspeer.bindaddress.clone(),
         )
-        .await
+        .await;
+        match res {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                log::warn!("{}:{}: {}", newspeer.label, id, e);
+                delay_for(Duration::new(fail_delay, 0)).await;
+                Err(e)
+            },
+        }
     }
 
     // Feeder loop.
