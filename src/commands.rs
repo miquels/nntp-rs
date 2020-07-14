@@ -138,7 +138,7 @@ fn lowercase<'a>(s: &str, buf: &'a mut [u8]) -> &'a str {
             idx += 1;
         }
     }
-    unsafe { str::from_utf8_unchecked(&buf[..idx]) }
+    str::from_utf8(&buf[..idx]).unwrap()
 }
 
 fn put_str(bytes_mut: &mut Buffer, s: impl AsRef<str>) {

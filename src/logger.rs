@@ -14,7 +14,7 @@ use crate::article::Article;
 use crate::config::{self, Config};
 use crate::errors::*;
 use crate::newsfeeds::NewsPeer;
-use crate::util::UnixTime;
+use crate::util::{self, UnixTime};
 
 static INCOMING_LOG: Lazy<RwLock<Option<Incoming>>> = Lazy::new(|| RwLock::new(None));
 static LOGGER: OnceCell<Logger> = OnceCell::new();
@@ -266,7 +266,7 @@ impl LogDest {
                     facility: syslog::Facility::LOG_NEWS,
                     hostname: None,
                     process:  "nntp-rs-server".to_string(),
-                    pid:      unsafe { libc::getpid() },
+                    pid:      util::getpid() as i32,
                 };
                 match syslog::unix(formatter) {
                     Err(_) => {},

@@ -1,20 +1,19 @@
+use std::convert::TryInto;
 use std::fs;
 use std::io;
 use std::io::Error as IoError;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::mem;
 use std::path::{Path, PathBuf};
 
 use std::fmt::Debug;
 use std::os::unix::fs::FileExt;
 
-use libc;
 use parking_lot::Mutex;
+use typic::{self, transmute::StableTransmuteInto, stability::StableABI};
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolArt, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
-use crate::util::Buffer;
-use crate::util::UnixTime;
+use crate::util::{self, Buffer, UnixTime};
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT: u32 = 600;
@@ -55,8 +54,8 @@ struct Writer {
 //
 // a complete article ends in CRLF DOT CRLF
 //
-#[derive(Debug, Default)]
-#[repr(C)]
+#[typic::repr(C)]
+#[derive(Debug, Default, StableABI)]
 #[rustfmt::skip]
 struct DArtHead {
     magic1:     u8,     // 0xff
@@ -76,6 +75,33 @@ struct DArtHead {
     _unused6:   u8,
 }
 const DARTHEAD_SIZE: usize = 24;
+
+impl DArtHead {
+    pub fn from_bytes(src: [u8; DARTHEAD_SIZE]) -> DArtHead {
+        DArtHead {
+            magic1: src[0],
+            magic2: src[1],
+            version: src[2],
+            head_len: src[3],
+            store_type: src[4],
+            _unused1: src[5],
+            _unused2: src[6],
+            _unused3: src[7],
+            arthdr_len: u32::from_ne_bytes(src[8..12].try_into().unwrap()),
+            art_len: u32::from_ne_bytes(src[12..16].try_into().unwrap()),
+            store_len: u32::from_ne_bytes(src[16..20].try_into().unwrap()),
+            hdr_end: src[20],
+            _unused4: src[21],
+            _unused5: src[22],
+            _unused6: src[23],
+        }
+    }
+
+    pub fn to_bytes(self) -> [u8; DARTHEAD_SIZE] {
+        self.transmute_into()
+    }
+}
+
 
 // article location, this struct is serialized/deserialized
 // in the entry for this article in the history file.
@@ -116,35 +142,17 @@ fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<
             format!("{:?}: short read", path),
         ));
     }
-    Ok(unsafe { mem::transmute(buf) })
+    Ok(DArtHead::from_bytes(buf))
 }
 
-struct ReadAhead {}
-trait ReadAheadTrait {
-    // Optimization: when reading the header of the article, and we
-    // know we're going to read more after that, ask the kernel
-    // to do read-ahead.
-    fn article(_part: &ArtPart, _loc: &DArtLocation, _file: &fs::File) {}
-}
-impl ReadAheadTrait for ReadAhead {
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    fn article(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
-        let size = match part {
-            ArtPart::Stat => 0,
-            ArtPart::Head => 16384,
-            ArtPart::Article | ArtPart::Body => loc.size,
-        };
-        if size > 0 {
-            unsafe {
-                use std::os::unix::io::AsRawFd;
-                libc::posix_fadvise(
-                    file.as_raw_fd(),
-                    loc.pos as libc::off_t,
-                    size as libc::off_t,
-                    libc::POSIX_FADV_WILLNEED,
-                );
-            }
-        }
+fn article_readahead(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
+    let size = match part {
+        ArtPart::Stat => 0,
+        ArtPart::Head => 16384,
+        ArtPart::Article | ArtPart::Body => loc.size,
+    };
+    if size > 0 {
+        util::read_ahead(file, loc.pos.into(), size.into());
     }
 }
 
@@ -160,8 +168,7 @@ impl DSpool {
         let file_reallocint = (file_reallocint / 60) * 60;
         let dir_reallocint = file_reallocint * 6;
 
-        let sv =
-            StatVfs::stat(&cfg.path).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", cfg.path, e)))?;
+        let sv = fs2::statvfs(&cfg.path).map_err(|e| ioerr!(e.kind(), "{}: {}", cfg.path, e))?;
 
         // minfree must be at least 10MB, if not force it.
         let minfree = {
@@ -176,10 +183,10 @@ impl DSpool {
         // if maxsize is not set, take the size of the filesystem.
         // check that it is bigger than minfree.
         let maxsize = {
-            let m = if cfg.maxsize > 0 && cfg.maxsize < sv.b_total {
+            let m = if cfg.maxsize > 0 && cfg.maxsize < sv.total_space() {
                 cfg.maxsize
             } else {
-                sv.b_total
+                 sv.total_space()
             };
             if minfree > m {
                 return Err(io::Error::new(
@@ -214,7 +221,7 @@ impl DSpool {
         path.push(flnm);
         let file = fs::File::open(&path)?;
 
-        ReadAhead::article(&part, &loc, &file);
+        article_readahead(&part, &loc, &file);
         let dh = read_darthead_at(&path, &file, loc.pos as u64)?;
 
         //log::debug!("art header: {:?}", dh);
@@ -474,7 +481,7 @@ impl DSpool {
         ah.arthdr_len = hdr_len as u32;
         ah.art_len = art_len as u32;
         ah.store_len = store_len;
-        let buf: [u8; DARTHEAD_SIZE] = unsafe { mem::transmute(ah) };
+        let buf: [u8; DARTHEAD_SIZE] = ah.to_bytes();
 
         // write header, article, trailing \0.
         fh.write_all(&buf)
@@ -669,42 +676,3 @@ impl<T: Read> Read for CrlfXlat<T> {
     }
 }
 
-// Mini statvfs implementation.
-use std::ffi;
-
-#[allow(dead_code)]
-struct StatVfs {
-    // bytes total
-    b_total: u64,
-    // bytes available
-    b_avail: u64,
-    // bytes in use.
-    b_used:  u64,
-}
-
-impl StatVfs {
-    fn stat(path: impl AsRef<Path>) -> io::Result<StatVfs> {
-        let pathstr = match path.as_ref().to_str() {
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("{:?}: invalid path", path.as_ref()),
-                ))
-            },
-            Some(s) => s,
-        };
-        let cpath = ffi::CString::new(pathstr.as_bytes()).unwrap();
-        let mut sv: libc::statvfs = unsafe { mem::zeroed() };
-        let rc = unsafe { libc::statvfs(cpath.as_ptr(), &mut sv) };
-        if rc != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            let bs = sv.f_frsize;
-            Ok(StatVfs {
-                b_total: bs * (sv.f_blocks - (sv.f_bfree - sv.f_bavail)) as u64,
-                b_avail: bs * sv.f_bavail as u64,
-                b_used:  bs * (sv.f_blocks - sv.f_bfree) as u64,
-            })
-        }
-    }
-}

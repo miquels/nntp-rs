@@ -9,7 +9,7 @@ mod datetime;
 mod de;
 mod dhash;
 mod hashfeed;
-mod hostname;
+mod misc;
 mod mmap;
 mod wildmat;
 mod wildmat_fn;
@@ -23,7 +23,8 @@ pub use self::datetime::*;
 pub use self::de::*;
 pub use self::dhash::*;
 pub use self::hashfeed::*;
-pub use self::hostname::*;
+pub use self::misc::*;
 pub use self::mmap::*;
 pub use self::wildmat::*;
 pub use self::wildmat_fn::*;
+

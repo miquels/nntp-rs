@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs;
 use std::future::Future;
 use std::io;
 use std::io::{Read, Seek, Write};
-use std::mem;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -14,13 +14,13 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use fs2::FileExt as _;
 use parking_lot::Mutex;
+use typic::{self, transmute::StableTransmuteInto, stability::StableABI};
 
-use crate::blocking::{try_read_at, BlockingPool, BlockingType};
+use crate::blocking::{BlockingPool, BlockingType};
 use crate::history::{HistBackend, HistEnt, HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
-use crate::util::DHash;
-use crate::util::{MmapAtomicU32, UnixTime};
+use crate::util::{self, DHash, MmapAtomicU32, UnixTime};
 
 /// Diablo compatible history file.
 #[derive(Debug)]
@@ -53,8 +53,8 @@ struct WFile {
 }
 
 // Header of the history file.
-#[derive(Debug)]
-#[repr(C)]
+#[typic::repr(C)]
+#[derive(Debug, Default, StableABI)]
 struct DHistHead {
     magic:        u32,
     hash_size:    u32,
@@ -68,6 +68,22 @@ const DHISTHEAD_MAGIC: u32 = 0xA1B2C3D4;
 const DHISTHEAD_VERSION2: u16 = 2;
 #[allow(dead_code)]
 const DHISTHEAD_DEADMAGIC: u32 = 0xDEADF5E6;
+
+impl DHistHead {
+    pub fn from_bytes(buf: [u8; DHISTHEAD_SIZE]) -> DHistHead {
+        DHistHead {
+            magic: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            hash_size: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            version: u16::from_ne_bytes(buf[8..10].try_into().unwrap()),
+            histent_size: u16::from_ne_bytes(buf[10..12].try_into().unwrap()),
+            head_size: u16::from_ne_bytes(buf[12..14].try_into().unwrap()),
+            resv: u16::from_ne_bytes(buf[14..16].try_into().unwrap()),
+        }
+    }
+    pub fn to_bytes(self) -> [u8; DHISTHEAD_SIZE] {
+        self.transmute_into()
+    }
+}
 
 impl DHistory {
     /// open existing history database
@@ -112,7 +128,7 @@ impl DHistory {
             head_size:    DHISTHEAD_SIZE as u16,
             resv:         0,
         };
-        let buf: [u8; DHISTHEAD_SIZE] = unsafe { mem::transmute(head) };
+        let buf = head.to_bytes();
         file.write(&buf)?;
 
         // write empty hash table, plus first empty histent.
@@ -412,7 +428,7 @@ impl DHistoryInner {
         let pos = idx * DHISTENT_SIZE as u64 + self.data_offset;
 
         // append to file.
-        let buf: [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
+        let buf = dhe.to_bytes();
         wfile.file.write_at(&buf, pos)?;
         wfile.wpos = pos + DHISTENT_SIZE as u64;
 
@@ -433,7 +449,7 @@ impl DHistoryInner {
         let idx = (pos - self.data_offset) / DHISTENT_SIZE as u64;
 
         // append to file.
-        let buf: [u8; DHISTENT_SIZE] = unsafe { mem::transmute(dhe) };
+        let buf = dhe.to_bytes();
         file.write_all(&buf)?;
 
         // update hash index
@@ -752,8 +768,8 @@ impl DHistoryInner {
 // For other spool types, iter, boffset, bsize are just 10 bytes that
 // can be used for any encoding whatsoever.
 //
-#[derive(Debug, Default)]
-#[repr(C)]
+#[typic::repr(C)]
+#[derive(Debug, Default, StableABI)]
 #[rustfmt::skip]
 struct DHistEnt {
     next:       u32,        // link to next entry
@@ -950,6 +966,28 @@ impl DHistEnt {
             None
         }
     }
+
+    fn from_bytes(buf: [u8; DHISTENT_SIZE]) -> DHistEnt {
+        let hv = DHash {
+            h1: u32::from_ne_bytes(buf[8..12].try_into().unwrap()),
+            h2: u32::from_ne_bytes(buf[12..16].try_into().unwrap()),
+        };
+        DHistEnt {
+            next: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            gmt: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            hv,
+            iter: u16::from_ne_bytes(buf[16..18].try_into().unwrap()),
+            exp: u16::from_ne_bytes(buf[18..20].try_into().unwrap()),
+            boffset: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
+            bsize: u32::from_ne_bytes(buf[24..84].try_into().unwrap()),
+        }
+    }
+
+    fn to_bytes(self) -> [u8; DHISTENT_SIZE] {
+        // https://github.com/jswrenn/typic/issues/11
+        // self.transmute_into()
+        unsafe { std::mem::transmute(self) }
+    }
 }
 
 // helper
@@ -962,7 +1000,7 @@ fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
             format!("read_dhisthead_at({}): short read ({})", pos, n),
         ));
     }
-    Ok(unsafe { mem::transmute(buf) })
+    Ok(DHistHead::from_bytes(buf))
 }
 
 // helper
@@ -989,7 +1027,7 @@ where F: Read {
             format!("read_dhistent: short read: {} bytes", done),
         ));
     }
-    Ok(Some(unsafe { mem::transmute(buf) }))
+    Ok(Some(DHistEnt::from_bytes(buf)))
 }
 
 // helper
@@ -1009,14 +1047,13 @@ fn read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Resu
         };
         return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
     }
-    Ok(unsafe { mem::transmute(buf) })
+    Ok(DHistEnt::from_bytes(buf))
 }
 
 // helper
-#[cfg(target_os = "linux")]
 fn try_read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::Result<DHistEnt> {
     let mut buf = [0u8; DHISTENT_SIZE];
-    let n = try_read_at(file, &mut buf, pos)?;
+    let n = util::try_read_at(file, &mut buf, pos)?;
     if n != DHISTENT_SIZE {
         let msg = if let Some(msgid) = msgid {
             format!(
@@ -1030,5 +1067,5 @@ fn try_read_dhistent_at(file: &fs::File, pos: u64, msgid: Option<&[u8]>) -> io::
         };
         return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
     }
-    Ok(unsafe { mem::transmute(buf) })
+    Ok(DHistEnt::from_bytes(buf))
 }
