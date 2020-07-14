@@ -6,7 +6,6 @@ use std::thread;
 
 use structopt::StructOpt;
 
-use nntp_rs::blocking::BlockingType;
 use nntp_rs::config;
 use nntp_rs::dns;
 use nntp_rs::history::{self, History};
@@ -15,7 +14,7 @@ use nntp_rs::logger::{self, LogTarget};
 use nntp_rs::nntp_client;
 use nntp_rs::server;
 use nntp_rs::spool::{self, Spool};
-use nntp_rs::util::{self, TcpListenerSets};
+use nntp_rs::util::{self, BlockingType, TcpListenerSets};
 
 // use jemalloc instead of system malloc.
 #[global_allocator]

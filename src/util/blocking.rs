@@ -1,3 +1,17 @@
+//! A `blocking pool` is a limited set of outstanding `blocking` futures.
+//! 
+//! Is useful if you have several types of blocking calls, and you want
+//! to group and limit them. For example, the default tokio threadpool can
+//! have up to ~500 outstanding requests (threads), and we want to
+//! partition that into 3 pools (for spool lookup, history lookup,
+//! queue file management) of max. 200, 200 and 100 requests.
+//!
+//! Each pool can have it's own blocking strategy:
+//!
+//! - ThreadPool: using `task::spawn_blocking`.
+//! - InPlace: using `task::block_in_place`.
+//! - Blocking: just call the blocking function directly and actually block.
+//!
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;

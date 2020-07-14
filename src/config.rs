@@ -18,7 +18,7 @@ use serde::Deserialize;
 use users::switch::{set_effective_gid, set_effective_uid};
 use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
-use crate::blocking::BlockingType;
+use crate::util::BlockingType;
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;

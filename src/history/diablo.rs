@@ -16,7 +16,7 @@ use fs2::FileExt as _;
 use parking_lot::Mutex;
 use typic::{self, transmute::StableTransmuteInto, stability::StableABI};
 
-use crate::blocking::{BlockingPool, BlockingType};
+use crate::util::{BlockingPool, BlockingType};
 use crate::history::{HistBackend, HistEnt, HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;

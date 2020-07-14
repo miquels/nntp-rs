@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use self::cache::HCache;
-use crate::blocking::BlockingType;
+use crate::util::BlockingType;
 use crate::spool;
 use crate::util::UnixTime;
 

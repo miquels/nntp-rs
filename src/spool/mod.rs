@@ -15,9 +15,8 @@ use serde::Deserialize;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
-use crate::blocking::{BlockingPool, BlockingType};
 use crate::config;
-use crate::util::Buffer;
+use crate::util::{BlockingPool, BlockingType, Buffer};
 use crate::util::{self, HashFeed, MatchResult, UnixTime};
 
 // Faux spoolno's returned by get_spool.
