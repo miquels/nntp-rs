@@ -220,7 +220,7 @@ enum DCState {
 }
 
 /// Read SpoolCfg from a "dspool.ctl" file.
-pub fn read_dspool_ctl(name: &str, spoolpath: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
+pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
     let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
     let file = BufReader::new(file);
     let mut line_no = 0;
@@ -297,8 +297,7 @@ pub fn read_dspool_ctl(name: &str, spoolpath: &str, spool_cfg: &mut SpoolCfg) ->
                     spool = SpoolDef::default();
                     state = DCState::Init;
                 } else {
-                    set_spooldef_item(&mut spool, spoolpath, &words)
-                        .map_err(|e| invalid_data!("{}: {}", info, e))?;
+                    set_spooldef_item(&mut spool, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
                 }
             },
             DCState::MetaSpool => {
@@ -463,10 +462,10 @@ fn set_groupdef_item(gdef: &mut GroupDef, words: &[&str]) -> io::Result<()> {
 }
 
 // Set one item of a SpoolDef
-fn set_spooldef_item(spool: &mut SpoolDef, spoolpath: &str, words: &[&str]) -> io::Result<()> {
+fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
     match words[0] {
         "backend" => spool.backend = parse_string(words)?,
-        "path" => spool.path = parse_spoolpath(spoolpath, words)?,
+        "path" => spool.path = parse_string(words)?,
         "minfree" => spool.minfree = parse_size(words)?,
         "maxsize" => spool.maxsize = parse_size(words)?,
         "keeptime" => spool.keeptime = parse_duration(words)?,
@@ -561,15 +560,6 @@ fn parse_group(words: &[&str]) -> io::Result<String> {
     }
 
     Ok(words[1].to_string())
-}
-
-// parse a single word,expand.
-fn parse_spoolpath(spoolpath: &str, words: &[&str]) -> io::Result<String> {
-    let mut p = parse_string(words)?;
-    if !p.starts_with("/") {
-        p = format!("{}/{}", spoolpath, p);
-    }
-    Ok(p)
 }
 
 // parse a single number.

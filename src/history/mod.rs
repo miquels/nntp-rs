@@ -18,8 +18,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use self::cache::HCache;
-use crate::util::BlockingType;
 use crate::spool;
+use crate::util::BlockingType;
 use crate::util::UnixTime;
 
 const PRECOMMIT_MAX_AGE: u32 = 10;

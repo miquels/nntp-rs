@@ -406,8 +406,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     } else {
         ("MODE STREAM", 203)
     };
-    let (mut codec, _, welcome) =
-        nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None).await?;
+    let (mut codec, _, welcome) = nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None).await?;
     println!("<< {}", welcome);
 
     let msgid = nntp_client::message_id(None);

@@ -1,6 +1,6 @@
-use std::fs;
-use std::ffi::CStr;
 use libc::{self, gethostname};
+use std::ffi::CStr;
+use std::fs;
 
 /// Rust interface to the libc gethostname function.
 ///
@@ -39,8 +39,7 @@ pub fn read_ahead(file: &fs::File, pos: u64, size: u64) {
 
 #[cfg(not(all(target_family = "unix", not(target_os = "macos"))))]
 #[inline]
-pub fn read_ahead(_file: &fs::File, _pos: u64, _size: u64) {
-}
+pub fn read_ahead(_file: &fs::File, _pos: u64, _size: u64) {}
 
 #[cfg(target_os = "linux")]
 mod try_read_at {
@@ -89,4 +88,3 @@ pub use try_read_at::*;
 pub fn getpid() -> u32 {
     unsafe { libc::getpid() as u32 }
 }
-

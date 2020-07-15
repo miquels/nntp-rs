@@ -10,6 +10,7 @@ spool = "/var/spool/news"
 log = "/var/log/news"
 db = "/var/lib/news"
 run = "/run/news"
+queue = "/var/spool/news/outgoing"
 
 [config]
 dnewsfeeds = "${config}/dnewsfeeds"

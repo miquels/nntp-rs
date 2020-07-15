@@ -317,7 +317,7 @@ impl NntpServer {
                     _ => unreachable!(),
                 };
                 let buf = Buffer::from(format!("{} 0 {}\r\n", code, args[0]));
-                return self.read_article(part, args[0], buf).await
+                return self.read_article(part, args[0], buf).await;
             },
             Cmd::Capabilities => {
                 if args.len() > 0 && !self.parser.is_keyword(args[0]) {
@@ -349,7 +349,7 @@ impl NntpServer {
             },
             Cmd::Ihave => {
                 return self.cmd_ihave(args).await;
-            }
+            },
             Cmd::Last => {
                 return Ok(NntpResult::text("412 Not in a newsgroup"));
             },

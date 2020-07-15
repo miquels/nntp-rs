@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use serde::Deserialize;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::config;
-use crate::util::{BlockingPool, BlockingType, Buffer};
 use crate::util::{self, HashFeed, MatchResult, UnixTime};
+use crate::util::{BlockingPool, BlockingType, Buffer};
 
 // Faux spoolno's returned by get_spool.
 pub const SPOOL_REJECTARTS: u8 = 253;
@@ -34,9 +35,9 @@ pub enum ArtPart {
 
 /// Returned by `read`.
 pub struct SpoolArt {
-    pub data:   Buffer,
-    pub header_size:    u32,
-    pub body_size:      Option<u32>,
+    pub data:        Buffer,
+    pub header_size: u32,
+    pub body_size:   Option<u32>,
 }
 
 /// Trait implemented by all spool backends.
@@ -56,7 +57,13 @@ pub trait SpoolBackend: Send + Sync {
     /// Get the timestamp of the oldest article.
     fn get_oldest(&self) -> io::Result<Option<UnixTime>>;
 
-    /// Return JSON version of token.
+    /// Serialize token.
+    fn token_to_text(&self, art_loc: &ArtLoc, msgid: &str) -> String;
+
+    /// Deserialize token.
+    fn text_to_token(&self, text: &str) -> Option<(ArtLoc, String)>;
+
+    /// For debug purposes.
     fn token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value;
 }
 
@@ -227,6 +234,9 @@ pub struct SpoolDef {
     pub backend:    String,
     /// Path to directory (for diablo) or file/blockdev (for cyclic)
     pub path:       String,
+    // relative path, i.e. with ${spooldir} stripped off.
+    #[serde(skip)]
+    pub(crate) rel_path: String,
     /// Weight of this spool.
     #[serde(default)]
     pub weight:     u32,
@@ -256,6 +266,7 @@ pub struct Spool {
 #[rustfmt::skip]
 struct BackendDef {
     backend:    Box<dyn SpoolBackend>,
+    path:       String,
     weight:     u32,
 }
 
@@ -298,6 +309,23 @@ impl Spool {
             // expand Path.
             cfg_c.path = config::expand_path(&mainconfig.paths, &cfg.path);
 
+            // if it's still relative, prefix it with paths.spool.
+            let mut fullpath = PathBuf::new();
+            let c_path = Path::new(&cfg_c.path);
+            if c_path.is_relative() {
+                fullpath.push(&mainconfig.paths.spool);
+                fullpath.push(c_path);
+                cfg_c.path = fullpath.to_str().unwrap().to_string();
+            }
+
+            // Now, we need a relative path wrt paths.spool as well.
+            let spoolpath = Path::new(&mainconfig.paths.spool);
+            let c_path = Path::new(&cfg_c.path);
+            cfg_c.rel_path = match c_path.strip_prefix(spoolpath) {
+                Ok(p) => p.to_str().unwrap().to_string(),
+                Err(_) => cfg_c.path.clone(),
+            };
+
             // find the metaspool.
             let ms = match spoolcfg.spoolgroup.iter().find(|m| m.spool.contains(&n)) {
                 Some(ms) => ms,
@@ -333,6 +361,7 @@ impl Spool {
                 n as u8,
                 BackendDef {
                     backend: be,
+                    path:    cfg.path.clone(),
                     weight:  weight,
                 },
             );
@@ -423,6 +452,26 @@ impl Spool {
         res
     }
 
+    /// Serialize token.
+    pub fn token_to_text(&self, art_loc: &ArtLoc, msgid: &str) -> Option<String> {
+        let be = self.inner.spool.get(&art_loc.spool)?;
+        Some(be.backend.token_to_text(art_loc, msgid))
+    }
+
+    /// Deserialize token.
+    pub fn text_to_token(&self, text: &str) -> Option<(ArtLoc, String)> {
+        // Detect diablo token format. We might add other formats later.
+        let mut words = text.splitn(2, "/");
+        let dir = match (words.next(), words.next()) {
+            (Some(w1), Some(_)) if w1.starts_with("D.") => "",
+            (Some(w1), Some(w2)) if w2.starts_with("D.") => w1,
+            _ => return None,
+        };
+
+        let be = self.inner.spool.values().find(|d| d.path == dir)?;
+        be.backend.text_to_token(text)
+    }
+
     pub async fn read(&self, art_loc: ArtLoc, part: ArtPart, buffer: Buffer) -> io::Result<Buffer> {
         self.read_art(art_loc, part, buffer).await.map(|art| art.data)
     }
@@ -433,16 +482,13 @@ impl Spool {
             .spawn_fn(move || {
                 use std::thread;
                 log::trace!("spool reader on thread {:?}", thread::current().id());
-                let be = match inner.spool.get(&art_loc.spool as &u8) {
-                    None => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            format!("spool {} not found", art_loc.spool),
-                        ));
-                    },
-                    Some(be) => &be.backend,
-                };
-                be.read(&art_loc, part, buffer)
+                let be = inner.spool.get(&art_loc.spool).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("spool {} not found", art_loc.spool),
+                    )
+                })?;
+                be.backend.read(&art_loc, part, buffer)
             })
             .await
     }

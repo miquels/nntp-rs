@@ -12,13 +12,12 @@ use crate::diag::Stats;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
 use crate::nntp_send::FeedArticle;
-use crate::nntp_server::{ArtAccept, NntpServer, NntpResult};
+use crate::nntp_server::{ArtAccept, NntpResult, NntpServer};
 use crate::spool::{SPOOL_DONTSTORE, SPOOL_REJECTARTS};
 use crate::util::Buffer;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime};
 
 impl NntpServer {
-
     pub(crate) async fn cmd_check(&mut self, args: Vec<&str>) -> io::Result<NntpResult> {
         self.stats.inc(Stats::Check);
         self.stats.inc(Stats::Offered);
@@ -346,7 +345,9 @@ impl NntpServer {
         // some more header checks.
         {
             if self.headfeed {
-                let bytes = headers.get_str(HeaderName::Bytes).ok_or(ArtError::HdrOnlyNoBytes)?;
+                let bytes = headers
+                    .get_str(HeaderName::Bytes)
+                    .ok_or(ArtError::HdrOnlyNoBytes)?;
                 bytes.parse::<u64>().map_err(|_| ArtError::HdrOnlyNoBytes)?;
             }
 
@@ -442,4 +443,3 @@ impl NntpServer {
         Ok((headers, body, v))
     }
 }
-

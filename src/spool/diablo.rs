@@ -1,15 +1,16 @@
 use std::convert::TryInto;
+use std::fmt::Debug;
 use std::fs;
 use std::io;
 use std::io::Error as IoError;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use std::fmt::Debug;
-use std::os::unix::fs::FileExt;
-
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use typic::{self, transmute::StableTransmuteInto, stability::StableABI};
+use regex::Regex;
+use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolArt, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
@@ -25,6 +26,7 @@ const DFL_FILE_REALLOCINT: u32 = 600;
 #[rustfmt::skip]
 pub struct DSpool {
     path:               PathBuf,
+    rel_path:           String,
     spool_no:           u8,
     file_reallocint:    u32,
     dir_reallocint:     u32,
@@ -79,21 +81,21 @@ const DARTHEAD_SIZE: usize = 24;
 impl DArtHead {
     pub fn from_bytes(src: [u8; DARTHEAD_SIZE]) -> DArtHead {
         DArtHead {
-            magic1: src[0],
-            magic2: src[1],
-            version: src[2],
-            head_len: src[3],
+            magic1:     src[0],
+            magic2:     src[1],
+            version:    src[2],
+            head_len:   src[3],
             store_type: src[4],
-            _unused1: src[5],
-            _unused2: src[6],
-            _unused3: src[7],
+            _unused1:   src[5],
+            _unused2:   src[6],
+            _unused3:   src[7],
             arthdr_len: u32::from_ne_bytes(src[8..12].try_into().unwrap()),
-            art_len: u32::from_ne_bytes(src[12..16].try_into().unwrap()),
-            store_len: u32::from_ne_bytes(src[16..20].try_into().unwrap()),
-            hdr_end: src[20],
-            _unused4: src[21],
-            _unused5: src[22],
-            _unused6: src[23],
+            art_len:    u32::from_ne_bytes(src[12..16].try_into().unwrap()),
+            store_len:  u32::from_ne_bytes(src[16..20].try_into().unwrap()),
+            hdr_end:    src[20],
+            _unused4:   src[21],
+            _unused5:   src[22],
+            _unused6:   src[23],
         }
     }
 
@@ -186,7 +188,7 @@ impl DSpool {
             let m = if cfg.maxsize > 0 && cfg.maxsize < sv.total_space() {
                 cfg.maxsize
             } else {
-                 sv.total_space()
+                sv.total_space()
             };
             if minfree > m {
                 return Err(io::Error::new(
@@ -197,8 +199,10 @@ impl DSpool {
             m
         };
 
+        // Return DSpool.
         let ds = DSpool {
-            path:            PathBuf::from(cfg.path.clone()),
+            path:            PathBuf::from(&cfg.path),
+            rel_path:        cfg.rel_path.clone(),
             spool_no:        cfg.spool_no,
             file_reallocint: file_reallocint,
             dir_reallocint:  dir_reallocint,
@@ -284,7 +288,7 @@ impl DSpool {
 
         let (start, len) = match part {
             ArtPart::Stat => {
-                return Ok(SpoolArt{
+                return Ok(SpoolArt {
                     data: buffer,
                     header_size: head.arthdr_len,
                     body_size,
@@ -306,7 +310,7 @@ impl DSpool {
         }
 
         match part {
-            ArtPart::Article|ArtPart::Body => {
+            ArtPart::Article | ArtPart::Body => {
                 if body_off == head.art_len {
                     // This is a header-only article. Those are
                     // stored without the final DOT CRLF. Add it.
@@ -321,7 +325,7 @@ impl DSpool {
             _ => {},
         }
 
-        Ok(SpoolArt{
+        Ok(SpoolArt {
             data: buffer,
             header_size: head.arthdr_len,
             body_size,
@@ -550,15 +554,51 @@ impl DSpool {
         Ok(None)
     }
 
+    // Generate a line in dqueue spool file format.
+    fn do_token_to_text(&self, art_loc: &ArtLoc, msgid: &str) -> String {
+        let dart_loc = to_location(art_loc);
+        format!(
+            "{}{}D.{:08x}/B.{:04x} {} {},{}",
+            self.rel_path,
+            if self.rel_path.len() > 0 { "/" } else { "" },
+            dart_loc.dir,
+            dart_loc.file,
+            msgid,
+            dart_loc.pos,
+            dart_loc.size,
+        )
+    }
+
+    // Parse a line in dqueue spool file format.
+    fn do_text_to_token(&self, text: &str) -> Option<(ArtLoc, String)> {
+        static PARSE_TOKEN: Lazy<Regex> = Lazy::new(|| {
+            let re = r"^(.*/|)D.([0-9a-f]{8})/B.([0-9a-f]{4}) (<[^>]*>) (\d+),(\d+)$";
+            Regex::new(re).expect("could not compile PARSE_TOKEN regexp")
+        });
+
+        let s = PARSE_TOKEN.captures(text)?;
+        let dir = u32::from_str_radix(&s[2], 16).ok()?;
+        let file = u16::from_str_radix(&s[3], 16).ok()?;
+        let msgid = s[4].to_string();
+        let pos: u32 = s[5].parse().ok()?;
+        let size: u32 = s[6].parse().ok()?;
+
+        // Build storage token and ArtLoc.
+        let (token, toklen) = from_location(DArtLocation { dir, file, pos, size });
+        let art_loc = ArtLoc {
+            storage_type: Backend::Diablo,
+            spool: self.spool_no,
+            token,
+            toklen,
+        };
+        Some((art_loc, msgid))
+    }
+
     fn do_token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value {
         let dart_loc = to_location(art_loc);
-        let d = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or("unknown".to_string());
+        let sep = if self.rel_path.len() > 0 { "/" } else { "" };
         serde_json::json!({
-            "file":   format!("{}/D.{:08x}/B.{:04x}", d, dart_loc.dir, dart_loc.file),
+            "file":   format!("{}{}D.{:08x}/B.{:04x}", self.rel_path, sep, dart_loc.dir, dart_loc.file),
             "offset": dart_loc.pos,
             "length": dart_loc.size,
         })
@@ -584,6 +624,14 @@ impl SpoolBackend for DSpool {
 
     fn get_oldest(&self) -> io::Result<Option<UnixTime>> {
         self.do_get_oldest()
+    }
+
+    fn token_to_text(&self, art_loc: &ArtLoc, msgid: &str) -> String {
+        self.do_token_to_text(art_loc, msgid).to_string()
+    }
+
+    fn text_to_token(&self, text: &str) -> Option<(ArtLoc, String)> {
+        self.do_text_to_token(text)
     }
 
     fn token_to_json(&self, art_loc: &ArtLoc) -> serde_json::Value {
@@ -675,4 +723,3 @@ impl<T: Read> Read for CrlfXlat<T> {
         Ok(done)
     }
 }
-

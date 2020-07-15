@@ -3,13 +3,16 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
+use parking_lot::Mutex;
 use smartstring::alias::String as SmartString;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
@@ -17,10 +20,10 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 use tokio::time::delay_for;
 
+use crate::article::{HeaderName, HeadersParser};
 use crate::bus::{self, Notification};
 use crate::config;
 use crate::diag::TxSessionStats;
-use crate::article::{HeaderName, HeadersParser};
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
@@ -331,10 +334,14 @@ struct PeerFeed {
     tx_empty: mpsc::Sender<()>,
     rx_empty: mpsc::Receiver<()>,
 
+    // Number of active outgoing connections.
     num_conns: u32,
 
     // Spool instance.
     spool: Spool,
+
+    // Outgoing queue for this peer.
+    queue: Queue,
 }
 
 impl Drop for PeerFeed {
@@ -366,6 +373,7 @@ impl PeerFeed {
             rx_empty,
             num_conns: 0,
             spool: spool.clone(),
+            queue: Queue::new(&peer.label),
             newspeer: Arc::new(peer),
         }
     }
@@ -378,7 +386,6 @@ impl PeerFeed {
     /// Run the PeerFeed.
     async fn run(mut self) {
         log::trace!("PeerFeed::run: {}: starting", self.label);
-        let mut closed = false;
         let mut exiting = false;
 
         loop {
@@ -405,27 +412,26 @@ impl PeerFeed {
                         }
                     }
 
-                    loop {
-                        match self.tx_queue.try_send(art) {
-                            Ok(()) => break,
-                            Err(async_channel::TrySendError::Closed(_art)) => {
-                                // should never happen.
-                                if !closed {
-                                    log::error!("PeerFeed::run: {}: async_channel closed ?!", self.label);
-                                    closed = true;
-                                }
-                                // XXX TODO: full. send article to the backlog.
-                                //self.send_art_to_backlog(art);
-                                break;
-                            },
-                            Err(async_channel::TrySendError::Full(_art)) => {
-                                // XXX TODO: full. send article and half of the queue to the backlog.
-                                //self.send_art_to_backlog(art)
-                                //self.send_queue_to_backlog(false)
-                                //continue;
-                                break;
-                            },
-                        }
+                    match self.tx_queue.try_send(art) {
+                        Ok(()) => {},
+                        Err(async_channel::TrySendError::Closed(_)) => {
+                            // This code is never reached. It happens if all
+                            // senders or all receivers are dropped, but we hold one
+                            // to one of both so that can't happen.
+                            unreachable!();
+                        },
+                        Err(async_channel::TrySendError::Full(art)) => {
+                            // Queue is full. Send half to the backlog.
+                            match self.send_queue_to_backlog(false).await {
+                                Ok(_) => {
+                                    // We're sure there's room now.
+                                    let _ = self.tx_queue.try_send(art);
+                                },
+                                Err(_e) => {
+                                    // article dropped, and backlog fails. now what.
+                                },
+                            }
+                        },
                     }
                 },
                 PeerFeedItem::ExitGraceful => {
@@ -444,8 +450,7 @@ impl PeerFeed {
                     }
                 },
                 PeerFeedItem::ConnExit(arts) => {
-                    // XXX TODO handle returned arts.
-                    //self.requeue(arts);
+                    let _ = self.requeue(arts).await;
                     self.num_conns -= 1;
                 },
                 PeerFeedItem::Ping => {},
@@ -455,12 +460,63 @@ impl PeerFeed {
         log::trace!("PeerFeed::run: {}: exit", self.label);
 
         // save queue to disk.
-        // XXX TODO
-        //self.send_queue_to_backlog(true);
+        let _ = self.send_queue_to_backlog(true).await;
+    }
+
+    // We got an error writing to the queue file.
+    //
+    // That means we have to pause the server. Then we check what
+    // the error was (possibly "disk full") and wait for the
+    // problem to resolve itself.
+    //
+    async fn queue_error(&self, e: &io::Error) {
+        // XXX TODO stop all feeds.
+        log::error!("PeerFeed: {}: error writing outgoing queue: {}", self.label, e);
+    }
+
+    // A connection was closed. If there were still articles in its
+    // outgoing queue, re-queue them.
+    async fn requeue(&mut self, mut arts: Vec<PeerArticle>) -> io::Result<()> {
+        while let Some(art) = arts.pop() {
+            if let Err(_) = self.tx_queue.try_send(art) {
+                break;
+            }
+        }
+        if arts.len() > 0 {
+            let res = async {
+                self.send_queue_to_backlog(false).await?;
+                self.queue.write(&self.spool, &arts).await?;
+                Ok(())
+            }
+            .await;
+            if let Err(e) = res {
+                self.queue_error(&e).await;
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    // Write half or the entire current queue to the backlog.
+    async fn send_queue_to_backlog(&mut self, entire_queue: bool) -> io::Result<()> {
+        let capacity = self.tx_queue.capacity().unwrap_or(0);
+        let target_len = if entire_queue { 0 } else { capacity / 2 };
+        let mut arts = Vec::new();
+        while self.rx_queue.len() > target_len {
+            match self.rx_queue.try_recv() {
+                Ok(art) => arts.push(art),
+                Err(_) => break,
+            }
+        }
+
+        if let Err(e) = self.queue.write(&self.spool, &arts).await {
+            self.queue_error(&e).await;
+            return Err(e);
+        }
+        Ok(())
     }
 
     async fn add_connection(&mut self) {
-
         // TODO: retry loop, with exponential backoff.
         let newspeer = self.newspeer.clone();
         let mut tx_chan = self.tx_chan.clone();
@@ -668,7 +724,12 @@ impl Connection {
     }
 
     // Connect to remote peer.
-    async fn connect(newspeer: Arc<Peer>, id: u64, fail_delay: u64) -> io::Result<(NntpCodec, IpAddr, String)> {
+    async fn connect(
+        newspeer: Arc<Peer>,
+        id: u64,
+        fail_delay: u64,
+    ) -> io::Result<(NntpCodec, IpAddr, String)>
+    {
         let (cmd, code) = if newspeer.headfeed {
             ("MODE HEADFEED", 250)
         } else {
@@ -706,7 +767,6 @@ impl Connection {
         };
 
         loop {
-
             // If there is an item in the send queue, and we're not still busy
             // sending the previous item, pop it from the queue and start
             // sending it to the remote peer.
@@ -862,7 +922,6 @@ impl Connection {
 
     // The remote server sent a response. Process it.
     async fn handle_response(&mut self, resp: NntpResponse) -> io::Result<bool> {
-
         // It's a response to the item at the front of the queue.
         let item = match self.recv_queue.pop_front() {
             None => {
@@ -1006,7 +1065,6 @@ impl Connection {
         headers.header_bytes(&mut hb);
         (hb, body)
     }
-
 }
 
 // Item in the Connection queue.
@@ -1024,5 +1082,74 @@ impl fmt::Debug for ConnItem {
             &ConnItem::Takethis(ref art) => write!(f, "\"TAKETHIS {}\"", art.msgid),
             &ConnItem::Quit => write!(f, "\"QUIT\""),
         }
+    }
+}
+
+struct Queue {
+    inner: Arc<Mutex<InnerQueue>>,
+}
+
+impl Queue {
+    fn new(name: &str) -> Queue {
+        let config = config::get_config();
+        let mut path = PathBuf::from(&config.paths.queue);
+        path.push(&Path::new(name));
+        let inner = InnerQueue { path, writer: None };
+        Queue {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    async fn write(&self, spool: &Spool, arts: &[PeerArticle]) -> io::Result<()> {
+        if arts.len() == 0 {
+            return Ok(());
+        }
+        let mut data = String::new();
+        for art in arts {
+            match spool.token_to_text(&art.location, &art.msgid) {
+                Some(token) => {
+                    data.push_str(&token);
+                    data.push('\n');
+                },
+                None => {
+                    log::warn!(
+                        "Queue::write: token_to_text({}) failed",
+                        art.location.to_json(spool)
+                    )
+                },
+            }
+        }
+        // XXX TODO use a blocking pool ?
+        let inner = self.inner.clone();
+        task::spawn_blocking(move || {
+            let mut inner = inner.lock();
+            let writer = inner.re_open()?;
+            writer.write_all(data.as_bytes())
+        })
+        .await
+        .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)))
+    }
+}
+
+struct InnerQueue {
+    path:   PathBuf,
+    writer: Option<File>,
+}
+
+impl InnerQueue {
+    fn re_open(&mut self) -> io::Result<&mut File> {
+        if let Some(ref mut writer) = self.writer {
+            return Ok(writer);
+        }
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| {
+                ioerr!(e.kind(), "{:?}: {}", self.path, e);
+                e
+            })?;
+        self.writer = Some(writer);
+        Ok(self.writer.as_mut().unwrap())
     }
 }

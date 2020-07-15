@@ -1,5 +1,5 @@
 //! A `blocking pool` is a limited set of outstanding `blocking` futures.
-//! 
+//!
 //! Is useful if you have several types of blocking calls, and you want
 //! to group and limit them. For example, the default tokio threadpool can
 //! have up to ~500 outstanding requests (threads), and we want to

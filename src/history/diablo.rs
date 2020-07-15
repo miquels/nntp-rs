@@ -14,13 +14,13 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use fs2::FileExt as _;
 use parking_lot::Mutex;
-use typic::{self, transmute::StableTransmuteInto, stability::StableABI};
+use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 
-use crate::util::{BlockingPool, BlockingType};
 use crate::history::{HistBackend, HistEnt, HistStatus};
 use crate::spool;
 use crate::util::byteorder::*;
 use crate::util::{self, DHash, MmapAtomicU32, UnixTime};
+use crate::util::{BlockingPool, BlockingType};
 
 /// Diablo compatible history file.
 #[derive(Debug)]
@@ -72,12 +72,12 @@ const DHISTHEAD_DEADMAGIC: u32 = 0xDEADF5E6;
 impl DHistHead {
     pub fn from_bytes(buf: [u8; DHISTHEAD_SIZE]) -> DHistHead {
         DHistHead {
-            magic: u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
-            hash_size: u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
-            version: u16::from_ne_bytes(buf[8..10].try_into().unwrap()),
+            magic:        u32::from_ne_bytes(buf[0..4].try_into().unwrap()),
+            hash_size:    u32::from_ne_bytes(buf[4..8].try_into().unwrap()),
+            version:      u16::from_ne_bytes(buf[8..10].try_into().unwrap()),
             histent_size: u16::from_ne_bytes(buf[10..12].try_into().unwrap()),
-            head_size: u16::from_ne_bytes(buf[12..14].try_into().unwrap()),
-            resv: u16::from_ne_bytes(buf[14..16].try_into().unwrap()),
+            head_size:    u16::from_ne_bytes(buf[12..14].try_into().unwrap()),
+            resv:         u16::from_ne_bytes(buf[14..16].try_into().unwrap()),
         }
     }
     pub fn to_bytes(self) -> [u8; DHISTHEAD_SIZE] {

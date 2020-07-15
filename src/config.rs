@@ -18,11 +18,11 @@ use serde::Deserialize;
 use users::switch::{set_effective_gid, set_effective_uid};
 use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by_name};
 
-use crate::util::BlockingType;
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::SpoolCfg;
 use crate::util;
+use crate::util::BlockingType;
 
 use toml;
 
@@ -79,6 +79,7 @@ pub struct Paths {
     pub log:            String,
     pub db:             String,
     pub run:            String,
+    pub queue:          String,
 }
 
 /// Config files.
@@ -212,7 +213,7 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.config.dspool_ctl) {
-        read_dspool_ctl(dspoolctl, &cfg.paths.spool.clone(), &mut cfg.spool)?;
+        read_dspool_ctl(dspoolctl, &mut cfg.spool)?;
     }
 
     return Ok(cfg);
@@ -302,6 +303,7 @@ pub fn expand_path(paths: &Paths, path: &str) -> String {
             "${log}" => paths.log.clone(),
             "${db}" => paths.db.clone(),
             "${run}" => paths.run.clone(),
+            "${queue}" => paths.queue.clone(),
             "${date}" => {
                 let now = util::UnixTime::now().datetime_local();
                 format!("{:04}{:02}{:02}", now.year(), now.month(), now.day())
