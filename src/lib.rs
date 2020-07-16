@@ -16,6 +16,7 @@ pub mod nntp_codec;
 pub mod nntp_recv;
 pub mod nntp_send;
 pub mod nntp_server;
+pub mod queue;
 pub mod server;
 pub mod spool;
 pub mod util;

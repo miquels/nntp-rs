@@ -3,16 +3,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
-use parking_lot::Mutex;
 use smartstring::alias::String as SmartString;
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
@@ -27,6 +24,7 @@ use crate::diag::TxSessionStats;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
+use crate::queue::Queue;
 use crate::server;
 use crate::spool::{ArtLoc, ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
@@ -70,13 +68,13 @@ enum PeerFeedItem {
 
 // Article queued for an outgoing connection.
 #[derive(Clone, Debug)]
-struct PeerArticle {
+pub struct PeerArticle {
     // Message-Id.
-    msgid:    String,
+    pub msgid:    String,
     // Location in the article spool.
-    location: ArtLoc,
+    pub location: ArtLoc,
     // Size
-    size:     usize,
+    pub size:     usize,
 }
 
 /// Fans out articles to the peers.
@@ -358,6 +356,8 @@ impl PeerFeed {
         let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
         let (tx_queue, rx_queue) = async_channel::bounded(PEERFEED_QUEUE_SIZE);
         let (tx_empty, rx_empty) = mpsc::channel::<()>(1);
+        let config = config::get_config();
+        let queue_dir = &config.paths.queue;
 
         server::inc_sessions();
 
@@ -373,7 +373,7 @@ impl PeerFeed {
             rx_empty,
             num_conns: 0,
             spool: spool.clone(),
-            queue: Queue::new(&peer.label),
+            queue: Queue::new(&peer.label, queue_dir, peer.maxqueue),
             newspeer: Arc::new(peer),
         }
     }
@@ -387,6 +387,8 @@ impl PeerFeed {
     async fn run(mut self) {
         log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut exiting = false;
+
+        self.queue.init().await;
 
         loop {
             if exiting && self.num_conns == 0 {
@@ -485,7 +487,7 @@ impl PeerFeed {
         if arts.len() > 0 {
             let res = async {
                 self.send_queue_to_backlog(false).await?;
-                self.queue.write(&self.spool, &arts).await?;
+                self.queue.write_arts(&self.spool, &arts).await?;
                 Ok(())
             }
             .await;
@@ -509,7 +511,7 @@ impl PeerFeed {
             }
         }
 
-        if let Err(e) = self.queue.write(&self.spool, &arts).await {
+        if let Err(e) = self.queue.write_arts(&self.spool, &arts).await {
             self.queue_error(&e).await;
             return Err(e);
         }
@@ -517,7 +519,6 @@ impl PeerFeed {
     }
 
     async fn add_connection(&mut self) {
-        // TODO: retry loop, with exponential backoff.
         let newspeer = self.newspeer.clone();
         let mut tx_chan = self.tx_chan.clone();
         let rx_queue = self.rx_queue.clone();
@@ -771,15 +772,25 @@ impl Connection {
             // sending the previous item, pop it from the queue and start
             // sending it to the remote peer.
             if !xmit_busy {
-                if let Some(item) = self.send_queue.pop_front() {
+                if let Some(mut item) = self.send_queue.pop_front() {
                     log::trace!(
                         "Connection::feed: {}:{}: sending {:?}",
                         self.newspeer.label,
                         self.id,
                         item,
                     );
-                    self.recv_queue.push_back(item.clone());
-                    self.transmit_item(item, part).await?;
+                    let size = self.transmit_item(item.clone(), part).await?;
+                    if size == 0 {
+                        // article not found is a non-fatal error.
+                        continue;
+                    }
+
+                    // update sent item size, and queue for reception.
+                    match item {
+                        ConnItem::Takethis(ref mut art) => art.size = size,
+                        _ => {},
+                    }
+                    self.recv_queue.push_back(item);
                     xmit_busy = true;
                 }
             }
@@ -1006,22 +1017,30 @@ impl Connection {
     }
 
     // Put the ConnItem in the Sink.
-    async fn transmit_item(&mut self, item: ConnItem, part: ArtPart) -> io::Result<()> {
+    async fn transmit_item(&mut self, item: ConnItem, part: ArtPart) -> io::Result<usize> {
         match item {
             ConnItem::Check(art) => {
                 log::trace!("Connection::transmit_item: CHECK {}", art.msgid);
                 let line = format!("CHECK {}\r\n", art.msgid);
-                Pin::new(&mut self.writer).start_send(line.into())
+                Pin::new(&mut self.writer).start_send(line.into())?;
+                Ok(0)
             },
             ConnItem::Takethis(art) => {
                 log::trace!("Connection::transmit_item: TAKETHIS {}", art.msgid);
                 let tmpbuf = Buffer::new();
-                let mut sp_art = match self.spool.read_art(art.location, part, tmpbuf).await {
+                let mut sp_art = match self.spool.read_art(art.location.clone(), part, tmpbuf).await {
                     Ok(sp_art) => sp_art,
                     Err(e) => {
                         if e.kind() == io::ErrorKind::NotFound {
                             self.stats.art_notfound();
-                            return Ok(());
+                            return Ok(0);
+                        }
+                        if e.kind() == io::ErrorKind::InvalidData {
+                            // Corrupted article. Should not happen.
+                            // Log an error and continue.
+                            log::error!("Connection::transmit_item: {:?}: {}", art, e);
+                            self.stats.art_notfound();
+                            return Ok(0);
                         }
                         return Err(e);
                     },
@@ -1033,13 +1052,20 @@ impl Connection {
                 Pin::new(&mut self.writer).start_send(line.into())?;
                 if self.rewrite {
                     let (head, body) = self.rewrite_headers(sp_art);
+                    let len = head.len() + body.len() - 3;
                     Pin::new(&mut self.writer).start_send(head)?;
-                    Pin::new(&mut self.writer).start_send(body)
+                    Pin::new(&mut self.writer).start_send(body)?;
+                    Ok(len)
                 } else {
-                    Pin::new(&mut self.writer).start_send(sp_art.data)
+                    let len = sp_art.data.len() - 3;
+                    Pin::new(&mut self.writer).start_send(sp_art.data)?;
+                    Ok(len)
                 }
             },
-            ConnItem::Quit => Pin::new(&mut self.writer).start_send("QUIT\r\n".into()),
+            ConnItem::Quit => {
+                Pin::new(&mut self.writer).start_send("QUIT\r\n".into())?;
+                Ok(0)
+            },
         }
     }
 
@@ -1082,74 +1108,5 @@ impl fmt::Debug for ConnItem {
             &ConnItem::Takethis(ref art) => write!(f, "\"TAKETHIS {}\"", art.msgid),
             &ConnItem::Quit => write!(f, "\"QUIT\""),
         }
-    }
-}
-
-struct Queue {
-    inner: Arc<Mutex<InnerQueue>>,
-}
-
-impl Queue {
-    fn new(name: &str) -> Queue {
-        let config = config::get_config();
-        let mut path = PathBuf::from(&config.paths.queue);
-        path.push(&Path::new(name));
-        let inner = InnerQueue { path, writer: None };
-        Queue {
-            inner: Arc::new(Mutex::new(inner)),
-        }
-    }
-
-    async fn write(&self, spool: &Spool, arts: &[PeerArticle]) -> io::Result<()> {
-        if arts.len() == 0 {
-            return Ok(());
-        }
-        let mut data = String::new();
-        for art in arts {
-            match spool.token_to_text(&art.location, &art.msgid) {
-                Some(token) => {
-                    data.push_str(&token);
-                    data.push('\n');
-                },
-                None => {
-                    log::warn!(
-                        "Queue::write: token_to_text({}) failed",
-                        art.location.to_json(spool)
-                    )
-                },
-            }
-        }
-        // XXX TODO use a blocking pool ?
-        let inner = self.inner.clone();
-        task::spawn_blocking(move || {
-            let mut inner = inner.lock();
-            let writer = inner.re_open()?;
-            writer.write_all(data.as_bytes())
-        })
-        .await
-        .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)))
-    }
-}
-
-struct InnerQueue {
-    path:   PathBuf,
-    writer: Option<File>,
-}
-
-impl InnerQueue {
-    fn re_open(&mut self) -> io::Result<&mut File> {
-        if let Some(ref mut writer) = self.writer {
-            return Ok(writer);
-        }
-        let writer = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| {
-                ioerr!(e.kind(), "{:?}: {}", self.path, e);
-                e
-            })?;
-        self.writer = Some(writer);
-        Ok(self.writer.as_mut().unwrap())
     }
 }
