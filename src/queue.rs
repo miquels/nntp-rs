@@ -462,7 +462,9 @@ impl Queue {
         qreader.expire_qfiles().await;
 
         // find lowest and highest seqno
-        let mut high_seq = 0;
+        // note that the lower limit for high_seq is indeed 2.
+        // that's so that high_seq - 1 > 0.
+        let mut high_seq = 1;
         let mut low_seq = 0;
         for qfile in &qreader.qfiles {
             if qfile.seq > high_seq {
@@ -499,8 +501,24 @@ impl Queue {
         // Check if the file is open and has content, or if not, see
         // if we can open the next queue file.
         if !qreader.open_qfile().await {
-            // alas.
-            return None;
+
+            // Now if we have no S.* queue files, but the currently being
+            // written queue file has content, rotate it.
+            let mut try_again = false;
+            if qreader.qfiles.len() == 0 {
+                let mut qwriter = self.inner.qwriter.lock().await;
+                if qwriter.file.is_some() {
+                    if let Ok(Some(qfile)) = qwriter.rotate(0, true).await {
+                        qreader.qfiles.push(qfile);
+                        try_again = true;
+                    }
+                }
+            }
+
+            if !try_again || !qreader.open_qfile().await {
+                // alas.
+                return None;
+            }
         }
 
         let offset = qreader.cur_offset;
