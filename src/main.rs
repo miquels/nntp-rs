@@ -116,6 +116,12 @@ pub struct TestArticleOpts {
     /// Subject (default: test <MSGID>)
     pub subject:  Option<String>,
     #[structopt(short, long)]
+    /// Number of articles to send (default: 1)
+    pub num_arts:  Option<u32>,
+    #[structopt(short, long)]
+    /// Delay between articles (ms)
+    pub delay:    Option<f64>,
+    #[structopt(short, long)]
     /// Port to use (default: 119)
     pub port:     Option<u16>,
     #[structopt(short, long)]
@@ -409,36 +415,43 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     let (mut codec, _, welcome) = nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None).await?;
     println!("<< {}", welcome);
 
-    let msgid = nntp_client::message_id(None);
-    let hostname = msgid.split("@").nth(1).unwrap();
+    let num_arts = opts.num_arts.unwrap_or(1);
 
-    let mut buf = String::new();
-    let cmd = format!("TAKETHIS <{}>", msgid);
+    for _ in 0 .. num_arts {
+        let msgid = nntp_client::message_id(None);
+        let hostname = msgid.split("@").nth(1).unwrap();
 
-    write!(buf, "{}\r\n", cmd)?;
-    write!(buf, "Path: test!not-for-mail\r\n")?;
-    write!(buf, "Newsgroups: {}\r\n", opts.group)?;
-    write!(buf, "Distribution: local\r\n")?;
-    write!(buf, "Message-Id: <{}>\r\n", msgid)?;
-    if opts.headfeed {
-        write!(buf, "Bytes: 17\r\n")?;
+        let mut buf = String::new();
+        let cmd = format!("TAKETHIS <{}>", msgid);
+
+        write!(buf, "{}\r\n", cmd)?;
+        write!(buf, "Path: test!not-for-mail\r\n")?;
+        write!(buf, "Newsgroups: {}\r\n", opts.group)?;
+        write!(buf, "Distribution: local\r\n")?;
+        write!(buf, "Message-Id: <{}>\r\n", msgid)?;
+        if opts.headfeed {
+            write!(buf, "Bytes: 17\r\n")?;
+        }
+        write!(buf, "Date: {}\r\n", util::UnixTime::now().to_rfc2822())?;
+        write!(buf, "From: test@{}\r\n", hostname)?;
+        write!(
+            buf,
+            "Subject: {}\r\n",
+            opts.subject.as_ref().unwrap_or(&format!("test {}", msgid))
+        )?;
+        if !opts.headfeed {
+            write!(buf, "\r\ntest, ignore.")?;
+        }
+        write!(buf, "\r\n.")?;
+
+        println!(">> {}", cmd);
+        let resp = codec.command(buf).await?;
+        println!("<< {}", resp.short());
+
+        if let Some(delay) = opts.delay {
+            tokio::time::delay_for(std::time::Duration::from_micros((delay * 1000f64) as u64)).await;
+        }
     }
-    write!(buf, "Date: {}\r\n", util::UnixTime::now().to_rfc2822())?;
-    write!(buf, "From: test@{}\r\n", hostname)?;
-    write!(
-        buf,
-        "Subject: {}\r\n",
-        opts.subject.unwrap_or(format!("test {}", msgid))
-    )?;
-    if !opts.headfeed {
-        write!(buf, "\r\ntest, ignore.")?;
-    }
-    write!(buf, "\r\n.")?;
-
-    println!(">> {}", cmd);
-    let resp = codec.command(buf).await?;
-    println!("<< {}", resp.short());
-
     Ok(())
 }
 

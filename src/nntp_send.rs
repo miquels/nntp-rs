@@ -24,7 +24,7 @@ use crate::diag::TxSessionStats;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
-use crate::queue::Queue;
+use crate::queue::{Queue, QItems};
 use crate::server;
 use crate::spool::{ArtLoc, ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
@@ -326,12 +326,6 @@ struct PeerFeed {
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
 
-    // A capacity-of-one channel that is used to signal that
-    // the article queue is empty. We can then fill it with
-    // data from the backlog (if we have a backlog).
-    tx_empty: mpsc::Sender<()>,
-    rx_empty: mpsc::Receiver<()>,
-
     // Number of active outgoing connections.
     num_conns: u32,
 
@@ -355,7 +349,6 @@ impl PeerFeed {
         let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(PEERFEED_COMMAND_CHANNEL_SIZE);
         let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
         let (tx_queue, rx_queue) = async_channel::bounded(PEERFEED_QUEUE_SIZE);
-        let (tx_empty, rx_empty) = mpsc::channel::<()>(1);
         let config = config::get_config();
         let queue_dir = &config.paths.queue;
 
@@ -369,8 +362,6 @@ impl PeerFeed {
             rx_queue,
             tx_queue,
             broadcast,
-            tx_empty,
-            rx_empty,
             num_conns: 0,
             spool: spool.clone(),
             queue: Queue::new(&peer.label, queue_dir, peer.maxqueue),
@@ -524,8 +515,8 @@ impl PeerFeed {
         let rx_queue = self.rx_queue.clone();
         let spool = self.spool.clone();
         let broadcast = self.broadcast.clone();
-        let tx_empty = self.tx_empty.clone();
         let id = self.next_id;
+        let queue = self.queue.clone();
 
         self.next_id += 1;
         self.num_conns += 1;
@@ -538,8 +529,8 @@ impl PeerFeed {
                 tx_chan.clone(),
                 rx_queue,
                 broadcast,
-                tx_empty,
                 spool,
+                queue,
             )
             .await
             {
@@ -598,10 +589,11 @@ struct Connection {
     rx_queue:   async_channel::Receiver<PeerArticle>,
     // broadcast channel to receive notifications from the PeerFeed.
     broadcast:  broadcast::Receiver<PeerFeedItem>,
-    // used to wake up the fill-the-queue-from-the-backlog task.
-    tx_empty:   mpsc::Sender<()>,
     // do we need to rewrite the headers?
     rewrite:    bool,
+    // Backlog.
+    queue:      Queue,
+    qitems:     Option<QItems>,
 }
 
 impl Connection {
@@ -616,8 +608,8 @@ impl Connection {
         tx_chan: mpsc::Sender<PeerFeedItem>,
         rx_queue: async_channel::Receiver<PeerArticle>,
         broadcast: broadcast::Sender<PeerFeedItem>,
-        tx_empty: mpsc::Sender<()>,
         spool: Spool,
+        queue: Queue,
     ) -> io::Result<Connection>
     {
         let mut broadcast_rx = broadcast.subscribe();
@@ -666,8 +658,9 @@ impl Connection {
                             tx_chan,
                             rx_queue,
                             broadcast: broadcast_rx,
-                            tx_empty,
                             rewrite,
+                            queue,
+                            qitems: None,
                         };
 
                         // Initialize stats logger and log connect message.
@@ -766,6 +759,7 @@ impl Connection {
         } else {
             ArtPart::Article
         };
+        let mut processing_backlog = false;
 
         loop {
             // If there is an item in the send queue, and we're not still busy
@@ -780,27 +774,55 @@ impl Connection {
                         item,
                     );
                     let size = self.transmit_item(item.clone(), part).await?;
-                    if size == 0 {
-                        // article not found is a non-fatal error.
-                        continue;
-                    }
 
-                    // update sent item size, and queue for reception.
+                    // for TAKETHIS, update sent item size.
                     match item {
-                        ConnItem::Takethis(ref mut art) => art.size = size,
+                        ConnItem::Takethis(ref mut art) => {
+                            if size == 0 {
+                                // size == 0 means article not found. non-fatal error.
+                                continue;
+                            }
+                            // update size.
+                            art.size = size;
+                        },
                         _ => {},
                     }
+                    // and queue item for the receiving side.
                     self.recv_queue.push_back(item);
                     xmit_busy = true;
                 }
             }
 
+            // Do we want to queue a new article?
             let queue_len = self.recv_queue.len() + self.send_queue.len();
             let need_item = !xmit_busy && queue_len < maxstream;
 
-            if need_item {
-                // Try to get one item from the queue. If it's empty,
-                // signal the PeerFeed that we hit an empty queue.
+            if processing_backlog && queue_len == 0 {
+                if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
+                    log::trace!("Connection::feed: {}:{}: backlog run done", self.newspeer.label, self.id);
+                    if let Some(qitems) = self.qitems.take() {
+                        self.queue.ack_items(qitems).await;
+                    }
+                    processing_backlog = false;
+                }
+            }
+
+            if need_item && processing_backlog {
+                // Get an items from the backlog.
+                if let Some(art) = self.qitems.as_mut().unwrap().next_art(&self.spool) {
+                    log::trace!(
+                        "Connection::feed: {}:{}: push onto send queue: CHECK {} (backlog)",
+                        self.newspeer.label,
+                        self.id,
+                        art.msgid,
+                    );
+                    self.send_queue.push_back(ConnItem::Check(art));
+                    continue;
+                }
+            }
+
+            if need_item && !processing_backlog {
+                // Try to get one item from the main queue.
                 match self.rx_queue.try_recv() {
                     Ok(art) => {
                         log::trace!(
@@ -814,11 +836,21 @@ impl Connection {
                     },
                     Err(async_channel::TryRecvError::Empty) => {
                         log::trace!(
-                            "Connection::feed: {}:{}: signaling empty queue",
+                            "Connection::feed: {}:{}: empty, trying backlog",
                             self.newspeer.label,
                             self.id,
                         );
-                        let _ = self.tx_empty.try_send(());
+                        if let Some(qitems) = self.queue.read_items(200).await {
+                            log::trace!(
+                                "Connection::feed: {}:{}: processing backlog count={}",
+                                self.newspeer.label,
+                                self.id,
+                                qitems.len(),
+                            );
+                            self.qitems = Some(qitems);
+                            processing_backlog = true;
+                            continue;
+                        }
                     },
                     _ => {},
                 }
@@ -827,7 +859,7 @@ impl Connection {
             tokio::select! {
 
                 // If we need to, get an item from the global queue for this feed.
-                res = self.rx_queue.recv(), if need_item => {
+                res = self.rx_queue.recv(), if need_item && !processing_backlog => {
                     match res {
                         Ok(art) => {
                             log::trace!(

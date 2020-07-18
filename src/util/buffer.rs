@@ -347,7 +347,7 @@ mod tests {
         b.reserve(4096);
         b.start_offset = 23;
         b.data.resize(b.start_offset, 0);
-        for i in 0..50000 {
+        for _ in 0..50000 {
             b.put_str("xyzzyxyzzy");
         }
         assert!(b.len() == 500000);
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_split() {
         let mut b = Buffer::new();
-        for i in 0..5000 {
+        for _ in 0..5000 {
             b.put_str("xyzzyxyzzy");
         }
         assert!(b.len() == 50000);

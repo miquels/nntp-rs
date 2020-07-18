@@ -17,28 +17,57 @@ use crate::nntp_send::PeerArticle;
 use crate::spool::Spool;
 use crate::util;
 
+const QUEUE_ROTATE_SECS: u64 = 300;
+
 /// A set of items that we got from the queue by calling read_items().
 #[derive(Default, Clone, Debug)]
 pub struct QItems {
     pub(crate) id:    u64,
     pub(crate) items: String,
+    pub(crate) pos:   usize,
     pub(crate) done:  bool,
 }
 
 impl QItems {
-    /// An iterator that returns `PeerArticle` items.
-    pub fn iter_arts<'a, 'b>(&'a self, spool: &'b Spool) -> QItemsArtIter<'a, 'b> {
-        QItemsArtIter {
-            iter:  self.items.split('\n'),
-            spool: spool,
+    pub fn len(&self) -> usize {
+        self.items[self.pos..].split('\n').filter(|s| *s != "").count()
+    }
+
+    pub fn next_str(&mut self) -> Option<&str> {
+        loop {
+            match self.items[self.pos..].find('\n') {
+                Some(len) => {
+                    let s = &self.items[self.pos..self.pos+len];
+                    self.pos += len + 1;
+                    if  s == "" {
+                        continue;
+                    }
+                    return Some(s);
+                },
+                None => {
+                    if self.pos != self.items.len() {
+                        let s = &self.items[self.pos..];
+                        self.pos = self.items.len();
+                        return Some(s);
+                    } else {
+                        return None;
+                    }
+                }
+            }
         }
     }
 
-    /// An iterator that returns `&str` items.
-    pub fn iter_items<'a>(&'a self) -> QItemsStrIter<'a> {
-        QItemsStrIter {
-            iter: self.items.split('\n'),
+    pub fn next_art(&mut self, spool: &Spool) -> Option<PeerArticle> {
+        while let Some(s) = self.next_str() {
+            if let Some((location, msgid)) = spool.text_to_token(s) {
+                return Some(PeerArticle {
+                    msgid,
+                    location,
+                    size: 0,
+                });
+            }
         }
+        None
     }
 }
 
@@ -51,52 +80,6 @@ impl Drop for QItems {
     }
 }
 
-/// Iterator `Item = PeerArticle`
-pub struct QItemsArtIter<'a, 'b> {
-    iter:  std::str::Split<'a, char>,
-    spool: &'b Spool,
-}
-
-impl<'a, 'b> Iterator for QItemsArtIter<'a, 'b> {
-    type Item = PeerArticle;
-
-    fn next(&mut self) -> Option<PeerArticle> {
-        while let Some(s) = self.iter.next() {
-            if s == "" {
-                continue;
-            }
-            if let Some((location, msgid)) = self.spool.text_to_token(s) {
-                return Some(PeerArticle {
-                    msgid,
-                    location,
-                    size: 0,
-                });
-            }
-        }
-        None
-    }
-}
-
-/// Iterator `Item = &str`
-pub struct QItemsStrIter<'a> {
-    iter: std::str::Split<'a, char>,
-}
-
-impl<'a> Iterator for QItemsStrIter<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<&'a str> {
-        while let Some(s) = self.iter.next() {
-            //log::debug!("NEXT: [{}]", s);
-            if s == "" {
-                continue;
-            }
-            return Some(s);
-        }
-        None
-    }
-}
-
 #[derive(Default)]
 struct QWriter {
     label:       String,
@@ -104,6 +87,7 @@ struct QWriter {
     file:        Option<fs::File>,
     next_seq:    u64,
     last_rotate: u64,
+    is_empty:    bool,
 }
 
 impl QWriter {
@@ -114,6 +98,15 @@ impl QWriter {
     // if all S.* queue files are gone but we still want to
     // rotate the current queue file to process it right now.
     async fn rotate(&mut self, low_seq: u64, not_next: bool) -> io::Result<Option<QFile>> {
+
+        // Skip if we're empty.
+        if self.is_empty {
+            if !not_next {
+                self.last_rotate = util::unixtime();
+            }
+            return Ok(None);
+        }
+
         let mut cur_path = PathBuf::from(&self.dir);
         cur_path.push(&self.label);
 
@@ -126,6 +119,8 @@ impl QWriter {
             Ok(()) => {},
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
+                    self.file.take();
+                    self.is_empty = true;
                     return Ok(None);
                 }
                 log::error!(
@@ -140,6 +135,7 @@ impl QWriter {
         }
 
         self.file.take();
+        self.is_empty = true;
 
         if !not_next {
             self.next_seq += 1;
@@ -173,7 +169,7 @@ impl QWriter {
         if self.last_rotate == 0 {
             self.last_rotate = util::unixtime();
         }
-        self.next_seq = std::cmp::min(1, next_seq);
+        self.next_seq = std::cmp::min(2, next_seq);
 
         match self.do_read_seqno(&path).await {
             Ok((seq, time)) => {
@@ -187,7 +183,7 @@ impl QWriter {
                 }
             },
         }
-        log::debug!("QWriter::read_seqno: {}: next_seq {}", self.label, self.next_seq);
+        //log::debug!("QWriter::read_seqno: {}: next_seq {}", self.label, self.next_seq);
     }
 
     async fn do_read_seqno(&self, path: &Path) -> io::Result<(u64, u64)> {
@@ -213,6 +209,19 @@ impl QWriter {
         path.push(&format!(".{}.seq", &self.label));
         let data = format!("{} {} {:x}", low_seqno, self.next_seq, util::unixtime());
         fs::write(&path, &data).await
+    }
+
+    async fn open_qfile(&mut self) -> io::Result<()> {
+        let mut path = PathBuf::from(&self.dir);
+        path.push(&self.label);
+        self.is_empty = true;
+        let file = open_append(&path).await?;
+        match file.metadata().await {
+            Ok(m) if m.len() > 0 => self.is_empty = false,
+            _ => {},
+        }
+        self.file = Some(file);
+        Ok(())
     }
 }
 
@@ -343,14 +352,15 @@ impl QReader {
     // scan the queue directory.
     async fn scan_qfiles(&mut self) -> io::Result<()> {
         let mut rd = fs::read_dir(&self.dir).await.map_err(|e| {
-            ioerr!(e.kind(), "QReader::scan_qfiles: {}: {}", self.dir, e);
+            let e = ioerr!(e.kind(), "QReader::scan_qfiles: {}: {}", self.dir, e);
+            log::error!("{}", e);
             e
         })?;
 
         let mut qfiles = Vec::new();
         while let Ok(Some(entry)) = rd.next_entry().await {
             if let Some(qfile) = QFile::from_dirent(&self.label, &entry).await {
-                log::debug!("qfile: {:?}", qfile);
+                //log::debug!("qfile: {:?}", qfile);
                 qfiles.push(qfile);
             }
         }
@@ -365,7 +375,7 @@ impl QReader {
                 ord
             }
         });
-        log::debug!("qfiles: {:?}", qfiles);
+        //log::debug!("qfiles: {:?}", qfiles);
         self.qfiles = qfiles;
         Ok(())
     }
@@ -379,7 +389,7 @@ impl QReader {
         let mut remove = Vec::new();
         {
             let now = util::unixtime();
-            let min_age = now - 300 * (self.maxqueue as u64);
+            let min_age = now - QUEUE_ROTATE_SECS * (self.maxqueue as u64);
 
             for i in 0..self.qfiles.len() {
                 if self.qfiles[i].time >= min_age {
@@ -424,6 +434,7 @@ struct InnerQueue {
     qwriter: Mutex<QWriter>,
 }
 
+#[derive(Clone)]
 pub struct Queue {
     inner: Arc<InnerQueue>,
 }
@@ -480,13 +491,19 @@ impl Queue {
         let mut qwriter = self.inner.qwriter.lock().await;
         qwriter.read_seqno(high_seq).await;
 
-        // rotate queue file.
+        // rotate queue file if needed.
         let now = util::unixtime();
-        if qwriter.last_rotate < now - 300 {
+        if qwriter.last_rotate < now - QUEUE_ROTATE_SECS {
             if let Ok(Some(qfile)) = qwriter.rotate(low_seq, false).await {
                 qreader.qfiles.push(qfile);
             }
         }
+
+        // Open the main backlog queue file, then close it again. This has the
+        // effect of creating an empty file if it didn't exist yet,
+        // and of setting qwriter.is_empty if it did exist.
+        let _ = qwriter.open_qfile().await;
+        qwriter.file.take();
     }
 
     // get a block of items from the queue, LIFO mode.
@@ -507,7 +524,7 @@ impl Queue {
             let mut try_again = false;
             if qreader.qfiles.len() == 0 {
                 let mut qwriter = self.inner.qwriter.lock().await;
-                if qwriter.file.is_some() {
+                if !qwriter.is_empty {
                     if let Ok(Some(qfile)) = qwriter.rotate(0, true).await {
                         qreader.qfiles.push(qfile);
                         try_again = true;
@@ -521,8 +538,6 @@ impl Queue {
             }
         }
 
-        let offset = qreader.cur_offset;
-
         // take ownership of the file in the Option<File> thingy
         // to work around lifetime issues.
         let mut cur_file = qreader.cur_file.take().unwrap();
@@ -535,8 +550,12 @@ impl Queue {
                     if items.len() == 0 {
                         // We read nothing and hit EOF. Should not happen.
                         // Recovery strategy: close current file, return None.
-                        log::warn!("QReader::read_items: unexpectedly hit EOF. Bug.");
+                        log::warn!(
+                            "QReader::read_items: {}: unexpectedly hit EOF. Bug.",
+                            qreader.cur_name.as_ref().map(|x| x.as_str()).unwrap_or("[unknown]"),
+                        );
                         qreader.cur_eof = true;
+                        qreader.cur_file.replace(cur_file);
                         return None;
                     }
                     break;
@@ -551,6 +570,7 @@ impl Queue {
                             qreader.cur_name.as_ref().unwrap(),
                             e
                         );
+                        qreader.cur_file.replace(cur_file);
                         qreader.cur_eof = true;
                         return None;
                     }
@@ -577,6 +597,7 @@ impl Queue {
         Some(QItems {
             items,
             id,
+            pos: 0,
             done: false,
         })
     }
@@ -600,6 +621,7 @@ impl Queue {
         //log::debug!("ack id {} done {}", id, done);
 
         // See if we still care about this id.
+        items.pos = 0;
         items.done = true;
         if qreader.outstanding.remove(&items.id) {
             if !done {
@@ -632,11 +654,6 @@ impl Queue {
         self.write_items(iter).await
     }
 
-    // XXX IMPORTANT TODO when do we rotate this backlog?
-    // Some ideas:
-    // - if the oldest S.backlog file is more than 5 mins old
-    // - or if there are no backlog files, and the current file is more than 1 minute old.
-    //
     pub async fn write_items<I, S>(&self, items: I) -> io::Result<()>
     where
         I: Iterator<Item = S>,
@@ -646,7 +663,7 @@ impl Queue {
 
         // See if it's time to rotate the queue file.
         let now = util::unixtime();
-        if qwriter.last_rotate + 300 < now {
+        if qwriter.last_rotate + QUEUE_ROTATE_SECS < now {
             let mut qreader = self.inner.qreader.lock().await;
             if let Ok(Some(qfile)) = qwriter.rotate(qreader.low_seq(), false).await {
                 qreader.qfiles.push(qfile);
@@ -660,13 +677,12 @@ impl Queue {
         }
 
         if qwriter.file.is_none() {
-            let mut path = PathBuf::from(&qwriter.dir);
-            path.push(&qwriter.label);
-            let file = open_append(&path).await?;
-            qwriter.file = Some(file);
+            // open the queue file, return error on fail.
+            qwriter.open_qfile().await?;
         }
         let file = qwriter.file.as_mut().unwrap();
         file.write_all(data.as_bytes()).await?;
+        qwriter.is_empty = false;
 
         Ok(())
     }
@@ -697,7 +713,6 @@ impl QFile {
 
         // parse the suffix after the label.
         let caps = PARSE_QFNAME.captures(suffix)?;
-        log::debug!("re caps: {:?}", caps);
         let seq = if caps.get(1).is_some() {
             // It's a label_01 or label_01.S00001 style file. Ignore sequence.
             0
@@ -724,7 +739,7 @@ impl QFile {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::{self, Write};
+    use std::io::Write;
 
     fn write_file(name: &str, content: &str) {
         let name = String::from("/tmp/") + name;
@@ -733,10 +748,10 @@ mod tests {
             .expect("failed to write content");
     }
 
-    fn read_file(name: &str) -> String {
-        let name = String::from("/tmp/") + name;
-        String::from_utf8(fs::read(&name).expect("failed to read file")).unwrap()
-    }
+    //fn read_file(name: &str) -> String {
+    //    let name = String::from("/tmp/") + name;
+    //    String::from_utf8(fs::read(&name).expect("failed to read file")).unwrap()
+    //}
 
     #[tokio::test]
     async fn test1() {
@@ -747,16 +762,14 @@ mod tests {
         q.init().await;
 
         // 1. read "hello", but do not ack
-        let items1 = q.read_items(1).await.unwrap();
-        let mut iter1 = items1.iter_items();
-        assert!(iter1.next() == Some("Hello"));
-        assert!(iter1.next() == None);
+        let mut items1 = q.read_items(1).await.unwrap();
+        assert!(items1.next_str() == Some("Hello"));
+        assert!(items1.next_str() == None);
 
         // 2. read "world".
-        let items2 = q.read_items(10).await.unwrap();
-        let mut iter2 = items2.iter_items();
-        assert!(iter2.next() == Some("World"));
-        assert!(iter2.next() == None);
+        let mut items2 = q.read_items(10).await.unwrap();
+        assert!(items2.next_str() == Some("World"));
+        assert!(items2.next_str() == None);
         q.ack_items(items2).await;
 
         // 3. since the first was not acked, can't read further.
@@ -765,20 +778,18 @@ mod tests {
 
         // 4. now ack.
         q.ack_items(items1).await;
-        let items = q.read_items(10).await.unwrap();
-        let mut iter = items.iter_items();
-        assert!(iter.next() == Some("Hallo"));
-        assert!(iter.next() == Some("Wereld"));
-        assert!(iter.next() == None);
+        let mut items = q.read_items(10).await.unwrap();
+        assert!(items.next_str() == Some("Hallo"));
+        assert!(items.next_str() == Some("Wereld"));
+        assert!(items.next_str() == None);
 
         // Drop the ack, should repeat.
         q.return_items(items).await;
 
-        let items = q.read_items(10).await.unwrap();
-        let mut iter = items.iter_items();
-        assert!(iter.next() == Some("Hallo"));
-        assert!(iter.next() == Some("Wereld"));
-        assert!(iter.next() == None);
+        let mut items = q.read_items(10).await.unwrap();
+        assert!(items.next_str() == Some("Hallo"));
+        assert!(items.next_str() == Some("Wereld"));
+        assert!(items.next_str() == None);
         q.ack_items(items).await;
     }
 }
