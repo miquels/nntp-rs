@@ -75,6 +75,9 @@ pub struct PeerArticle {
     pub location: ArtLoc,
     // Size
     pub size:     usize,
+    // Did it come from the backlog
+    pub from_backlog: bool,
+
 }
 
 /// Fans out articles to the peers.
@@ -218,6 +221,7 @@ impl MasterFeed {
                     msgid:    art.msgid.clone(),
                     location: art.location.clone(),
                     size:     art.size,
+                    from_backlog: false,
                 };
                 if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
                     log::error!(
@@ -695,6 +699,12 @@ impl Connection {
                 delay_for(Duration::new(1, 0)).await;
             }
 
+            // If we were processing backlog messages, put them back
+            // onto the backlog queue.
+            if let Some(qitems) = self.qitems {
+                self.queue.return_items(qitems).await;
+            }
+
             // log stats.
             self.stats.stats_final();
 
@@ -708,7 +718,9 @@ impl Connection {
             {
                 match item {
                     &ConnItem::Check(ref art) | &ConnItem::Takethis(ref art) => {
-                        arts.push(art.clone());
+                        if !art.from_backlog {
+                            arts.push(art.clone());
+                        }
                     },
                     _ => {},
                 }

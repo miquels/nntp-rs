@@ -979,7 +979,7 @@ impl DHistEnt {
             iter: u16::from_ne_bytes(buf[16..18].try_into().unwrap()),
             exp: u16::from_ne_bytes(buf[18..20].try_into().unwrap()),
             boffset: u32::from_ne_bytes(buf[20..24].try_into().unwrap()),
-            bsize: u32::from_ne_bytes(buf[24..84].try_into().unwrap()),
+            bsize: u32::from_ne_bytes(buf[24..28].try_into().unwrap()),
         }
     }
 

@@ -64,6 +64,7 @@ impl QItems {
                     msgid,
                     location,
                     size: 0,
+                    from_backlog: true,
                 });
             }
         }
