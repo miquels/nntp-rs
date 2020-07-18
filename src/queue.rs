@@ -467,7 +467,13 @@ impl Queue {
         }
     }
 
-    pub async fn init(&self) {
+    pub async fn len(&self) -> usize {
+        let qreader = self.inner.qreader.lock().await;
+        let qwriter = self.inner.qwriter.lock().await;
+        qreader.qfiles.len() + (!qwriter.is_empty as usize)
+    }
+
+    pub async fn init(&self) -> usize {
         // scan qeueu files.
         let mut qreader = self.inner.qreader.lock().await;
         let _ = qreader.scan_qfiles().await;
@@ -505,6 +511,9 @@ impl Queue {
         // and of setting qwriter.is_empty if it did exist.
         let _ = qwriter.open_qfile().await;
         qwriter.file.take();
+
+        // Return the number of queue files.
+        qreader.qfiles.len() + (!qwriter.is_empty as usize)
     }
 
     // get a block of items from the queue, LIFO mode.

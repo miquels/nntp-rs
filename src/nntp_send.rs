@@ -383,19 +383,40 @@ impl PeerFeed {
         log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut exiting = false;
 
-        self.queue.init().await;
+        // Tick every 5 seconds.
+        let mut interval = tokio::time::interval(Duration::from_millis(5000));
 
         loop {
             if exiting && self.num_conns == 0 {
                 break;
             }
 
-            // NOTE: since we have a clone of tx_chan ourselves, this will loop forever.
-            // Or at least until we receive ExitGraceful or ExitNow.
-            let item = match self.rx_chan.recv().await {
-                Some(item) => item,
-                None => break,
-            };
+            let item;
+            tokio::select! {
+                _ = interval.next() => {
+                    // see if we need to add connections to process the backlog.
+                    let queue_len = self.queue.len().await;
+                    if queue_len > 0 {
+                        if self.num_conns < self.newspeer.maxparallel / 2 {
+                            self.add_connection().await;
+                        }
+                        // wake up sleeping connections.
+                        let _ = self.broadcast.send(PeerFeedItem::Ping);
+                    }
+                    continue;
+                }
+                res = self.rx_chan.recv() => {
+                    // we got an item from the masterfeed.
+                    match res {
+                        Some(an_item) => item = Some(an_item),
+                        None => {
+                            // unreachable!(), but let's be careful.
+                            break;
+                        },
+                    }
+                }
+            }
+            let item = item.unwrap();
             log::trace!("PeerFeed::run: {}: recv {:?}", self.label, item);
 
             match item {
