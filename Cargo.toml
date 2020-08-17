@@ -33,7 +33,7 @@ clap = "2.33.1"
 core_affinity = "0.5.10"
 crossbeam-channel = "0.4.2"
 crossbeam-queue = "0.2.3"
-curlyconf = { version = "0.1.0-alpha.2", path = "../curlyconf-rs" }
+curlyconf = { version = "0.1.0-alpha.3", path = "../curlyconf-rs" }
 futures = "0.3.5"
 fs2 = "0.4.3"
 jemallocator = "0.3.2"
