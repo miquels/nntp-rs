@@ -2,9 +2,8 @@ use std::default::Default;
 use std::io;
 
 use md5;
-use serde::Deserialize;
 
-#[derive(Clone, Default, Debug, Deserialize)]
+#[derive(Clone, Default, Debug)]
 struct HashEntry {
     start:  u32,
     end:    u32,
@@ -14,7 +13,7 @@ struct HashEntry {
 }
 
 /// A HashFeed is a list of hash matches.
-#[derive(Default, Debug, Clone, Deserialize)]
+#[derive(Default, Debug, Clone)]
 pub struct HashFeed {
     has_and: bool,
     list:    Vec<HashEntry>,
@@ -190,3 +189,16 @@ pub(crate) mod tests {
         assert!(((n >> 6 * 8) & 0xffffffff) as u32 == 0x28d992ea);
     }
 }
+
+use serde::{de, Deserialize, Deserializer};
+
+impl<'de> Deserialize<'de> for HashFeed {
+    fn deserialize<D>(deserializer: D) -> Result<HashFeed, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Vec::<String>::deserialize(deserializer)?;
+        HashFeed::new(&v.join(",")).map_err(de::Error::custom)
+    }
+}
+

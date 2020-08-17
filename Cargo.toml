@@ -37,7 +37,7 @@ curlyconf = { version = "0.1.0-alpha.2", path = "../curlyconf-rs" }
 futures = "0.3.5"
 fs2 = "0.4.3"
 jemallocator = "0.3.2"
-ipnet = "2.3.0"
+ipnet = { version = "2.3.0", features = [ "serde" ] }
 libc = "0.2.71"
 linked-hash-map = "0.5.3"
 log = "0.4.8"
@@ -61,8 +61,7 @@ trust-dns-resolver = "0.19.5"
 typic = "0.3.0"
 users = "0.10.0"
 smallvec = "1.4.0"
-smartstring = "0.2.3"
-lock_api = "0.4.0"
+smartstring = { version = "0.2.3", features = [ "serde" ] }
 
 [dev-dependencies]
 env_logger = "0.7.1"

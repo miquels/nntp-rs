@@ -20,6 +20,7 @@ use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use serde::Deserialize;
 use smartstring::alias::String as SmartString;
 
 use crate::article::Article;
@@ -36,6 +37,7 @@ pub struct NewsFeeds {
     /// The IFILTER label
     pub infilter:       Option<NewsPeer>,
     /// All peers we have.
+    //#[serde(rename = "peer")]
     pub peers:          Vec<NewsPeer>,
     pub peer_map:       HashMap<SmartString, usize>,
     /// And the groupdefs that can be referenced by the peers.
@@ -117,10 +119,11 @@ impl NewsFeeds {
 }
 
 /// Definition of a newspeer.
-#[derive(Default,Debug,Clone)]
+#[derive(Default,Debug,Clone,Deserialize)]
 #[rustfmt::skip]
 pub struct NewsPeer {
     /// Name of this feed.
+    #[serde(rename = "__label__")]
     pub label:              SmartString,
 
     /// used both to filter incoming and outgoing articles.
@@ -163,6 +166,7 @@ pub struct NewsPeer {
     pub preservebytes:      bool,
 
     /// non-config items.
+    #[serde(skip)]
     pub index:              usize,
 }
 

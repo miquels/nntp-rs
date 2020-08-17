@@ -736,3 +736,16 @@ fn classify_line_as_types(buf: &[u8]) -> u8 {
      */
     return istype & isnttype;
 }
+
+use serde::{de, Deserialize, Deserializer};
+
+impl<'de> Deserialize<'de> for ArtType {
+    fn deserialize<D>(deserializer: D) -> Result<ArtType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(|_| de::Error::custom("invalid arttype"))
+    }
+}
+

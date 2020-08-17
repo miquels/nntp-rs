@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 use std::default::Default;
+use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use curlyconf::{Parser, ParserAccess};
 use once_cell::sync::Lazy;
+use serde::{de::Deserializer, de::SeqAccess, de::Visitor, Deserialize};
 
 use super::wildmat;
 
-static IDCOUNTER: Lazy<Arc<AtomicUsize>> = Lazy::new(|| Arc::<AtomicUsize>::default());
+static IDCOUNTER: Lazy<Arc<AtomicU32>> = Lazy::new(|| Arc::<AtomicU32>::default());
 
 /// Match result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,14 +105,14 @@ impl WildPat {
     }
 }
 
-fn new_id() -> u16 {
-    (IDCOUNTER.fetch_add(1, Ordering::SeqCst) & 0xffff) as u16
+fn new_id() -> u32 {
+    (IDCOUNTER.fetch_add(1, Ordering::SeqCst) & 0xffff) as u32
 }
 
 /// A list of wildcard patterns.
 #[derive(Debug, Clone)]
 pub struct WildMatList {
-    pub id:       u16,
+    pub id:       u32,
     pub name:     String,
     pub initial:  MatchResult,
     pub patterns: Vec<WildPat>,
@@ -235,12 +238,12 @@ impl WildMatList {
             let res = if let WildPat::Reference(ref_idx) = p {
                 // a reference. do we have it in cache?
                 let gref = &list.refs[*ref_idx];
-                if let Some(cached) = list.cache.get(&(word_idx as u16, gref.id)).map(|c| c.clone()) {
+                if let Some(cached) = list.cache.get(&(word_idx as u32, gref.id)).map(|c| c.clone()) {
                     cached
                 } else {
                     // recurse.
                     let res = gref.matches2(word, word_idx, list);
-                    list.cache.insert((word_idx as u16, gref.id), res.clone());
+                    list.cache.insert((word_idx as u32, gref.id), res.clone());
                     res
                 }
             } else {
@@ -294,7 +297,7 @@ impl WildMatList {
 /// Passed to WildMatList::matchlistx(). Caches matches in references.
 #[derive(Default, Debug)]
 pub struct MatchList<'a> {
-    cache: HashMap<(u16, u16), Option<MatchResult>>,
+    cache: HashMap<(u32, u32), Option<MatchResult>>,
     words: &'a [&'a str],
     refs:  &'a [WildMatList],
 }
@@ -306,6 +309,58 @@ impl<'a> MatchList<'a> {
     }
     pub fn len(&self) -> usize {
         self.words.len()
+    }
+}
+
+// Deserialize implementation for WildMatList, so that
+// it can be used in structs that implement Deserialize.
+impl<'de> Deserialize<'de> for WildMatList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct WildMatVisitor {
+            parser: Parser,
+        }
+
+        impl<'de> Visitor<'de> for WildMatVisitor {
+            type Value = WildMatList;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a wildmat list")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut patterns = Vec::new();
+                let mut initial = MatchResult::NoMatch;
+
+                while let Some(mut value) = seq.next_element::<String>()? {
+                    match self.parser.value_name().as_str() {
+                        "delgroup" => value.insert_str(0, "!"),
+                        "delgroupany" => value.insert_str(0, "@"),
+                        "groupref" => value.insert_str(0, "="),
+                        _ => {}
+                    }
+                    if patterns.len() == 0 && value.starts_with("!") {
+                        initial = MatchResult::Match;
+                    }
+                    patterns.push(value.parse().unwrap());
+                }
+
+                Ok(WildMatList{
+                    name:     "".to_string(),
+                    initial,
+                    patterns,
+                    id:       new_id(),
+                })
+            }
+        }
+
+        let parser = deserializer.parser();
+        deserializer.deserialize_seq(WildMatVisitor { parser })
     }
 }
 
