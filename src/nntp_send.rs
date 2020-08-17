@@ -157,10 +157,12 @@ impl MasterFeed {
 
         // Now add new peers.
         for peer in &self.newsfeeds.peers {
-            let peer_feed = PeerFeed::new(Peer::new(peer), &self.spool);
-            let tx_chan = peer_feed.get_tx_chan();
-            tokio::spawn(async move { peer_feed.run().await });
-            self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
+            if !self.peerfeeds.contains_key(&peer.label) && peer.outhost != "" {
+                let peer_feed = PeerFeed::new(Peer::new(peer), &self.spool);
+                let tx_chan = peer_feed.get_tx_chan();
+                tokio::spawn(async move { peer_feed.run().await });
+                self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
+            }
         }
     }
 
