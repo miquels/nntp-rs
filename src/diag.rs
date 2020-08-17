@@ -91,10 +91,16 @@ impl SessionStats {
             self.stats[Stats::Rejected as usize] += count;
         }
         self.stats[n] += count;
+        if self.stats[Stats::Received as usize] >= 1024 {
+            self.log_stats();
+        }
     }
 
     pub fn inc(&mut self, field: Stats) {
         self.add(field, 1);
+        if self.stats[Stats::Received as usize] >= 1024 {
+            self.log_stats();
+        }
     }
 
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
@@ -114,7 +120,8 @@ impl SessionStats {
         );
     }
 
-    pub fn on_disconnect(&self) {
+    pub fn on_disconnect(&mut self) {
+        self.log_stats();
         let elapsed = self.instant.elapsed().as_secs();
         log::info!(
             "Disconnect {} from {} {} ({} elapsed)",
@@ -123,13 +130,22 @@ impl SessionStats {
             self.ipaddr,
             elapsed
         );
-        self.log_stats();
+    }
+
+    pub fn log_stats(&mut self) {
+        self.log_mainstats();
         if self.stats[Stats::Rejected as usize] > 0 {
             self.log_rejstats();
         }
+
+        // reset stats.
+        self.instant = Instant::now();
+        for i in 0 .. Stats::NumSlots as usize {
+            self.stats[i] = 0;
+        }
     }
 
-    pub fn log_stats(&self) {
+    pub fn log_mainstats(&self) {
         // This calculation comes straight from diablo, not sure
         // why it is done this way.
         let mut nuse = self.stats[Stats::Check as usize] + self.stats[Stats::Ihave as usize];
@@ -137,16 +153,16 @@ impl SessionStats {
             nuse = self.stats[Stats::Received as usize];
         }
 
-        let elapsed = self.instant.elapsed().as_secs();
-        let dt = std::cmp::max(1, elapsed);
-        let mut rate = nuse as f64 / (dt as f64);
+        let elapsed = self.instant.elapsed().as_millis();
+        let dt = std::cmp::max(1, elapsed) as f64 / 1000f64;
+        let mut rate = nuse as f64 / dt;
         if rate >= 10.0 {
             rate = rate.round();
         }
 
-        log::info!("{} secs={} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
+        log::info!("{} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
             self.hostname,
-            self.instant.elapsed().as_secs(),
+            (elapsed as f64) / 1000f64,
             self.stats[Stats::Ihave as usize],
             self.stats[Stats::Check as usize],
             self.stats[Stats::Takethis as usize],
