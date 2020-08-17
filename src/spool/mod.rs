@@ -214,6 +214,19 @@ struct InnerGroupMap {
     spoolgroup:     usize,
 }
 
+#[doc(hidden)]
+#[derive(Clone,Deserialize,Debug)]
+pub enum AllocStrat {
+    #[serde(rename = "weighted")]
+    Weighted,
+}
+
+impl Default for AllocStrat {
+    fn default() -> AllocStrat {
+        AllocStrat::Weighted
+    }
+}
+
 /// Metaspool is a group of spools.
 #[derive(Clone,Deserialize,Default,Debug)]
 #[rustfmt::skip]
@@ -223,7 +236,7 @@ pub struct MetaSpool {
     pub name:           String,
     /// Article types: control, cancel, binary, base64, yenc etc.
     #[serde(default)]
-    pub arttypes:       Vec<String>,
+    pub arttypes:       Vec<ArtType>,
     /// Accept articles that match this metaspool but discard them.
     #[serde(default,deserialize_with = "util::deserialize_bool")]
     pub dontstore:      bool,
@@ -252,18 +265,20 @@ pub struct MetaSpool {
     pub rejectarts:     bool,
 
     #[doc(hidden)]
-    #[serde(skip)]
-    pub totweight:      u32,
+    pub allocstrat:     AllocStrat,
 
     #[doc(hidden)]
     #[serde(skip)]
-    pub v_arttypes:     Vec<ArtType>,
+    pub totweight:      u32,
 }
 
 /// Configuration for one spool instance.
 #[derive(Deserialize,Default,Debug,Clone)]
 #[rustfmt::skip]
 pub struct SpoolDef {
+    /// Spool number (0..99)
+    #[serde(rename = "__label__")]
+    pub spool_no:   u8,
     /// Backend to use: diablo, cyclic.
     pub backend:    String,
     /// Path to directory (for diablo) or file/blockdev (for cyclic)
@@ -283,9 +298,6 @@ pub struct SpoolDef {
     /// diablo: amount of time to keep articles (seconds, or suffix with s/m/h/d).
     #[serde(default, deserialize_with = "util::deserialize_duration")]
     pub keeptime:   Duration,
-
-    #[serde(skip)]
-    pub spool_no:   u8,
 }
 
 /// Article storage (spool) functionality.
@@ -335,11 +347,8 @@ impl Spool {
                 ));
             }
 
-            // make a copy of the config with spool_no filled in.
-            let mut cfg_c = cfg.clone();
-            cfg_c.spool_no = n;
-
             // expand Path.
+            let mut cfg_c = cfg.clone();
             cfg_c.path = config::expand_path(&mainconfig.paths, &cfg.path);
 
             // if it's still relative, prefix it with paths.spool.
@@ -428,22 +437,6 @@ impl Spool {
                 ms.insert(m.name.clone(), i);
             }
             spoolgroup[i].totweight = totweight;
-
-            // parse arttypes.
-            if spoolgroup[i].arttypes.len() > 0 {
-                let m = &mut spoolgroup[i];
-                let mut v = Vec::new();
-                for w in &m.arttypes {
-                    let a = w.parse().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("metaspool {}: arttype {} unknown", m.name, w),
-                        )
-                    })?;
-                    v.push(a);
-                }
-                m.v_arttypes.append(&mut v);
-            }
         }
 
         // now build the inner spoolgroup list.
@@ -541,7 +534,7 @@ impl Spool {
 
             // XXX FIXME: match hashfeed.
 
-            if !art.arttype.matches(&ms.v_arttypes) {
+            if !art.arttype.matches(&ms.arttypes) {
                 continue;
             }
             if ms.maxsize > 0 && (art.len as u64) > ms.maxsize {
