@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::bus::{self, Notification};
-use crate::config;
+use crate::config::{self, MultiSingle};
 use crate::diag::SessionStats;
 use crate::dns::HostCache;
 use crate::history::History;
@@ -70,18 +70,17 @@ impl Server {
             let config = config::get_config();
 
             // Start the nntp sender.
-            match config.server.runtime.as_str() {
-                "threaded" => {
+            match config.server.runtime {
+                config::Runtime::Threaded(_) => {
                     let server = server.clone();
                     let mut listener_sets = listener_sets;
                     let listeners = listener_sets.pop().unwrap();
                     task::spawn(server.run_threaded(listeners, bus_recv.clone()));
                 },
-                "multisingle" => {
+                config::Runtime::MultiSingle(ref mcfg) => {
                     let server = server.clone();
-                    server.run_multisingle(listener_sets, bus_recv.clone());
+                    server.run_multisingle(mcfg, listener_sets, bus_recv.clone());
                 },
-                _ => unreachable!(),
             }
 
             // SIGUSR1 -> expire.
@@ -93,10 +92,8 @@ impl Server {
     }
 
     /// Run the server on a bunch of current_thread executors.
-    fn run_multisingle(self, mut listener_sets: TcpListenerSets, bus_recv: bus::Receiver) {
-        let config = config::get_config();
-
-        let mut core_ids = config.multisingle.core_ids.clone().unwrap_or(Vec::new());
+    fn run_multisingle(self, mcfg: &MultiSingle, mut listener_sets: TcpListenerSets, bus_recv: bus::Receiver) {
+        let mut core_ids = mcfg.core_ids.clone().unwrap_or(Vec::new());
 
         while let Some(listeners) = listener_sets.pop() {
             let server = self.clone();

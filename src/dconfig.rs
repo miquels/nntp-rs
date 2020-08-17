@@ -12,13 +12,12 @@ use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::str::FromStr;
-use std::time::Duration;
 
 use smartstring::alias::String as SmartString;
 
 use crate::arttype::ArtType;
 use crate::newsfeeds::*;
-use crate::spool::{GroupMap, MetaSpool, SpoolCfg, SpoolDef};
+use crate::spool::SpoolCfg;
 use crate::util::{self, HashFeed, WildMatList};
 
 macro_rules! invalid_data {
@@ -212,137 +211,14 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-// read_dspool_ctl state.
-enum DCState {
-    Init,
-    Spool,
-    MetaSpool,
-}
-
 /// Read SpoolCfg from a "dspool.ctl" file.
 pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
-    let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
-    let file = BufReader::new(file);
-    let mut line_no = 0;
-
-    let mut spool = SpoolDef::default();
-    let mut metaspool = MetaSpool::default();
-
-    let mut state = DCState::Init;
-    let mut info = String::new();
-
-    for line in file.lines() {
-        line_no += 1;
-        info = format!("{}[{}]", name, line_no);
-
-        let line = line.map_err(|e| invalid_data!("{}: {}", info, e))?;
-        let words: Vec<_> = line
-            .split_whitespace()
-            .take_while(|w| !w.starts_with("#"))
-            .collect();
-        if words.len() == 0 {
-            continue;
-        }
-
-        match state {
-            DCState::Init => {
-                match words[0] {
-                    "spool" => {
-                        if words.len() != 2 {
-                            Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
-                        }
-                        let n = match parse_num::<u8>(&words) {
-                            Ok(n) => n,
-                            Err(e) => return Err(invalid_data!("{}: {}", info, e)),
-                        };
-                        spool.spool_no = n;
-                        spool.backend = "diablo".to_string();
-                        let num = n.to_string();
-                        if spool_cfg.spool.contains_key(&num) {
-                            Err(invalid_data!("{}: {}: duplicate spool", info, words[1]))?;
-                        }
-                        state = DCState::Spool;
-                    },
-                    "metaspool" => {
-                        if words.len() != 2 {
-                            Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
-                        }
-                        metaspool.name = words[1].to_string();
-                        state = DCState::MetaSpool;
-                    },
-                    "expire" => {
-                        if words.len() != 3 {
-                            Err(invalid_data!("{}: {}: expected two arguments", info, words[0]))?;
-                        }
-                        spool_cfg.groupmap.push(GroupMap {
-                            groups:     words[1].to_string(),
-                            spoolgroup: words[2].to_string(),
-                        });
-                    },
-                    _ => {
-                        Err(invalid_data!(
-                            "{}: unknown keyword {} (expect spool/metaspool/expire)",
-                            info,
-                            words[0]
-                        ))?
-                    },
-                }
-            },
-            DCState::Spool => {
-                if words[0] == "end" {
-                    if spool.path.is_empty() {
-                        spool.path = format!("P.{:02}", spool.spool_no);
-                    }
-                    spool_cfg.spool.insert(spool.spool_no.to_string(), spool);
-                    spool = SpoolDef::default();
-                    state = DCState::Init;
-                } else {
-                    set_spooldef_item(&mut spool, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
-                }
-            },
-            DCState::MetaSpool => {
-                match words[0] {
-                    "end" => {
-                        spool_cfg.spoolgroup.push(metaspool);
-                        metaspool = MetaSpool::default();
-                        state = DCState::Init;
-                    },
-                    "addgroup" => {
-                        if words.len() != 2 {
-                            Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
-                        }
-                        spool_cfg.groupmap.push(GroupMap {
-                            groups:     words[1].to_string(),
-                            spoolgroup: metaspool.name.clone(),
-                        });
-                    },
-                    _ => {
-                        set_metaspool_item(&mut metaspool, &words)
-                            .map_err(|e| invalid_data!("{}: {}", info, e))?;
-                    },
-                }
-            },
-        }
-    }
-
-    match state {
-        DCState::Init => {},
-        DCState::Spool => {
-            Err(invalid_data!(
-                "{}: unexpected EOF in spool {}",
-                info,
-                spool.spool_no
-            ))?
-        },
-        DCState::MetaSpool => {
-            Err(invalid_data!(
-                "{}: unexpected EOF in metaspool {}",
-                info,
-                metaspool.name
-            ))?
-        },
-    }
-
+    let cfg: SpoolCfg = curlyconf::Builder::new()
+        .mode(curlyconf::Mode::Diablo)
+        .from_file(name)?;
+    spool_cfg.spool.extend(cfg.spool.into_iter());
+    spool_cfg.spoolgroup.extend(cfg.spoolgroup.into_iter());
+    spool_cfg.groupmap.0.extend(cfg.groupmap.0.into_iter());
     Ok(())
 }
 
@@ -461,66 +337,6 @@ fn set_groupdef_item(gdef: &mut GroupDef, words: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
-// Set one item of a SpoolDef
-fn set_spooldef_item(spool: &mut SpoolDef, words: &[&str]) -> io::Result<()> {
-    match words[0] {
-        "backend" => spool.backend = parse_string(words)?,
-        "path" => spool.path = parse_string(words)?,
-        "minfree" => spool.minfree = parse_size(words)?,
-        "maxsize" => spool.maxsize = parse_size(words)?,
-        "keeptime" => spool.keeptime = parse_duration(words)?,
-        "weight" => spool.weight = parse_num::<u32>(words)?,
-
-        // we do not support this, irrelevant, ignore.
-        "expiremethod" => {},
-
-        // we do not support this, warn and ignore.
-        "minfreefiles" | "compresslvl" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
-
-        // we do not support this, error and return.
-        "spooldirs" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,
-
-        // actually don't know.
-        _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
-    }
-    Ok(())
-}
-
-// Set one item of a MetaSpool
-fn set_metaspool_item(ms: &mut MetaSpool, words: &[&str]) -> io::Result<()> {
-    match words[0] {
-        "arttypes" => parse_arttype(&mut ms.v_arttypes, words)?,
-        "dontstore" => ms.dontstore = parse_bool(words)?,
-        "rejectarts" => ms.rejectarts = parse_bool(words)?,
-
-        "hashfeed" => ms.hashfeed = parse_hashfeed(words)?,
-        "maxsize" => ms.maxsize = parse_size(words)?,
-        "maxcross" => ms.maxcross = parse_num::<u32>(words)?,
-        "reallocint" => ms.reallocint = parse_duration(words)?,
-
-        "spool" => parse_num_list(&mut ms.spool, words, ",")?,
-
-        "allocstrat" => {
-            let s = parse_string(words)?;
-            match s.as_str() {
-                "space" => Err(invalid_data!("{} space: not supported (only weighted)", words[0]))?,
-                "sequential" | "single" => {
-                    log::warn!("{} {}: ignoring, always using \"weighted\"", words[0], s)
-                },
-                "weighted" => {},
-                _ => Err(invalid_data!("{} {}: unknown allocstrat", words[0], s))?,
-            }
-        },
-
-        // we do not support this, fatal.
-        "label" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,
-
-        // actually don't know.
-        _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
-    }
-    Ok(())
-}
-
 //
 // Below are a bunch of parsing helpers for the set_STRUCT_item functions.
 //
@@ -586,14 +402,6 @@ fn parse_size(words: &[&str]) -> io::Result<u64> {
     util::parse_size(words[1])
 }
 
-// parse a Duration
-fn parse_duration(words: &[&str]) -> io::Result<Duration> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    util::parse_duration(words[1])
-}
-
 // parse a bool.
 fn parse_bool(words: &[&str]) -> io::Result<bool> {
     if words.len() == 1 {
@@ -650,21 +458,3 @@ fn parse_arttype(arttypes: &mut Vec<ArtType>, words: &[&str]) -> io::Result<()> 
     Ok(())
 }
 
-// parse a list of numbers, seperated by a character from "sep".
-fn parse_num_list<T>(list: &mut Vec<T>, words: &[&str], sep: &str) -> io::Result<()>
-where
-    T: FromStr,
-    T: Default,
-    T: Debug,
-    <T as FromStr>::Err: Debug + Display,
-{
-    let mut wl = Vec::new();
-    parse_list(&mut wl, words, sep)?;
-    for w in wl.into_iter() {
-        let n = w
-            .parse::<T>()
-            .map_err(|e| invalid_data!("{} {}: {}", words[0], w, e))?;
-        list.push(n);
-    }
-    Ok(())
-}

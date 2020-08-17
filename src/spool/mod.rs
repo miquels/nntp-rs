@@ -154,24 +154,57 @@ impl ArtLoc {
 #[rustfmt::skip]
 pub struct SpoolCfg {
     /// Map of spools. Index is a number 0..99.
-    #[serde(default)]
-    pub spool:      HashMap<String, SpoolDef>,
+    pub spool:      HashMap<u8, SpoolDef>,
     /// List of spool groups (metaspool in diablo).
-    #[serde(default)]
     pub spoolgroup: Vec<MetaSpool>,
-    #[serde(skip)]
-    #[doc(hidden)]
-    // used internally, and by dspool.ctl.
-    pub groupmap:   Vec<GroupMap>,
+    /// The `expire' line in dspool.ctl
+    #[serde(rename = "expire")]
+    pub groupmap:   GroupMap,
 }
 
 // used internally, and by dspool.ctl.
 #[doc(hidden)]
 #[derive(Clone,Default,Debug)]
-#[rustfmt::skip]
-pub struct GroupMap {
+pub struct GroupMap(pub Vec<GroupMapEntry>);
+
+#[doc(hidden)]
+#[derive(Clone,Debug)]
+pub struct GroupMapEntry {
     pub groups:     String,
     pub spoolgroup: String,
+}
+
+use serde::{de::Deserializer, de::MapAccess, de::Visitor};
+
+impl<'de> Deserialize<'de> for GroupMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct GroupMapVisitor;
+
+        impl<'de> Visitor<'de> for GroupMapVisitor {
+            type Value = GroupMap;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("wildmat and spoolgroup")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut v = Vec::new();
+                while let Some(groups) = map.next_key::<String>()? {
+                    let spoolgroup = map.next_value()?;
+                    v.push(GroupMapEntry{groups, spoolgroup});
+                }
+                Ok(GroupMap(v))
+            }
+        }
+
+        deserializer.deserialize_map(GroupMapVisitor)
+    }
 }
 
 #[derive(Clone,Default,Debug)]
@@ -186,6 +219,7 @@ struct InnerGroupMap {
 #[rustfmt::skip]
 pub struct MetaSpool {
     /// name of this metaspool.
+    #[serde(rename = "__label__")]
     pub name:           String,
     /// Article types: control, cancel, binary, base64, yenc etc.
     #[serde(default)]
@@ -278,7 +312,7 @@ struct SpoolInner {
 
 impl Spool {
     /// initialize all storage backends.
-    pub fn new(spoolcfg: &SpoolCfg, threads: Option<usize>, bt: Option<BlockingType>) -> io::Result<Spool> {
+    pub fn new(spoolcfg: &SpoolCfg, threads: Option<usize>, bt: BlockingType) -> io::Result<Spool> {
         let mainconfig = config::get_config();
 
         // very basic check
@@ -291,16 +325,15 @@ impl Spool {
 
         // parse spool definitions.
         let mut spools = HashMap::new();
-        for (num, cfg) in &spoolcfg.spool {
-            let n = match num.parse::<u8>() {
-                Ok(n) if n < 100 => n,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("[spool.{}]: invalid spool number", num),
-                    ));
-                },
-            };
+        for (n, cfg) in &spoolcfg.spool {
+
+            let n = *n;
+            if n >= 100 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("[spool.{}]: invalid spool number", n),
+                ));
+            }
 
             // make a copy of the config with spool_no filled in.
             let mut cfg_c = cfg.clone();
@@ -342,7 +375,7 @@ impl Spool {
                 e => {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("[spool.{}]: unknown backend {}", num, e),
+                        format!("[spool.{}]: unknown backend {}", n, e),
                     ))
                 },
             }?;
@@ -387,7 +420,7 @@ impl Spool {
                     }
                 }
                 for g in &m.groups {
-                    gm.push(GroupMap {
+                    gm.0.push(GroupMapEntry {
                         groups:     g.clone(),
                         spoolgroup: m.name.clone(),
                     });
@@ -415,7 +448,7 @@ impl Spool {
 
         // now build the inner spoolgroup list.
         let mut groupmap = Vec::new();
-        for m in &gm {
+        for m in &gm.0 {
             // find the index of this spoolgroup
             let i = match ms.get(&m.spoolgroup) {
                 None => {

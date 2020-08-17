@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod errors;
+
 pub mod article;
 pub mod arttype;
 pub mod bus;
@@ -6,8 +9,6 @@ pub mod config;
 pub mod dconfig;
 pub mod diag;
 pub mod dns;
-#[macro_use]
-pub mod errors;
 pub mod history;
 pub mod logger;
 pub mod newsfeeds;

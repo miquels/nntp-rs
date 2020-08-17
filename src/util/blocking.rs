@@ -14,6 +14,7 @@
 //!
 use std::sync::Arc;
 
+use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio::task;
 
@@ -28,20 +29,27 @@ pub(crate) struct InnerBlockingPool {
     sem:           Semaphore,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub enum BlockingType {
+    #[serde(rename = "in_place")]
     InPlace,
+    #[serde(rename = "threadpool")]
     ThreadPool,
+    #[serde(rename = "blocking")]
     Blocking,
+}
+
+impl Default for BlockingType {
+    fn default() -> BlockingType {
+        BlockingType::ThreadPool
+    }
 }
 
 #[allow(non_upper_case_globals)]
 impl BlockingPool {
-    pub fn new(btype: Option<BlockingType>, max_threads: usize) -> BlockingPool {
+    pub fn new(bt: BlockingType, max_threads: usize) -> BlockingPool {
         // max nr of blocking threads.
         let max_t = if max_threads == 0 { 128 } else { max_threads };
-        // method of handling blocking calls.
-        let bt = btype.unwrap_or(BlockingType::ThreadPool);
 
         BlockingPool {
             inner: Arc::new(InnerBlockingPool {

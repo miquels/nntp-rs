@@ -27,7 +27,7 @@ use crate::util::{BlockingPool, BlockingType};
 pub struct DHistory {
     inner:         ArcSwap<DHistoryInner>,
     blocking_pool: BlockingPool,
-    blocking_type: Option<BlockingType>,
+    blocking_type: BlockingType,
     num_threads:   Option<usize>,
 }
 
@@ -92,7 +92,7 @@ impl DHistory {
         path: &Path,
         rw: bool,
         threads: Option<usize>,
-        bt: Option<BlockingType>,
+        bt: BlockingType,
     ) -> io::Result<DHistory>
     {
         let inner = DHistoryInner::open(path, rw)?;

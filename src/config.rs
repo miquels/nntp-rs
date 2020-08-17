@@ -1,9 +1,8 @@
 ///
 /// Configuration file reader and checker.
 ///
-use std::fs::File;
+use std::collections::HashMap;
 use std::io;
-use std::io::prelude::*;
 use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
 use std::str::FromStr;
@@ -20,46 +19,61 @@ use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by
 
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
-use crate::spool::SpoolCfg;
+use crate::spool::{SpoolCfg, SpoolDef, MetaSpool};
 use crate::util;
 use crate::util::BlockingType;
-
-use toml;
 
 static CONFIG: Lazy<RwLock<Option<Arc<Config>>>> = Lazy::new(|| RwLock::new(None));
 static NEWSFEEDS: Lazy<RwLock<Option<Arc<NewsFeeds>>>> = Lazy::new(|| RwLock::new(None));
 
-/// Toml config.
+/// Curlyconf configuration.
 #[derive(Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct Config {
     pub server:     Server,
-    #[serde(default,flatten)]
-    pub spool:      SpoolCfg,
     pub history:    HistFile,
     pub paths:      Paths,
     pub config:     CfgFiles,
-    #[serde(default)]
+    #[serde(default, rename = "log")]
     pub logging:    Logging,
     #[serde(default)]
-    pub multisingle:    MultiSingle,
+    pub runtime:    Runtime,
+    // Map of spools. Index is a number 0..99.
+    #[serde(rename = "spool", default)]
+    spooldef:       Option<HashMap<u8, SpoolDef>>,
+    // List of spool groups (metaspool in diablo).
     #[serde(default)]
-    pub threaded: Threaded,
+    spoolgroup:     Option<Vec<MetaSpool>>,
     #[serde(skip)]
     pub timestamp:  u64,
     #[serde(skip)]
     newsfeeds:      Option<NewsFeeds>,
+    /// Flattened SpoolCfg (spool / spoolgroup).
+    #[serde(skip)]
+    pub spool:      SpoolCfg,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Runtime {
+    Threaded(Threaded),
+    MultiSingle(MultiSingle),
+}
+
+impl Default for Runtime {
+    fn default() -> Runtime {
+        Runtime::Threaded(Threaded::default())
+    }
 }
 
 /// Server config table in Toml config file.
 #[derive(Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct Server {
-    #[serde(default)]
+    #[serde(default = "util::hostname")]
     pub hostname:       String,
-    pub listen:         Option<StringOrVec>,
-    #[serde(default)]
-    pub runtime:        String,
+    pub listen:         Option<Vec<String>>,
+    pub runtime:        Runtime,
     pub user:           Option<String>,
     pub group:          Option<String>,
     pub uid:            Option<users::uid_t>,
@@ -86,7 +100,9 @@ pub struct Paths {
 #[derive(Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct CfgFiles {
+    #[serde(rename = "newsfeeds")]
     pub dnewsfeeds:     String,
+    #[serde(rename = "spool")]
     pub dspool_ctl:     Option<String>,
     pub diablo_hosts:   Option<String>,
 }
@@ -125,10 +141,8 @@ pub struct MultiSingle {
 #[derive(Default,Deserialize,Debug)]
 #[rustfmt::skip]
 pub struct Threaded {
-    // "in_place", "threadpool", "blocking".
-    pub blocking_io:        Option<String>,
-    #[serde(skip)]
-    pub blocking_type:      Option<BlockingType>,
+    #[serde(rename = "blocking_io")]
+    pub blocking_type:      BlockingType,
 }
 
 impl std::fmt::Debug for MultiSingle {
@@ -143,23 +157,11 @@ impl std::fmt::Debug for MultiSingle {
 
 /// Read the configuration.
 pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
-    let mut f = File::open(name)?;
-    let mut buffer = String::new();
-    f.read_to_string(&mut buffer)?;
+    let mut cfg: Config = curlyconf::from_file(name)?;
 
-    let mut cfg: Config = match toml::from_str(&buffer) {
-        Ok(v) => v,
-        Err(e) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {}", name, e),
-            ))
-        },
-    };
-
-    if cfg.server.hostname == "" {
-        cfg.server.hostname = util::hostname();
-    }
+    // Because #[serde(flatten)] does not work in structs, do it manually.
+    cfg.spool.spool = cfg.spooldef.take().unwrap_or(Default::default());
+    cfg.spool.spoolgroup = cfg.spoolgroup.take().unwrap_or(Default::default());
 
     match cfg.server.maxartsize {
         None => cfg.server.maxartsize = Some(10_000_000),
@@ -167,42 +169,14 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
         _ => {},
     }
 
-    match cfg.server.runtime.as_str() {
-        "" => cfg.server.runtime = "threaded".to_string(),
-        "threaded" => {},
-        "multisingle" => {},
-        r => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown runtime type: {}", r),
-            ))
-        },
-    }
-
-    match cfg.server.runtime.as_str() {
-        "threaded" => {
-            match cfg.threaded.blocking_io.as_ref().map(|s| s.as_str()) {
-                Some("in_place") => cfg.threaded.blocking_type = Some(BlockingType::InPlace),
-                Some("threadpool") => cfg.threaded.blocking_type = Some(BlockingType::ThreadPool),
-                Some("blocking") => cfg.threaded.blocking_type = Some(BlockingType::Blocking),
-                Some(b) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unknown blocking_on type: {}", b),
-                    ))
-                },
-                None => {},
-            }
-        },
-        _ => {},
-    }
-
     // If user or group was set
     resolve_user_group(&mut cfg)?;
 
     // Check the [multisingle] config
-    check_multisingle(&mut cfg)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("multisingle: {}", e)))?;
+    if let Runtime::MultiSingle(ref mut multisingle) = cfg.runtime {
+        check_multisingle(multisingle)
+            .map_err(|e| ioerr!(InvalidData, format!("multisingle: {}", e)))?;
+    }
 
     if load_newsfeeds {
         let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
@@ -407,11 +381,11 @@ fn parse_cores(s: &str) -> io::Result<Vec<CoreId>> {
     Ok(res)
 }
 
-fn check_multisingle(cfg: &mut Config) -> io::Result<()> {
+fn check_multisingle(multisingle: &mut MultiSingle) -> io::Result<()> {
     // "threads_per_core" might be set, but then "cores" must be set as well.
-    let tpc = match cfg.multisingle.threads_per_core {
+    let tpc = match multisingle.threads_per_core {
         Some(tpc) => {
-            if cfg.multisingle.cores.is_none() {
+            if multisingle.cores.is_none() {
                 return Err(err_invalid("threads_per_core: \"cores\" must be set first"));
             }
             tpc
@@ -419,18 +393,18 @@ fn check_multisingle(cfg: &mut Config) -> io::Result<()> {
         None => 1,
     };
     // parse "cores" if set.
-    if let Some(cores) = cfg.multisingle.cores.as_ref() {
+    if let Some(cores) = multisingle.cores.as_ref() {
         let mut res = Vec::new();
         for c in &parse_cores(cores.as_str()).map_err(|e| err_invalid2("cores", e.to_string()))? {
             for _ in 0..tpc {
                 res.push(c.clone());
             }
         }
-        cfg.multisingle.core_ids = Some(res);
+        multisingle.core_ids = Some(res);
     }
     // if "threads" is set, the numbers must match up.
-    if let Some(threads) = cfg.multisingle.threads {
-        if let Some(core_ids) = cfg.multisingle.core_ids.as_ref() {
+    if let Some(threads) = multisingle.threads {
+        if let Some(core_ids) = multisingle.core_ids.as_ref() {
             if core_ids.len() != threads {
                 if tpc == 1 {
                     return Err(err_invalid("threads: must match cores"));
@@ -443,25 +417,14 @@ fn check_multisingle(cfg: &mut Config) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum StringOrVec {
-    String(String),
-    Vec(Vec<String>),
-}
-
 pub fn parse_listener(s: impl Into<String>) -> Result<SocketAddr, AddrParseError> {
     SocketAddr::from_str(&s.into())
 }
 
-pub fn parse_listeners(l: &Option<StringOrVec>) -> io::Result<Vec<SocketAddr>> {
-    let v = match l.as_ref() {
-        Some(&StringOrVec::String(ref s)) => vec![s.to_string()],
-        Some(&StringOrVec::Vec(ref v)) => v.to_vec(),
-        None => vec![":119".to_string()],
-    };
+pub fn parse_listeners(listeners: Option<&Vec<String>>) -> io::Result<Vec<SocketAddr>> {
+    let dfl = vec![":119".to_string()];
     let mut res = Vec::new();
-    for l in v.iter().map(|s| s.as_str()) {
+    for l in listeners.unwrap_or(&dfl).iter().map(|s| s.as_str()) {
         if l.starts_with(":") {
             let p = (&l[1..])
                 .parse::<u16>()

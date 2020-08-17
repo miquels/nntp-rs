@@ -23,8 +23,8 @@ static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 #[derive(StructOpt, Debug)]
 #[structopt(setting = clap::AppSettings::VersionlessSubcommands)]
 pub struct MainOpts {
-    #[structopt(short, long, default_value = "config.toml")]
-    /// Config file (config.toml)
+    #[structopt(short, long, default_value = "config.cfg")]
+    /// Config file (config.cfg)
     pub config: String,
     #[structopt(short, long)]
     /// Maximum log verbosity: debug (info)
@@ -172,24 +172,16 @@ fn main() -> Result<()> {
         other => run_subcommand(other, Some(&*config), opts.pretty),
     };
 
-    let mut listenaddrs = &config.server.listen;
-    let cmd_listenaddrs;
-    if let Some(ref l) = run_opts.listen {
-        cmd_listenaddrs = Some(config::StringOrVec::Vec(l.to_vec()));
-        listenaddrs = &cmd_listenaddrs;
-    }
+    let listenaddrs = run_opts.listen.as_ref().or_else(|| config.server.listen.as_ref());
     let addrs = config::parse_listeners(listenaddrs).unwrap_or_else(|e| {
         eprintln!("nntp-rs: {}", e);
         exit(1);
     });
-    let num_sets = match config.server.runtime.as_str() {
-        "multisingle" => {
-            match config.multisingle.core_ids {
-                Some(ref c) => c.len(),
-                None => num_cpus::get(),
-            }
+    let num_sets = match config.server.runtime {
+        config::Runtime::MultiSingle(ref multisingle) => {
+            multisingle.core_ids.as_ref().map(|c| c.len()).unwrap_or(num_cpus::get())
         },
-        _ => 1,
+        config::Runtime::Threaded(_) => 1,
     };
     let listener_sets = TcpListenerSets::new(&addrs, num_sets).unwrap_or_else(|e| {
         eprintln!("nntp-rs: {}", e);
@@ -224,7 +216,10 @@ fn main() -> Result<()> {
         },
     }
 
-    let bt = config.threaded.blocking_type.clone();
+    let bt = match config.runtime {
+        config::Runtime::Threaded(ref threaded) => threaded.blocking_type.clone(),
+        config::Runtime::MultiSingle(_) => BlockingType::default(),
+    };
 
     // open history file. this will remain open as long as we run,
     // configuration file changes do not influence that.
@@ -307,12 +302,12 @@ fn history_common(
         hpath.clone(),
         false,
         None,
-        Some(BlockingType::Blocking),
+        BlockingType::Blocking,
     )
     .map_err(|e| ioerr!(e.kind(), "nntp-rs: history {}: {}", hpath, e))?;
 
     // open spool.
-    let spool = Spool::new(&config.spool, None, Some(BlockingType::Blocking))
+    let spool = Spool::new(&config.spool, None, BlockingType::Blocking)
         .map_err(|e| ioerr!(e.kind(), "nntp-rs: initializing spool: {}", e))?;
 
     Ok((hist, spool))

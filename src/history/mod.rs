@@ -139,7 +139,7 @@ impl History {
         path: impl AsRef<Path>,
         rw: bool,
         threads: Option<usize>,
-        bt: Option<BlockingType>,
+        bt: BlockingType,
     ) -> io::Result<History>
     {
         let h: Box<dyn HistBackend> = match tp {
