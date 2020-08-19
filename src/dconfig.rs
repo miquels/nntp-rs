@@ -11,33 +11,31 @@
 //!
 use std::collections::HashSet;
 use std::default::Default;
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug};
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
-use std::str::FromStr;
 
-use serde::{de::Deserializer, de::MapAccess, de::Visitor};
-use smartstring::alias::String as SmartString;
+use serde::{Deserialize, de::Deserializer, de::MapAccess, de::SeqAccess, de::Visitor};
 
 use crate::newsfeeds::*;
-use crate::spool::{SpoolCfg, GroupMap, GroupMapEntry};
+use crate::spool::{SpoolCfg, SpoolDef, MetaSpool, GroupMap, GroupMapEntry};
 use crate::util::WildMatList;
 
 // A type where a "dnewsfeeds" file can deserialize into.
 #[derive(Default, Debug, Deserialize)]
 struct DNewsFeeds {
     #[serde(rename = "label")]
-    pub label:      Label,
+    pub labels:     Labels,
     pub groupdef:   Vec<GroupDef>,
 }
 
 // Convert the DnewsFeeds we just read into a NewsFeeds.
 impl From<DNewsFeeds> for NewsFeeds {
-    fn from(mut dnf: DNewsFeeds) -> NewsFeeds {
+    fn from(dnf: DNewsFeeds) -> NewsFeeds {
         let mut nf = NewsFeeds::new();
-        nf.infilter = dnf.ifilter;
-        nf.peers = dnf.label.peers;
+        nf.infilter = dnf.labels.ifilter;
+        nf.peers = dnf.labels.peers;
         for idx in 0 .. nf.peers.len() {
             nf.peer_map.insert(nf.peers[idx].label.as_str().into(), idx);
 
@@ -58,7 +56,7 @@ impl From<DNewsFeeds> for NewsFeeds {
                 }
             }
         }
-        for gd in dnf.groups.into_iter() {
+        for gd in dnf.groupdef.into_iter() {
             let mut groups = gd.groups;
             groups.name = gd.label;
             nf.groupdefs.push(groups);
@@ -79,8 +77,8 @@ struct GroupDef {
 //
 // We use our own map-like deserializer so that we can handle
 // labels like IFILTER/GLOBAL/ISPAM/ESPAM differently.
-#[derive(Default)]
-struct Label {
+#[derive(Default, Debug)]
+struct Labels {
     global:     Option<NewsPeer>,
     ifilter:    Option<NewsPeer>,
     ispam:      Option<NewsPeer>,
@@ -88,15 +86,15 @@ struct Label {
     peers:      Vec<NewsPeer>,
 }
 
-impl<'de> Deserialize<'de> for Label {
+impl<'de> Deserialize<'de> for Labels {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct LabelVisitor;
+        struct LabelsVisitor;
 
-        impl<'de> Visitor<'de> for LabelVisitor {
-            type Value = Label;
+        impl<'de> Visitor<'de> for LabelsVisitor {
+            type Value = Labels;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("a dnewsfeeds entry")
@@ -106,40 +104,36 @@ impl<'de> Deserialize<'de> for Label {
             where
                 A: MapAccess<'de>,
             {
-                let mut this = Label::default();
+                let mut this = Labels::default();
 
-                // We assume that we do two passes over the dnewsfeeds file:
-                // 1. to read the GLOBAL label and discard the rest
-                // 2. to read the other labels while using GLOBAL as a default.
-                let first = get_default_newspeer().label == "";
                 while let Some(label) = map.next_key::<String>()? {
-                    let mut peer = map.next_value()?;
-                    if first {
-                        if label == "GLOBAL" {
-                            set_default_newspeer(peer);
-                        }
-                        continue;
-                    }
+                    let peer = map.next_value()?;
                     match label.as_str() {
-                        "GLOBAL" => {},
+                        "GLOBAL" => {
+                            use serde::de::Error;
+                            if this.peers.len() > 0 {
+                                return Err(Error::custom("GLOBAL must come before peer labels"));
+                            }
+                            if get_default_newspeer().label.as_str() != "" {
+                                return Err(Error::custom("GLOBAL already set"));
+                            }
+                            set_default_newspeer(peer);
+                        },
+                        // old xs4all legacy.
+                        "%XCLIENT" => {},
+                        // filters
                         "IFILTER" => this.ifilter = Some(peer),
                         "ISPAM" => this.ispam = Some(peer),
                         "ESPAM" => this.espam = Some(peer),
+                        // peer.
                         _ => this.peers.push(peer),
                     }
-                }
-                if first {
-                    // Make sure that the default newspeer is initialized, even
-                    // if there was no GLOBAL entry.
-                    let mut global = get_default_newspeer();
-                    global.label = "GLOBAL".to_string();
-                    set_default_newspeer(global);
                 }
                 Ok(this)
             }
         }
 
-        deserializer.deserialize_map(LabelVisitor)
+        deserializer.deserialize_map(LabelsVisitor)
     }
 }
 
@@ -150,7 +144,7 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
     check_dnewsfeeds(name)?;
 
     // Now build the config reader configuration.
-    let cfg_buider = curlyconf::Builder::new()
+    let dnf: DNewsFeeds = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
 
         .alias::<NewsPeer>("nofilter", "filter")
@@ -198,26 +192,21 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .ignore::<NewsPeer>("delayinfeed")
         .ignore::<NewsPeer>("genlines")
         .ignore::<NewsPeer>("setqos")
-        .ignore::<NewsPeer>("settos");
+        .ignore::<NewsPeer>("settos")
 
-    // Parse the config twice. The first time we only parse
-    // the GLOBAL entry, the second time the GLOBAL entry is
-    // used for NewsPeer defaults.
-    set_default_newspeer(NewsPeer::default());
-    let _ = cfg_builder.clone().from_file(name)?;
-    let mut dnf: DNewsFeeds = cfg_builder.from_file(name)?;
+        .from_file(name)?;
 
     // And build a 'NewsFeeds' struct.
-    let nf = dnf.into();
+    let mut nf: NewsFeeds = dnf.into();
     nf.resolve_references();
 
-    Ok(())
+    Ok(nf)
 }
 
 /// Read SpoolCfg from a "dspool.ctl" file.
 pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
     // First, do a compat check.
-    check_spool_ctl(name)?;
+    check_dspool_ctl(name)?;
 
     // Then actually read the config.
     let cfg: SpoolCfg = curlyconf::Builder::new()
@@ -275,10 +264,12 @@ impl<'de> Deserialize<'de> for GroupMap {
 }
 
 // deserializer for `distributions: Vec<String>` so that 'addist' and 'deldist' work.
-pub(crate) fn deserialize_distributions<D>(deserializer: D) -> Result<Self, D::Error>
+pub(crate) fn deserialize_distributions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
+    use curlyconf::ParserAccess;
+
     struct DistVisitor {
         parser: curlyconf::Parser,
     }
@@ -350,7 +341,7 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
             Err(ioerr!(InvalidData, "{}: {}: missing label", info, words[0]))?;
         }
         if words.len() > 2 {
-            Err(ioerr!(InvalidTata, "{}: {}: data after label", info, words[0]))?;
+            Err(ioerr!(InvalidData, "{}: {}: data after label", info, words[0]))?;
         }
         match nf.peer_map.get(words[1]) {
             None => log::warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
@@ -374,7 +365,7 @@ enum DNState {
 /// We do this to check if there are settings that we don't support
 /// anymore. Some of those settings we just ignore, others we ignore
 /// with a warning, and for some settings we generate an error.
-fn check_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
+fn check_dnewsfeeds(name: &str) -> io::Result<()> {
     let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
     let file = BufReader::new(file);
 
@@ -383,7 +374,8 @@ fn check_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
     let mut state= DNState::Init;
 
     let mut groupdefs: HashSet<String> = HashSet::new();
-    let mut labels: HashSet<String> = HashSet::new();
+    let mut peers: HashSet<String> = HashSet::new();
+    let mut label = String::new();
 
     for line in file.lines() {
         line_no += 1;
@@ -403,7 +395,7 @@ fn check_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
                         if words.len() != 2 {
                             Err(ioerr!(InvalidData, "{}: {}: expected one argument", info, words[0]))?;
                         }
-                        if labels.contains(words[0]) {
+                        if peers.contains(words[0]) {
                             Err(ioerr!(InvalidData, "{}: {}: duplicate label", info, words[1]))?;
                         }
                         match words[1] {
@@ -460,7 +452,7 @@ fn check_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         DNState::GroupDef => Err(ioerr!(InvalidData, "{}: unexpected EOF in groupdef {}", info, label))?,
     }
 
-    Ok(feeds)
+    Ok(())
 }
 
 // Check newspeer items.
@@ -561,7 +553,7 @@ fn check_dspool_ctl(name: &str) -> io::Result<()> {
                         if words.len() != 2 {
                             Err(ioerr!(InvalidData,"{}: {}: expected one argument", info, words[0]))?;
                         }
-                        spool_no = match parse_num::<u8>(&words) {
+                        spool_no = match words[1].parse() {
                             Ok(n) => n,
                             Err(e) => return Err(ioerr!(InvalidData,"{}: {}", info, e)),
                         };

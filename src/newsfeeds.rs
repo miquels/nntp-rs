@@ -286,7 +286,7 @@ use once_cell::sync::Lazy;
 static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::default())));
 
 pub(crate) fn get_default_newspeer() -> NewsPeer {
-    GLOBAL.load().clone()
+    GLOBAL.load().as_ref().clone()
 }
 
 pub(crate) fn set_default_newspeer(peer: NewsPeer) {
