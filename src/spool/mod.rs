@@ -157,8 +157,9 @@ pub struct SpoolCfg {
     pub spool:      HashMap<u8, SpoolDef>,
     /// List of spool groups (metaspool in diablo).
     pub spoolgroup: Vec<MetaSpool>,
-    /// The `expire' line in dspool.ctl
-    #[serde(rename = "expire")]
+    // The `expire' line in dspool.ctl
+    // Used internally as well, otherwise obsolete (use "groups" in spoolgroup).
+    #[doc(hidden)]
     pub groupmap:   GroupMap,
 }
 
@@ -172,39 +173,6 @@ pub struct GroupMap(pub Vec<GroupMapEntry>);
 pub struct GroupMapEntry {
     pub groups:     String,
     pub spoolgroup: String,
-}
-
-use serde::{de::Deserializer, de::MapAccess, de::Visitor};
-
-impl<'de> Deserialize<'de> for GroupMap {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct GroupMapVisitor;
-
-        impl<'de> Visitor<'de> for GroupMapVisitor {
-            type Value = GroupMap;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("wildmat and spoolgroup")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut v = Vec::new();
-                while let Some(groups) = map.next_key::<String>()? {
-                    let spoolgroup = map.next_value()?;
-                    v.push(GroupMapEntry{groups, spoolgroup});
-                }
-                Ok(GroupMap(v))
-            }
-        }
-
-        deserializer.deserialize_map(GroupMapVisitor)
-    }
 }
 
 #[derive(Clone,Default,Debug)]

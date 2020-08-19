@@ -339,9 +339,12 @@ impl<'de> Deserialize<'de> for WildMatList {
 
                 while let Some(mut value) = seq.next_element::<String>()? {
                     match self.parser.value_name().as_str() {
+                        // addgroup / delgroup / delgroupany / groupref
                         "delgroup" => value.insert_str(0, "!"),
                         "delgroupany" => value.insert_str(0, "@"),
                         "groupref" => value.insert_str(0, "="),
+                        // filter / nofilter
+                        "nofilter" => value.insert_str(0, "!"),
                         _ => {}
                     }
                     if patterns.len() == 0 && value.starts_with("!") {

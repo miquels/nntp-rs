@@ -25,6 +25,7 @@ use smartstring::alias::String as SmartString;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
+use crate::dconfig;
 use crate::dns::HostCache;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
 
@@ -119,8 +120,9 @@ impl NewsFeeds {
 }
 
 /// Definition of a newspeer.
-#[derive(Default,Debug,Clone,Deserialize)]
 #[rustfmt::skip]
+#[derive(Default,Debug,Clone,Deserialize)]
+#[serde(default = "get_default_newspeer")]
 pub struct NewsPeer {
     /// Name of this feed.
     #[serde(rename = "__label__")]
@@ -128,6 +130,9 @@ pub struct NewsPeer {
 
     /// used both to filter incoming and outgoing articles.
     pub pathalias:          Vec<String>,
+
+    // if set, sets inhost, outhost, and pathalias in dnewsfeeds.
+    pub(crate) host:        String,
 
     /// used on connects from remote host
     pub inhost:             Vec<String>,
@@ -143,13 +148,17 @@ pub struct NewsPeer {
     /// used to select outgoing articles.
     pub maxcross:           u32,
     pub maxpath:            u32,
+    #[serde(default,deserialize_with = "util::deserialize_size")]
     pub maxsize:            u64,
+    #[serde(default,deserialize_with = "util::deserialize_size")]
     pub minsize:            u64,
     pub mincross:           u32,
     pub minpath:            u32,
     pub arttypes:           Vec<ArtType>,
     pub groups:             WildMatList,
     pub requiregroups:      WildMatList,
+    // "deserialize_with" is for dnewsfeeds compatibility (adddist / deldist).
+    #[serde(default,deserialize_with = "dconfig::deserialize_distributions")]
     pub distributions:      Vec<String>,
     pub hashfeed:           HashFeed,
 
@@ -161,7 +170,9 @@ pub struct NewsPeer {
     pub maxstream:          u32,
     pub nobatch:            bool,
     pub maxqueue:           u32,
+    #[serde(rename = "send-headfeed")]
     pub send_headfeed:      bool,
+    #[serde(rename = "accept-headfeed")]
     pub accept_headfeed:    bool,
     pub preservebytes:      bool,
 
@@ -267,3 +278,18 @@ impl NewsPeer {
         true
     }
 }
+
+use std::sync::Arc;
+use arc_swap::ArcSwap;
+use once_cell::sync::Lazy;
+
+static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::default())));
+
+pub(crate) fn get_default_newspeer() -> NewsPeer {
+    GLOBAL.load().clone()
+}
+
+pub(crate) fn set_default_newspeer(peer: NewsPeer) {
+    GLOBAL.store(Arc::new(peer));
+}
+

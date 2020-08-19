@@ -5,7 +5,11 @@
 //! - dnewsfeeds, diablo.hosts -> read into a `NewsFeeds` struct.
 //! - dspool.ctl -> read into a `SpoolCfg` struct.
 //!
-use std::collections::HashMap;
+//! The code here also check for compatibility. Some settings are
+//! ignored, some are ignored but do generate a warning, and some
+//! settings are not implemented and generate an error.
+//!
+use std::collections::HashSet;
 use std::default::Default;
 use std::fmt::{Debug, Display};
 use std::fs::{self, File};
@@ -13,153 +17,300 @@ use std::io::prelude::*;
 use std::io::{self, BufReader};
 use std::str::FromStr;
 
+use serde::{de::Deserializer, de::MapAccess, de::Visitor};
 use smartstring::alias::String as SmartString;
 
-use crate::arttype::ArtType;
 use crate::newsfeeds::*;
-use crate::spool::SpoolCfg;
-use crate::util::{self, HashFeed, WildMatList};
+use crate::spool::{SpoolCfg, GroupMap, GroupMapEntry};
+use crate::util::WildMatList;
 
-macro_rules! invalid_data {
-    ($($expr:expr),*) => (
-        io::Error::new(io::ErrorKind::InvalidData, format!($($expr),*))
-    )
+// A type where a "dnewsfeeds" file can deserialize into.
+#[derive(Default, Debug, Deserialize)]
+struct DNewsFeeds {
+    #[serde(rename = "label")]
+    pub label:      Label,
+    pub groupdef:   Vec<GroupDef>,
 }
 
-// read_dnewsfeeds state.
-enum DNState {
-    Init,
-    Label,
-    GroupDef,
+// Convert the DnewsFeeds we just read into a NewsFeeds.
+impl From<DNewsFeeds> for NewsFeeds {
+    fn from(mut dnf: DNewsFeeds) -> NewsFeeds {
+        let mut nf = NewsFeeds::new();
+        nf.infilter = dnf.ifilter;
+        nf.peers = dnf.label.peers;
+        for idx in 0 .. nf.peers.len() {
+            nf.peer_map.insert(nf.peers[idx].label.as_str().into(), idx);
+
+            let peer = &mut nf.peers[idx];
+            peer.index = idx;
+            peer.accept_headfeed = true;
+            if peer.host != "" {
+                if peer.outhost == "" {
+                    peer.outhost = peer.host.clone();
+                }
+                if !peer.pathalias.contains(&peer.host) {
+                    let h = peer.host.clone();
+                    peer.pathalias.push(h);
+                }
+                if !peer.inhost.contains(&peer.host) {
+                    let h = peer.host.clone();
+                    peer.inhost.push(h);
+                }
+            }
+        }
+        for gd in dnf.groups.into_iter() {
+            let mut groups = gd.groups;
+            groups.name = gd.label;
+            nf.groupdefs.push(groups);
+        }
+        nf
+    }
 }
 
-#[derive(Default)]
+// "groupdef" item in a dnewsfeeds file.
+#[derive(Default, Debug, Deserialize)]
 struct GroupDef {
+    #[serde(rename = "__label__")]
     label:  String,
     groups: WildMatList,
 }
 
+// A bunch of labels.
+//
+// We use our own map-like deserializer so that we can handle
+// labels like IFILTER/GLOBAL/ISPAM/ESPAM differently.
+#[derive(Default)]
+struct Label {
+    global:     Option<NewsPeer>,
+    ifilter:    Option<NewsPeer>,
+    ispam:      Option<NewsPeer>,
+    espam:      Option<NewsPeer>,
+    peers:      Vec<NewsPeer>,
+}
+
+impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct LabelVisitor;
+
+        impl<'de> Visitor<'de> for LabelVisitor {
+            type Value = Label;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a dnewsfeeds entry")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut this = Label::default();
+
+                // We assume that we do two passes over the dnewsfeeds file:
+                // 1. to read the GLOBAL label and discard the rest
+                // 2. to read the other labels while using GLOBAL as a default.
+                let first = get_default_newspeer().label == "";
+                while let Some(label) = map.next_key::<String>()? {
+                    let mut peer = map.next_value()?;
+                    if first {
+                        if label == "GLOBAL" {
+                            set_default_newspeer(peer);
+                        }
+                        continue;
+                    }
+                    match label.as_str() {
+                        "GLOBAL" => {},
+                        "IFILTER" => this.ifilter = Some(peer),
+                        "ISPAM" => this.ispam = Some(peer),
+                        "ESPAM" => this.espam = Some(peer),
+                        _ => this.peers.push(peer),
+                    }
+                }
+                if first {
+                    // Make sure that the default newspeer is initialized, even
+                    // if there was no GLOBAL entry.
+                    let mut global = get_default_newspeer();
+                    global.label = "GLOBAL".to_string();
+                    set_default_newspeer(global);
+                }
+                Ok(this)
+            }
+        }
+
+        deserializer.deserialize_map(LabelVisitor)
+    }
+}
+
 /// Read a NewsFeeds from a "dnewsfeeds" file.
 pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
-    let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
-    let file = BufReader::new(file);
-    let mut line_no = 0;
 
-    let mut feeds = NewsFeeds::new();
-    let mut nf = NewsPeer::new();
-    let mut global = NewsPeer::new();
-    let mut gdef = GroupDef::default();
-    let mut state = DNState::Init;
-    let mut info = String::new();
+    // First, do a compat check.
+    check_dnewsfeeds(name)?;
 
-    let mut groupdef_map: HashMap<String, ()> = HashMap::new();
+    // Now build the config reader configuration.
+    let cfg_buider = curlyconf::Builder::new()
+        .mode(curlyconf::Mode::Diablo)
 
-    for line in file.lines() {
-        line_no += 1;
-        info = format!("{}[{}]", name, line_no);
-        let line = line.map_err(|e| invalid_data!("{}: {}", info, e))?;
-        let words: Vec<_> = line
-            .split_whitespace()
-            .take_while(|w| !w.starts_with("#"))
-            .collect();
-        if words.len() == 0 {
-            continue;
+        .alias::<NewsPeer>("nofilter", "filter")
+        .alias::<NewsPeer>("addgroup", "groups")
+        .alias::<NewsPeer>("delgroup", "groups")
+        .alias::<NewsPeer>("delgroupany", "groups")
+        .alias::<NewsPeer>("groupref", "groups")
+        .alias::<NewsPeer>("alias", "pathalias")
+        .alias::<NewsPeer>("adddist", "distributions")
+        .alias::<NewsPeer>("deldist", "distributions")
+        .alias::<NewsPeer>("hostname", "outhost")
+        .alias::<NewsPeer>("headfeed", "send-headfeed")
+
+        .alias::<GroupDef>("addgroup", "groups")
+        .alias::<GroupDef>("delgroup", "groups")
+        .alias::<GroupDef>("delgroupany", "groups")
+        .alias::<GroupDef>("groupref", "groups")
+
+        .ignore::<NewsPeer>("transmitbuf")
+        .ignore::<NewsPeer>("receivebuf")
+        .ignore::<NewsPeer>("realtime")
+        .ignore::<NewsPeer>("priority")
+        .ignore::<NewsPeer>("incomingpriority")
+        .ignore::<NewsPeer>("articlestat")
+        .ignore::<NewsPeer>("notify")
+        .ignore::<NewsPeer>("rtflush")
+        .ignore::<NewsPeer>("nortflush")
+        .ignore::<NewsPeer>("feederrxbuf")
+        .ignore::<NewsPeer>("compress")
+        .ignore::<NewsPeer>("throttle_delay")
+        .ignore::<NewsPeer>("throttle_lines")
+        .ignore::<NewsPeer>("allow_readonly")
+        .ignore::<NewsPeer>("check")
+        .ignore::<NewsPeer>("stream")
+        .ignore::<NewsPeer>("nospam")
+        .ignore::<NewsPeer>("whereis")
+        .ignore::<NewsPeer>("addspam")
+        .ignore::<NewsPeer>("delspam")
+        .ignore::<NewsPeer>("spamalias")
+        .ignore::<NewsPeer>("startdelay")
+        .ignore::<NewsPeer>("logarts")
+        .ignore::<NewsPeer>("hours")
+        .ignore::<NewsPeer>("queueskip")
+        .ignore::<NewsPeer>("delayfeed")
+        .ignore::<NewsPeer>("delayinfeed")
+        .ignore::<NewsPeer>("genlines")
+        .ignore::<NewsPeer>("setqos")
+        .ignore::<NewsPeer>("settos");
+
+    // Parse the config twice. The first time we only parse
+    // the GLOBAL entry, the second time the GLOBAL entry is
+    // used for NewsPeer defaults.
+    set_default_newspeer(NewsPeer::default());
+    let _ = cfg_builder.clone().from_file(name)?;
+    let mut dnf: DNewsFeeds = cfg_builder.from_file(name)?;
+
+    // And build a 'NewsFeeds' struct.
+    let nf = dnf.into();
+    nf.resolve_references();
+
+    Ok(())
+}
+
+/// Read SpoolCfg from a "dspool.ctl" file.
+pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
+    // First, do a compat check.
+    check_spool_ctl(name)?;
+
+    // Then actually read the config.
+    let cfg: SpoolCfg = curlyconf::Builder::new()
+        .mode(curlyconf::Mode::Diablo)
+
+        .alias::<SpoolCfg>("expire", "groupmap")
+        .alias::<SpoolDef>("metaspool", "spoolgroup")
+        .alias::<MetaSpool>("addgroup", "groups")
+        .alias::<MetaSpool>("label", "peer")
+
+        .ignore::<SpoolDef>("expiremethod")
+        .ignore::<SpoolDef>("minfreefiles")
+        .ignore::<SpoolDef>("compresslvl")
+
+        .from_file(name)?;
+
+    spool_cfg.spool.extend(cfg.spool.into_iter());
+    spool_cfg.spoolgroup.extend(cfg.spoolgroup.into_iter());
+    spool_cfg.groupmap.0.extend(cfg.groupmap.0.into_iter());
+
+    Ok(())
+}
+
+// A custom map Deserialize implementation for "GroupMap",
+// so that the "expire" line works in dspool.ctl.
+impl<'de> Deserialize<'de> for GroupMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct GroupMapVisitor;
+
+        impl<'de> Visitor<'de> for GroupMapVisitor {
+            type Value = GroupMap;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("wildmat and spoolgroup")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut v = Vec::new();
+                while let Some(groups) = map.next_key::<String>()? {
+                     let spoolgroup = map.next_value()?;
+                    v.push(GroupMapEntry{groups, spoolgroup});
+                }
+                Ok(GroupMap(v))
+            }
         }
-        match state {
-            DNState::Init => {
-                match words[0] {
-                    "label" => {
-                        if words.len() != 2 {
-                            Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
-                        }
-                        if feeds.peer_map.contains_key(words[0]) {
-                            Err(invalid_data!("{}: {}: duplicate label", info, words[1]))?;
-                        }
-                        match words[1] {
-                            "GLOBAL" => {
-                                // slight concession - in the diablo implementation it
-                                // doesn't matter if this is first or not, since defaults
-                                // are merged in after the fact. however our implementation
-                                // just uses GLOBAL as the default, so it must come first.
-                                if feeds.peers.len() > 0 {
-                                    Err(invalid_data!("{}: GLOBAL: must be first label", info))?;
-                                }
-                            },
-                            "IFILTER" => {
-                                // IFILTER does not inherit GLOBAL
-                                nf = NewsPeer::new();
-                            },
-                            "ISPAM" | "ESPAM" => {
-                                // ISPAM/ESPAM don't inherit GLOBAL either,
-                                // besides, we ignore them for now.
-                                nf = NewsPeer::new();
-                                log::warn!("{}: ignoring {} label", info, words[1]);
-                            },
-                            _ => {},
-                        }
-                        state = DNState::Label;
-                        nf.label = SmartString::from(words[1]);
-                    },
-                    "groupdef" => {
-                        if words.len() != 2 {
-                            Err(invalid_data!("{}: {}: expected one argument", info, words[0]))?;
-                        }
-                        if groupdef_map.contains_key(words[0]) {
-                            Err(invalid_data!("{}: {}: duplicate groupdef", info, words[1]))?;
-                        }
-                        state = DNState::GroupDef;
-                        gdef.label = words[1].to_string();
-                    },
-                    _ => {
-                        Err(invalid_data!(
-                            "{}: unknown keyword {} (expect label/groupdef)",
-                            info,
-                            words[0]
-                        ))?
-                    },
+
+        deserializer.deserialize_map(GroupMapVisitor)
+    }
+}
+
+// deserializer for `distributions: Vec<String>` so that 'addist' and 'deldist' work.
+pub(crate) fn deserialize_distributions<D>(deserializer: D) -> Result<Self, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DistVisitor {
+        parser: curlyconf::Parser,
+    }
+
+    impl<'de> Visitor<'de> for DistVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("distributions")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut dists = Vec::new();
+
+            while let Some(mut value) = seq.next_element::<String>()? {
+                match self.parser.value_name().as_str() {
+                    // addist / deldist
+                    "deldist" => value.insert_str(0, "!"),
+                    _ => {}
                 }
-            },
-            DNState::Label => {
-                if words[0] == "end" {
-                    state = DNState::Init;
-                    match nf.label.as_str() {
-                        "GLOBAL" => global = nf,
-                        "IFILTER" => feeds.infilter = Some(nf),
-                        "ISPAM" | "ESPAM" => {},
-                        _ => {
-                            feeds.peer_map.insert(nf.label.clone(), feeds.peers.len());
-                            feeds.peers.push(nf);
-                        },
-                    }
-                    nf = global.clone();
-                } else {
-                    set_newspeer_item(&mut nf, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
-                }
-            },
-            DNState::GroupDef => {
-                if words[0] == "end" {
-                    state = DNState::Init;
-                    let label = gdef.label.clone();
-                    gdef.groups.set_name(&label);
-                    groupdef_map.insert(label, ());
-                    feeds.groupdefs.push(gdef.groups);
-                    gdef = GroupDef::default();
-                } else {
-                    set_groupdef_item(&mut gdef, &words).map_err(|e| invalid_data!("{}: {}", info, e))?;
-                }
-            },
+                dists.push(value);
+            }
+
+            Ok(dists)
         }
     }
 
-    match state {
-        DNState::Init => {},
-        DNState::Label => Err(invalid_data!("{}: unexpected EOF in label {}", info, nf.label))?,
-        DNState::GroupDef => Err(invalid_data!("{}: unexpected EOF in groupdef {}", info, nf.label))?,
-    }
-
-    feeds.resolve_references();
-
-    Ok(feeds)
+    let parser = deserializer.parser();
+    deserializer.deserialize_seq(DistVisitor { parser })
 }
 
 /// Reads a "diablo.hosts" file. To be called after the "dnewsfeeds" file
@@ -187,7 +338,7 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
     for line in file.lines() {
         line_no += 1;
         info = format!("{}[{}]", name, line_no);
-        let line = line.map_err(|e| invalid_data!("{}: {}", info, e))?;
+        let line = line.map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
         let words: Vec<_> = line
             .split_whitespace()
             .take_while(|w| !w.starts_with("#"))
@@ -196,10 +347,10 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
             continue;
         }
         if words.len() == 1 {
-            Err(invalid_data!("{}: {}: missing label", info, words[0]))?;
+            Err(ioerr!(InvalidData, "{}: {}: missing label", info, words[0]))?;
         }
         if words.len() > 2 {
-            Err(invalid_data!("{}: {}: data after label", info, words[0]))?;
+            Err(ioerr!(InvalidTata, "{}: {}: data after label", info, words[0]))?;
         }
         match nf.peer_map.get(words[1]) {
             None => log::warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
@@ -211,79 +362,111 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Read SpoolCfg from a "dspool.ctl" file.
-pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
-    let cfg: SpoolCfg = curlyconf::Builder::new()
-        .mode(curlyconf::Mode::Diablo)
-        .from_file(name)?;
-    spool_cfg.spool.extend(cfg.spool.into_iter());
-    spool_cfg.spoolgroup.extend(cfg.spoolgroup.into_iter());
-    spool_cfg.groupmap.0.extend(cfg.groupmap.0.into_iter());
-    Ok(())
+// check_dnewsfeeds state.
+enum DNState {
+    Init,
+    Label,
+    GroupDef,
 }
 
-// Set one item of a NewsPeer.
+/// Check a "dnewsfeeds" file.
+///
+/// We do this to check if there are settings that we don't support
+/// anymore. Some of those settings we just ignore, others we ignore
+/// with a warning, and for some settings we generate an error.
+fn check_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
+    let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
+    let file = BufReader::new(file);
+
+    let mut line_no = 0;
+    let mut info = String::new();
+    let mut state= DNState::Init;
+
+    let mut groupdefs: HashSet<String> = HashSet::new();
+    let mut labels: HashSet<String> = HashSet::new();
+
+    for line in file.lines() {
+        line_no += 1;
+        info = format!("{}[{}]", name, line_no);
+        let line = line.map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
+        let words: Vec<_> = line
+            .split_whitespace()
+            .take_while(|w| !w.starts_with("#"))
+            .collect();
+        if words.len() == 0 {
+            continue;
+        }
+        match state {
+            DNState::Init => {
+                match words[0] {
+                    "label" => {
+                        if words.len() != 2 {
+                            Err(ioerr!(InvalidData, "{}: {}: expected one argument", info, words[0]))?;
+                        }
+                        if labels.contains(words[0]) {
+                            Err(ioerr!(InvalidData, "{}: {}: duplicate label", info, words[1]))?;
+                        }
+                        match words[1] {
+                            "ISPAM" | "ESPAM" => {
+                                log::warn!("{}: ignoring {} label", info, words[1]);
+                            },
+                            _ => {},
+                        }
+                        state = DNState::Label;
+                        label = words[1].to_string();
+                    },
+                    "groupdef" => {
+                        if words.len() != 2 {
+                            Err(ioerr!(InvalidData, "{}: {}: expected one argument", info, words[0]))?;
+                        }
+                        if groupdefs.contains(words[0]) {
+                            Err(ioerr!(InvalidData, "{}: {}: duplicate groupdef", info, words[1]))?;
+                        }
+                        state = DNState::GroupDef;
+                        label = words[1].to_string();
+                    },
+                    _ => {
+                        Err(ioerr!(
+                            InvalidData,
+                            "{}: unknown keyword {} (expect label/groupdef)",
+                            info,
+                            words[0]
+                        ))?
+                    },
+                }
+            },
+            DNState::Label => {
+                if words[0] == "end" {
+                    state = DNState::Init;
+                    peers.insert(label.clone());
+                } else {
+                    check_newspeer_item(&words).map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
+                }
+            },
+            DNState::GroupDef => {
+                if words[0] == "end" {
+                    state = DNState::Init;
+                    groupdefs.insert(label.clone());
+                } else {
+                    check_groupdef_item(&words).map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
+                }
+            },
+        }
+    }
+
+    match state {
+        DNState::Init => {},
+        DNState::Label => Err(ioerr!(InvalidData, "{}: unexpected EOF in label {}", info, label))?,
+        DNState::GroupDef => Err(ioerr!(InvalidData, "{}: unexpected EOF in groupdef {}", info, label))?,
+    }
+
+    Ok(feeds)
+}
+
+// Check newspeer items.
 #[rustfmt::skip]
-fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
+fn check_newspeer_item(words: &[&str]) -> io::Result<()> {
     match words[0] {
-        "pathalias" => peer.pathalias.push(parse_string(words)?),
-        "alias" => peer.pathalias.push(parse_string(words)?),
-
-        "host" => {
-            let host = parse_string(words)?;
-            peer.pathalias.push(host.clone());
-            peer.inhost.push(host.clone());
-            peer.outhost = host;
-        },
-
-        "inhost" => peer.inhost.push(parse_string(words)?),
-        "maxconnect" => peer.maxconnect = parse_num::<u32>(words)?,
-        "readonly" => peer.readonly = parse_bool(words)?,
-
-        "filter" => peer.filter.push(parse_group(words)?),
-        "nofilter" => peer.filter.push(&format!("!{}", parse_group(words)?)),
-        "nomismatch" => peer.nomismatch = parse_bool(words)?,
-        "precomreject" => peer.precomreject = parse_bool(words)?,
-
-        "maxcross" => peer.maxcross = parse_num::<u32>(words)?,
-        "maxpath" => peer.maxpath = parse_num::<u32>(words)?,
-        "maxsize" => peer.maxsize = parse_size(words)?,
-        "minsize" => peer.maxsize = parse_size(words)?,
-        "mincross" => peer.mincross = parse_num::<u32>(words)?,
-        "minpath" => peer.minpath = parse_num::<u32>(words)?,
-        "arttypes" => parse_arttype(&mut peer.arttypes, words)?,
-        "hashfeed" => peer.hashfeed = parse_hashfeed(words)?,
-        "requiregroup" => peer.requiregroups.push(parse_group(words)?),
-
-        "distributions" => parse_list(&mut peer.distributions, words, ",")?,
-        "adddist" => peer.distributions.push(parse_string(words)?),
-        "deldist" => peer.distributions.push("!".to_string() + parse_string(words)?.as_str()),
-
-        //"groups" => parse_num_list(&mut peer.groups.patterns, words, ",")?,
-        "addgroup" => peer.groups.push(parse_group(words)?),
-        "delgroup" => peer.groups.push("!".to_string() + parse_group(words)?.as_str()),
-        "delgroupany" => peer.groups.push("@".to_string() + parse_group(words)?.as_str()),
-        "groupref" => peer.groups.push("=".to_string() + parse_group(words)?.as_str()),
-
-        "outhost" => peer.outhost = parse_string(words)?,
-        "hostname" => peer.outhost = parse_string(words)?,
-        "bindaddress" => peer.bindaddress = Some(parse_ipaddr(words)?),
-        "port" => peer.port = parse_num::<u16>(words)?,
-        "maxparallel" => peer.maxparallel = parse_num::<u32>(words)?,
-        "maxstream" => peer.maxstream = parse_num::<u32>(words)?,
-        "nobatch" => peer.nobatch = parse_bool(words)?,
-        "maxqueue" => peer.maxqueue = parse_num::<u32>(words)?,
-        "maxqueuefile" => peer.maxqueue = parse_num::<u32>(words)?,
-        "headfeed" => peer.send_headfeed = parse_bool(words)?,
-        "send-headfeed" => peer.send_headfeed = parse_bool(words)?,
-        "accept-headfeed" => peer.accept_headfeed = parse_bool(words)?,
-        "preservebytes" => peer.preservebytes = parse_bool(words)?,
-
-        // we do not support this, fatal.
-        "onlyspam"|
-        "offerfilter"|
-        "noofferfilter" => Err(invalid_data!("{}: unsupported keyword", words[0]))?,
-
         // we do not support this, irrelevant, ignore.
         "transmitbuf"|
         "receivebuf"|
@@ -316,144 +499,172 @@ fn set_newspeer_item(peer: &mut NewsPeer, words: &[&str]) -> io::Result<()> {
         "delayinfeed"|
         "genlines"|
         "setqos"|
-        "settos" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
+        "settos" => log::warn!("{}: unsupported setting, ignoring", words[0]),
 
-        // actually don't know.
-        _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
+        // we do not support this, fatal.
+        "onlyspam"|
+        "offerfilter"|
+        "noofferfilter" => Err(ioerr!(InvalidData, "{}: unsupported setting", words[0]))?,
+
+        _ => {},
     }
     Ok(())
 }
 
-// Set one item of a Groupdef.
-fn set_groupdef_item(gdef: &mut GroupDef, words: &[&str]) -> io::Result<()> {
+// Check one item of a Groupdef.
+fn check_groupdef_item(words: &[&str]) -> io::Result<()> {
     match words[0] {
-        // "groups" => parse_list(&mut gdef.groups, words, ",")?,
-        "addgroup" => gdef.groups.push(parse_string(words)?),
-        "delgroup" => gdef.groups.push("!".to_string() + parse_string(words)?.as_str()),
-        "delgroupany" => gdef.groups.push("@".to_string() + parse_string(words)?.as_str()),
-        "groupref" => gdef.groups.push("=".to_string() + parse_string(words)?.as_str()),
-        _ => Err(invalid_data!("{}: unrecognized keyword", words[0]))?,
+        "addgroup"|
+        "delgroup"|
+        "delgroupany"|
+        "groupref" => {},
+        _ => Err(ioerr!(InvalidData, "{}: unrecognized keyword", words[0]))?,
     }
     Ok(())
 }
 
-//
-// Below are a bunch of parsing helpers for the set_STRUCT_item functions.
-//
+// read_dspool_ctl state.
+enum DCState {
+    Init,
+    Spool,
+    MetaSpool,
+}
 
-// parse a hashfeed.
-fn parse_hashfeed(words: &[&str]) -> io::Result<HashFeed> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
+/// Check the dspool.ctl file for compat
+fn check_dspool_ctl(name: &str) -> io::Result<()> {
+    let file = File::open(name).map_err(|e| io::Error::new(e.kind(), format!("{}: {}", name, e)))?;
+    let file = BufReader::new(file);
+    let mut line_no = 0;
+
+    let mut state = DCState::Init;
+    let mut info = String::new();
+    let mut spool_no = 0;
+    let mut metaspool = String::new();
+
+    for line in file.lines() {
+        line_no += 1;
+        info = format!("{}[{}]", name, line_no);
+
+        let line = line.map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
+        let words: Vec<_> = line
+            .split_whitespace()
+            .take_while(|w| !w.starts_with("#"))
+            .collect();
+        if words.len() == 0 {
+            continue;
+        }
+
+        match state {
+            DCState::Init => {
+                match words[0] {
+                    "spool" => {
+                        if words.len() != 2 {
+                            Err(ioerr!(InvalidData,"{}: {}: expected one argument", info, words[0]))?;
+                        }
+                        spool_no = match parse_num::<u8>(&words) {
+                            Ok(n) => n,
+                            Err(e) => return Err(ioerr!(InvalidData,"{}: {}", info, e)),
+                        };
+                        state = DCState::Spool;
+                    },
+                    "metaspool" => {
+                        if words.len() != 2 {
+                            Err(ioerr!(InvalidData,"{}: {}: expected one argument", info, words[0]))?;
+                        }
+                        metaspool = words[1].to_string();
+                        state = DCState::MetaSpool;
+                    },
+                    "expire" => {
+                        if words.len() != 3 {
+                            Err(ioerr!(InvalidData,"{}: {}: expected two arguments", info, words[0]))?;
+                        }
+                    },
+                    _ => {
+                        Err(ioerr!(
+                            InvalidData,
+                            "{}: unknown keyword {} (expect spool/metaspool/expire)",
+                            info,
+                            words[0]
+                        ))?
+                    },
+                }
+            },
+            DCState::Spool => {
+                if words[0] == "end" {
+                    state = DCState::Init;
+                } else {
+                    check_spooldef_item(&words).map_err(|e| ioerr!(InvalidData,"{}: {}", info, e))?;
+                }
+            },
+            DCState::MetaSpool => {
+                if words[0] == "end" {
+                    state = DCState::Init;
+                } else {
+                    check_metaspool_item(&words).map_err(|e| ioerr!(InvalidData,"{}: {}", info, e))?;
+                }
+            },
+        }
     }
-    match HashFeed::new(words[1]) {
-        Ok(hf) => Ok(hf),
-        Err(e) => {
-            return Err(invalid_data!("{} {}: {}", words[0], words[1], e));
+
+    match state {
+        DCState::Init => {},
+        DCState::Spool => {
+            Err(ioerr!(
+                InvalidData,
+                "{}: unexpected EOF in spool {}",
+                info,
+                spool_no
+            ))?
+        },
+        DCState::MetaSpool => {
+            Err(ioerr!(
+                InvalidData,
+                "{}: unexpected EOF in metaspool {}",
+                info,
+                metaspool,
+            ))?
         },
     }
+
+    Ok(())
 }
 
-// parse a single word.
-fn parse_string(words: &[&str]) -> io::Result<String> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    Ok(words[1].to_string())
-}
+// Check one item of a SpoolDef
+fn check_spooldef_item(words: &[&str]) -> io::Result<()> {
+    match words[0] {
+        // we do not support this, warn and ignore.
+        "minfreefiles" | "compresslvl" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
 
-// parse a single word as a newsgroup
-fn parse_group(words: &[&str]) -> io::Result<String> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    if words[1].starts_with('!') ||
-        words[1].starts_with('=') ||
-        words[1].starts_with('@') ||
-        words[1].contains(',')
-    {
-        return Err(invalid_data!("{}: invalid group name {}", words[0], words[1]));
-    }
+        // we do not support this, error and return.
+        "spooldirs" => Err(ioerr!(InvalidData,"{}: unsupported keyword", words[0]))?,
 
-    Ok(words[1].to_string())
-}
-
-// parse a single number.
-fn parse_num<T>(words: &[&str]) -> io::Result<T>
-where
-    T: FromStr,
-    T: Default,
-    T: Debug,
-    <T as FromStr>::Err: Debug + Display,
-{
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    words[1]
-        .parse::<T>()
-        .map_err(|e| invalid_data!("{} {}: {}", words[0], words[1], e))
-}
-
-// parse a size (K/KB/KiB/M/MB/MiB etc)
-fn parse_size(words: &[&str]) -> io::Result<u64> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    util::parse_size(words[1])
-}
-
-// parse a bool.
-fn parse_bool(words: &[&str]) -> io::Result<bool> {
-    if words.len() == 1 {
-        return Ok(true);
-    }
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected max 1 argument", words[0]));
-    }
-    let b = words[1].to_lowercase();
-    match b.as_str() {
-        "y" | "yes" | "t" | "true" | "on" | "1" => Ok(true),
-        "n" | "no" | "f" | "false" | "off" | "0" => Ok(false),
-        _ => Err(invalid_data!("{}: not a boolean value {}", words[0], words[1])),
-    }
-}
-
-// parse an IP address.
-fn parse_ipaddr(words: &[&str]) -> io::Result<std::net::IpAddr> {
-    if words.len() != 2 {
-        return Err(invalid_data!("{}: expected 1 argument", words[0]));
-    }
-    std::net::IpAddr::from_str(words[1]).map_err(|e| invalid_data!("{}: {} {}", words[0], e, words[1]))
-}
-
-// parse a list of words, seperated by a character from "sep".
-fn parse_list(list: &mut Vec<String>, words: &[&str], sep: &str) -> io::Result<()> {
-    if words.len() < 2 {
-        return Err(invalid_data!("{}: expected at least 1 argument", words[0]));
-    }
-    for w in words.into_iter().skip(1) {
-        let _: Vec<_> = w
-            .split(|s: char| sep.contains(s))
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let s = s.trim();
-                list.push(s.to_string());
-                s
-            })
-            .collect();
+        _ => {},
     }
     Ok(())
 }
 
-// parse a list of article types.
-fn parse_arttype(arttypes: &mut Vec<ArtType>, words: &[&str]) -> io::Result<()> {
-    let mut list = Vec::new();
-    parse_list(&mut list, words, " \t:,")?;
-    for w in &list {
-        let a = w
-            .parse()
-            .map_err(|_| invalid_data!("{}: unknown article type", w))?;
-        arttypes.push(a);
+// Check one item of a MetaSpool
+fn check_metaspool_item(words: &[&str]) -> io::Result<()> {
+    match words[0] {
+        "allocstrat" => {
+            if words.len() < 2 {
+                Err(ioerr!(InvalidData,"{}: missing argument", words[0]))?;
+            }
+            match words[1] {
+                "space" => Err(ioerr!(InvalidData,"{} space: not supported (only weighted)", words[0]))?,
+                "sequential" | "single" => {
+                    log::warn!("{} {}: ignoring, always using \"weighted\"", words[0], words[1])
+                },
+                "weighted" => {},
+                _ => Err(ioerr!(InvalidData,"{} {}: unknown allocstrat", words[0], words[1]))?,
+            }
+        },
+
+        // we do not support this, fatal.
+        "label" => Err(ioerr!(InvalidData, "{}: unsupported keyword", words[0]))?,
+
+        // actually don't know.
+        _ => {},
     }
     Ok(())
 }
