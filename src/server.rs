@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::TcpListener;
 use std::os::unix::io::AsRawFd;
@@ -74,7 +74,7 @@ impl Server {
                 config::Runtime::Threaded(_) => {
                     let server = server.clone();
                     let mut listener_sets = listener_sets;
-                    let listeners = listener_sets.pop().unwrap();
+                    let listeners = listener_sets.pop_front().unwrap();
                     task::spawn(server.run_threaded(listeners, bus_recv.clone()));
                 },
                 config::Runtime::MultiSingle(ref mcfg) => {
@@ -93,16 +93,20 @@ impl Server {
 
     /// Run the server on a bunch of current_thread executors.
     fn run_multisingle(self, mcfg: &MultiSingle, mut listener_sets: TcpListenerSets, bus_recv: bus::Receiver) {
-        let mut core_ids = mcfg.core_ids.clone().unwrap_or(Vec::new());
+        let core_ids = mcfg.core_ids.as_ref().map(|c| c.iter().cloned().collect::<VecDeque<_>>());
+        let mut core_ids = core_ids.unwrap_or(VecDeque::new());
 
-        while let Some(listeners) = listener_sets.pop() {
+        let mut n = 0;
+
+        while let Some(listeners) = listener_sets.pop_front() {
             let server = self.clone();
             let bus_recv = bus_recv.clone();
-            let core_id = core_ids.pop();
+            let core_id = core_ids.pop_front();
 
             thread::spawn(move || {
                 if let Some(id) = core_id {
                     // tie this thread to a specific core.
+                    log::info!("runtime: binding tokio basic runtime #{} to core id {:?}", n, core_id);
                     core_affinity::set_for_current(id);
                 }
 
@@ -134,6 +138,8 @@ impl Server {
                     }
                 });
             });
+
+            n += 1;
         }
     }
 

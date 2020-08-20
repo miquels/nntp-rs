@@ -36,8 +36,6 @@ pub struct Config {
     pub config:     CfgFiles,
     #[serde(default, rename = "log")]
     pub logging:    Logging,
-    #[serde(default)]
-    pub runtime:    Runtime,
     // Map of spools. Index is a number 0..99.
     #[serde(rename = "spool", default)]
     spooldef:       Option<HashMap<u8, SpoolDef>>,
@@ -173,7 +171,7 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     resolve_user_group(&mut cfg)?;
 
     // Check the [multisingle] config
-    if let Runtime::MultiSingle(ref mut multisingle) = cfg.runtime {
+    if let Runtime::MultiSingle(ref mut multisingle) = cfg.server.runtime {
         check_multisingle(multisingle)
             .map_err(|e| ioerr!(InvalidData, format!("multisingle: {}", e)))?;
     }

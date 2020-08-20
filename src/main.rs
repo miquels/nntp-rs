@@ -219,7 +219,7 @@ fn main() -> Result<()> {
         },
     }
 
-    let bt = match config.runtime {
+    let bt = match config.server.runtime {
         config::Runtime::Threaded(ref threaded) => threaded.blocking_type.clone(),
         config::Runtime::MultiSingle(_) => BlockingType::default(),
     };

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 
@@ -5,27 +6,27 @@ use net2::unix::UnixTcpBuilderExt;
 
 /// A set of TcpListeners (so a set of sets).
 pub struct TcpListenerSets {
-    sets: Vec<Vec<TcpListener>>,
+    sets: VecDeque<Vec<TcpListener>>,
 }
 
 impl TcpListenerSets {
     /// Start listening an the addresses in `addrs` on multiple sockets
     /// at the same time (using SO_REUSEADDR).
     pub fn new(addrs: &[SocketAddr], num_sets: usize) -> io::Result<TcpListenerSets> {
-        let mut sets = Vec::new();
+        let mut sets = VecDeque::new();
         for _ in 0..num_sets {
             let mut listeners = Vec::new();
             for addr in addrs.iter() {
                 let listener = bind_socket(&addr)?;
                 listeners.push(listener);
             }
-            sets.push(listeners);
+            sets.push_back(listeners);
         }
         Ok(TcpListenerSets { sets })
     }
 
-    pub fn pop(&mut self) -> Option<Vec<TcpListener>> {
-        self.sets.pop()
+    pub fn pop_front(&mut self) -> Option<Vec<TcpListener>> {
+        self.sets.pop_front()
     }
 
     pub fn len(&self) -> usize {
