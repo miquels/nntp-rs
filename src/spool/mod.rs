@@ -160,6 +160,7 @@ pub struct SpoolCfg {
     // The `expire' line in dspool.ctl
     // Used internally as well, otherwise obsolete (use "groups" in spoolgroup).
     #[doc(hidden)]
+    #[serde(default)]
     pub groupmap:   GroupMap,
 }
 
@@ -248,6 +249,7 @@ pub struct SpoolDef {
     #[serde(rename = "__label__")]
     pub spool_no:   u8,
     /// Backend to use: diablo, cyclic.
+    #[serde(default)]
     pub backend:    String,
     /// Path to directory (for diablo) or file/blockdev (for cyclic)
     pub path:       String,

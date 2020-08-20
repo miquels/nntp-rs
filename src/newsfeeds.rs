@@ -283,7 +283,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 
-static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::default())));
+static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::new())));
 
 pub(crate) fn get_default_newspeer() -> NewsPeer {
     GLOBAL.load().as_ref().clone()

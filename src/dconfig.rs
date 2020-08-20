@@ -24,6 +24,7 @@ use crate::util::WildMatList;
 
 // A type where a "dnewsfeeds" file can deserialize into.
 #[derive(Default, Debug, Deserialize)]
+#[serde(default)]
 struct DNewsFeeds {
     #[serde(rename = "label")]
     pub labels:     Labels,
@@ -209,11 +210,11 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
     check_dspool_ctl(name)?;
 
     // Then actually read the config.
-    let cfg: SpoolCfg = curlyconf::Builder::new()
+    let mut cfg: SpoolCfg = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
 
         .alias::<SpoolCfg>("expire", "groupmap")
-        .alias::<SpoolDef>("metaspool", "spoolgroup")
+        .alias::<SpoolCfg>("metaspool", "spoolgroup")
         .alias::<MetaSpool>("addgroup", "groups")
         .alias::<MetaSpool>("label", "peer")
 
@@ -222,6 +223,12 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
         .ignore::<SpoolDef>("compresslvl")
 
         .from_file(name)?;
+
+    for (_, sp) in cfg.spool.iter_mut() {
+        if sp.backend == "" {
+            sp.backend = "diablo".into();
+        }
+    }
 
     spool_cfg.spool.extend(cfg.spool.into_iter());
     spool_cfg.spoolgroup.extend(cfg.spoolgroup.into_iter());
