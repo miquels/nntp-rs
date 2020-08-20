@@ -595,11 +595,13 @@ where
     S: Unpin,
 {
     fn poll_write(&mut self, cx: &mut Context, buf: &mut impl Buf) -> Poll<io::Result<()>> {
-        if buf.remaining() > 0 {
+        let mut wrote_something= false;
+
+        while buf.remaining() > 0 {
             //
             // See if we can write more data to the socket.
             //
-            // log::trace!("writing; remaining={}", buf.remaining());
+            //log::trace!("writing; remaining={}", buf.remaining());
             let socket = &mut self.socket;
             pin!(socket);
             match socket.poll_write(cx, buf.bytes()) {
@@ -610,18 +612,19 @@ where
                     )));
                 },
                 Poll::Ready(Ok(n)) => {
+                    wrote_something = true;
                     buf.advance(n);
                 },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {},
+                Poll::Pending => break,
             }
+        }
 
-            //
-            // if there is more to write, reset the timer.
-            //
-            if buf.remaining() > 0 {
-                self.reset_wr_timer();
-            }
+        //
+        // reset the timer if we wrote any data.
+        //
+        if wrote_something && buf.remaining() > 0 {
+            self.reset_wr_timer();
         }
 
         //
