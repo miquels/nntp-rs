@@ -118,6 +118,9 @@ pub struct TestArticleOpts {
     #[structopt(short, long)]
     /// Number of articles to send (default: 1)
     pub num_arts:  Option<u32>,
+    #[structopt(long)]
+    /// Size of articles to send.
+    pub size:  Option<u32>,
     #[structopt(short, long)]
     /// Delay between articles (ms)
     pub delay:    Option<f64>,
@@ -435,7 +438,28 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
             opts.subject.as_ref().unwrap_or(&format!("test {}", msgid))
         )?;
         if !opts.headfeed {
-            write!(buf, "\r\ntest, ignore.")?;
+            if opts.size.is_none() {
+                write!(buf, "\r\ntest, ignore.")?;
+            }
+            if let Some(size) = opts.size {
+                let size = size as usize;
+                let mut done = 0;
+                let data = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                let mut d = 0;
+                let mut line = Vec::new();
+                while done < size {
+                    line.truncate(0);
+                    line.extend_from_slice(&b"\r\n"[..]);
+                    line.extend(format!("{:06} ", done).into_bytes().into_iter());
+                    line.resize(70 + (rand::random::<u8>() / 12) as usize, data[d]);
+                    d += 1;
+                    if d >= data.len() {
+                        d = 0;
+                    }
+                    buf.push_str(std::str::from_utf8(&line).unwrap());
+                    done += line.len();
+                }
+            }
         }
         write!(buf, "\r\n.")?;
 
