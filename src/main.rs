@@ -201,7 +201,7 @@ fn main() -> Result<()> {
     let g_log = config.logging.general.as_ref();
     let g_log = g_log.map(|s| s.as_str()).unwrap_or("stderr");
     match LogTarget::new_with(g_log, &config) {
-        Ok(t) => logger::logger_init(t),
+        Ok(t) => logger::logger_init(t, Some("nntp_rs_server".to_string())),
         Err(e) => {
             eprintln!("nntp-rs: logging.general: {}: {}", g_log, e);
             exit(1);
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
 fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -> ! {
     // set up the logger.
     let target = LogTarget::new_stderr();
-    logger::logger_init(target);
+    logger::logger_init(target, Some("nntp_rs_server".to_string()));
 
     let mut runtime = tokio::runtime::Runtime::new().unwrap();
     let res = runtime.block_on(async move {

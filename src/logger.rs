@@ -121,11 +121,11 @@ pub struct Logger {
 impl Logger {
     /// Create a new Logger.
     pub fn new(target: LogTarget) -> Logger {
-        Logger::new2(target.dest, false)
+        Logger::new2(target.dest, false, None)
     }
 
     // This one does the actual work.
-    fn new2(mut dest: LogDest, is_log: bool) -> Logger {
+    fn new2(mut dest: LogDest, is_log: bool, pkg_name: Option<String>) -> Logger {
         let (tx, rx) = channel::unbounded();
 
         let tid = thread::spawn(move || {
@@ -162,7 +162,7 @@ impl Logger {
             tx,
             tid: Arc::new(Mutex::new(Some(tid))),
             pkg_name_prefix: concat!(env!("CARGO_PKG_NAME"), "::").replace('-', "_"),
-            pkg_name: env!("CARGO_PKG_NAME").replace('-', "_"),
+            pkg_name: pkg_name.unwrap_or(env!("CARGO_PKG_NAME").replace('-', "_")),
         }
     }
 
@@ -418,8 +418,8 @@ impl LogTarget {
 }
 
 /// initialize global logger.
-pub fn logger_init(target: LogTarget) {
-    let _ = LOGGER.set(Logger::new2(target.dest, true));
+pub fn logger_init(target: LogTarget, pkg_name: Option<String>) {
+    let _ = LOGGER.set(Logger::new2(target.dest, true, pkg_name));
     let _ = log::set_logger(LOGGER.get().unwrap());
 }
 
@@ -428,7 +428,7 @@ pub fn logger_reconfig(target: LogTarget) {
     if let Some(l) = LOGGER.get() {
         l.reconfig(target);
     } else {
-        logger_init(target);
+        logger_init(target, None);
     }
 }
 
@@ -442,7 +442,7 @@ pub fn get_incoming_logger() -> Incoming {
         Some(l) => l.clone(),
         None => {
             Incoming {
-                logger: Logger::new2(LogDest::Null, false),
+                logger: Logger::new2(LogDest::Null, false, None),
             }
         },
     }
