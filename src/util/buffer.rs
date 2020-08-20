@@ -80,9 +80,9 @@ impl Buffer {
         // If "header" < 32K and "body" >= 32K, use a start_offset
         // for "body" and copy "header".
         if self.start_offset == 0 && at < 32000 && self.len() - at >= 32000 {
-            mem::swap(&mut self.data, &mut bnew.data);
-            bnew.start_offset = at;
+            mem::swap(self, &mut bnew);
             self.extend_from_slice(&bnew[0..at]);
+            bnew.start_offset = at;
             return bnew;
         }
 
@@ -358,22 +358,27 @@ mod tests {
     fn test_split() {
         let mut b = Buffer::new();
         for _ in 0..5000 {
-            b.put_str("xyzzyxyzzy");
+            b.put_str("xyzzyxyzzyz");
         }
-        assert!(b.len() == 50000);
-        let mut n = b.split_off(5000);
-        assert!(b.len() == 5000);
-        assert!(n.len() == 45000);
-        assert!(&b[1000..1010] == &b"xyzzyxyzzy"[..]);
-        assert!(&n[1000..1010] == &b"xyzzyxyzzy"[..]);
+        assert!(b.len() == 55000);
+        let mut n = b.split_off(4918);
+        assert!(b.len() == 4918);
+        assert!(n.len() == 50082);
+        println!("1. {}", std::str::from_utf8(&b[1100..1110]).unwrap());
+        println!("2. {}", std::str::from_utf8(&n[1100..1110]).unwrap());
+        assert!(&b[1100..1110] == &b"xyzzyxyzzy"[..]);
+        assert!(&n[1100..1110] == &b"yzzyxyzzyz"[..]);
 
-        n.start_offset += 10;
-        n.put_str("xyzzyxyzzy");
+        n.start_offset += 13;
 
         let x = n.split_to(20000);
-        assert!(n.len() == 25000);
+        println!("3. n.len() {}", n.len());
+        println!("4. x.len() {}", x.len());
+        println!("5. {}", std::str::from_utf8(&n[1000..1010]).unwrap());
+        println!("6. {}", std::str::from_utf8(&x[1000..1010]).unwrap());
+        assert!(n.len() == 30069);
         assert!(x.len() == 20000);
-        assert!(&n[1000..1010] == &b"xyzzyxyzzy"[..]);
-        assert!(&x[1000..1010] == &b"xyzzyxyzzy"[..]);
+        assert!(&n[1000..1010] == &b"yxyzzyzxyz"[..]);
+        assert!(&x[1000..1010] == &b"zzyxyzzyzx"[..]);
     }
 }
