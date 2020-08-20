@@ -175,6 +175,8 @@ pub struct NewsPeer {
     #[serde(rename = "accept-headfeed")]
     pub accept_headfeed:    bool,
     pub preservebytes:      bool,
+    #[serde(rename = "queue-only")]
+    pub queue_only:         bool,
 
     /// non-config items.
     #[serde(skip)]

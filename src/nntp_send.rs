@@ -283,6 +283,7 @@ struct Peer {
     maxqueue:      u32,
     headfeed:      bool,
     preservebytes: bool,
+    queue_only:    bool,
 }
 
 impl Peer {
@@ -298,6 +299,7 @@ impl Peer {
             maxstream:     nfpeer.maxstream,
             headfeed:      nfpeer.send_headfeed,
             preservebytes: nfpeer.preservebytes,
+            queue_only:    nfpeer.queue_only,
         }
     }
 }
@@ -385,6 +387,7 @@ impl PeerFeed {
     async fn run(mut self) {
         log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut exiting = false;
+        let mut queue_only = self.newspeer.queue_only;
 
         // Tick every 5 seconds.
         let mut interval = tokio::time::interval(Duration::from_millis(5000));
@@ -400,11 +403,17 @@ impl PeerFeed {
                     // see if we need to add connections to process the backlog.
                     let queue_len = self.queue.len().await;
                     if queue_len > 0 {
-                        if self.num_conns < self.newspeer.maxparallel / 2 {
-                            self.add_connection().await;
+                        if queue_only {
+                            if let Err(_e) = self.send_queue_to_backlog(true).await {
+                                // backlog fails. now what.
+                            }
+                        } else {
+                            if self.num_conns < self.newspeer.maxparallel / 2 {
+                                self.add_connection().await;
+                            }
+                            // wake up sleeping connections.
+                            let _ = self.broadcast.send(PeerFeedItem::Ping);
                         }
-                        // wake up sleeping connections.
-                        let _ = self.broadcast.send(PeerFeedItem::Ping);
                     }
                     continue;
                 }
@@ -425,7 +434,7 @@ impl PeerFeed {
             match item {
                 PeerFeedItem::Article(art) => {
                     // if we have no connections, or less than maxconn, create a connection here.
-                    if self.num_conns < self.newspeer.maxparallel {
+                    if self.num_conns < self.newspeer.maxparallel && !queue_only {
                         let qlen = self.tx_queue.len();
                         // TODO: use average queue length.
                         if self.num_conns == 0 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
@@ -467,7 +476,12 @@ impl PeerFeed {
                 PeerFeedItem::ReconfigurePeer(peer) => {
                     if &peer != self.newspeer.as_ref() {
                         self.newspeer = Arc::new(peer);
-                        let _ = self.broadcast.send(PeerFeedItem::Reconfigure);
+                        if !queue_only && self.newspeer.queue_only {
+                            let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                        } else {
+                            let _ = self.broadcast.send(PeerFeedItem::Reconfigure);
+                        }
+                        queue_only = self.newspeer.queue_only;
                     }
                 },
                 PeerFeedItem::ConnExit(arts) => {
