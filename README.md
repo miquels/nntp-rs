@@ -1,32 +1,32 @@
 
 ## nntp-rs
 
-A NNTP server in Rust. Very much WIP.
+A NNTP server in Rust. Async, built with Tokio. Very much WIP.
 
 Status:
 - diablo-format history file
 - diablo-format article spool
-- uses diablo-compatible dnewsfeeds file
-- optionally read diablo-format diablo.hosts and dspool.ctl config files.
+- uses its own diablo-influenced configuration format,
+  but can read diablo "dnewsfeeds", "diablo.hosts" and "dspool.ctl" files.
 - NNTP commands for capabilities **mandatory** and most of **READER** have been implemented
   (no active file or article numbering, yet, though).
+- incoming and outgoing feeds
+- header only feeds
 
-# Architecture
+# Runtimes.
 
-The server starts a number of threads (by default num_cpus) and on each
-thread a tokio current_thread executor is started. Each thread has a listening
-socket on the same port, shared with SO_REUSEPORT. Spreading the incoming
-connections over the threads is done by the kernel. Once a connection is
-accepted by a thread, it stays on that thread.
+The part of the server that handles incoming feeds can use two different
+runtimes, based on the Tokio `basic` and `threaded` runtimes.
 
-Both the history database and the article spool have their own thread pool,
-on which futures are spawned from the main nntp handling threads to do
-async-io history file lookups and article retrieval.
+- **threaded**: based on the Tokio `threaded` runtime. All of the servers `tasks`
+  (each task handles one connection, incoming or outgoing) are M:N scheduled
+  over a bunch of threads.
 
-It is planned to also make it possible to use the "threadpool" executor, so
-we can use tokio_executor::threadpool::blocking() which is more efficient
-than spawning work onto a threadpool.
-
-It would also be nice to have a mode where the history file is kept mmap()ed,
-and all I/O to the history file is done directly instead of via a threadpool.
+- **multisingle**: a mix of multiple Tokio `basic` runtimes and one `threaded`
+  runtime. You can configure N incoming threads. Each thread runs one instance
+  of the `basic` scheduler, and can be pinned to one specific CPU core.
+  Incoming connections are loadbalanced over the incoming threads (using `SO_REUSE_PORT`).
+  This combined with ethernet NICs that support multiple IRQs/channels in hardware
+  makes the server scale quite nicely. The rest of the server (house-keeping,
+  outgoing connections, etc) runs on the `threaded` scheduler.
 
