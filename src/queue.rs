@@ -170,7 +170,7 @@ impl QWriter {
         if self.last_rotate == 0 {
             self.last_rotate = util::unixtime();
         }
-        self.next_seq = std::cmp::min(2, next_seq);
+        self.next_seq = std::cmp::max(2, next_seq);
 
         match self.do_read_seqno(&path).await {
             Ok((seq, time)) => {
