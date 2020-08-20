@@ -640,7 +640,10 @@ impl Connection {
     ) -> io::Result<Connection>
     {
         let mut broadcast_rx = broadcast.subscribe();
-        let mut fail_delay = 1;
+        let mut do_delay = false;
+
+        let mut fail_delay = 1000f64;
+        delay_jitter(&mut fail_delay);
 
         loop {
             log::info!(
@@ -649,21 +652,32 @@ impl Connection {
                 id,
                 newspeer.outhost
             );
-            let conn_fut = Connection::connect(newspeer.clone(), id, fail_delay);
+
+            let conn_fut = Connection::connect(newspeer.clone(), id);
             tokio::pin!(conn_fut);
 
-            // exponential backoff, max delay 256 secs.
-            fail_delay = std::cmp::min(fail_delay * 2, 256);
+            if do_delay {
+                log::debug!("Connection::new: delay {} ms", fail_delay as u64);
+            }
+            let delay_fut = delay_for(Duration::from_millis(fail_delay as u64));
+            tokio::pin!(delay_fut);
 
             // Start connecting, but also listen to broadcasts while connecting.
             loop {
                 tokio::select! {
-                    conn = &mut conn_fut => {
+                    _ = &mut delay_fut, if do_delay => {
+                        do_delay = false;
+                        delay_increase(&mut fail_delay, 120_000);
+                        delay_jitter(&mut fail_delay);
+                        continue;
+                    }
+                    conn = &mut conn_fut, if !do_delay => {
                         let (codec, ipaddr, connect_msg) = match conn {
                             Ok(c) => c,
                             Err(e) => {
                                 // break out of the inner loop and retry.
                                 log::warn!("{}:{}: {}", newspeer.label, id, e);
+                                do_delay = true;
                                 break;
                             },
                         };
@@ -708,6 +722,7 @@ impl Connection {
                     }
                 }
             }
+
         }
     }
 
@@ -756,7 +771,6 @@ impl Connection {
     async fn connect(
         newspeer: Arc<Peer>,
         id: u64,
-        fail_delay: u64,
     ) -> io::Result<(NntpCodec, IpAddr, String)>
     {
         let (cmd, code) = if newspeer.headfeed {
@@ -776,7 +790,6 @@ impl Connection {
             Ok(c) => Ok(c),
             Err(e) => {
                 log::warn!("{}:{}: {}", newspeer.label, id, e);
-                delay_for(Duration::new(fail_delay, 0)).await;
                 Err(e)
             },
         }
@@ -1175,5 +1188,20 @@ impl fmt::Debug for ConnItem {
             &ConnItem::Takethis(ref art) => write!(f, "\"TAKETHIS {}\"", art.msgid),
             &ConnItem::Quit => write!(f, "\"QUIT\""),
         }
+    }
+}
+
+// add in 10% jitter.
+fn delay_jitter(fail_delay: &mut f64) {
+    let ms = *fail_delay;
+    *fail_delay += (ms / 10f64) * rand::random::<f64>();
+    *fail_delay -= ms / 20f64;
+}
+
+// exponential backoff.
+fn delay_increase(fail_delay: &mut f64, max: u64) {
+    *fail_delay *= 2f64;
+    if *fail_delay > max as f64 {
+        *fail_delay = max as f64;
     }
 }
