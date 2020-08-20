@@ -352,7 +352,7 @@ fn parse_cores(s: &str) -> io::Result<Vec<CoreId>> {
     let ranges = if s.eq_ignore_ascii_case("all") {
         vec![Range {
             start: 0usize,
-            end:   cores.len() - 1,
+            end:   cores.len(),
         }]
     } else {
         parse_ranges(s).map_err(|e| err_invalid2(s, e.to_string()))?
