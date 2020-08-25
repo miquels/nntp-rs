@@ -836,20 +836,12 @@ impl Connection {
                         self.id,
                         item,
                     );
-                    let size = self.transmit_item(item.clone(), part).await?;
 
-                    // for TAKETHIS, update sent item size.
-                    match item {
-                        ConnItem::Takethis(ref mut art) => {
-                            if size == 0 {
-                                // size == 0 means article not found. non-fatal error.
-                                continue;
-                            }
-                            // update size.
-                            art.size = size;
-                        },
-                        _ => {},
+                    if !self.transmit_item(&mut item, part).await? {
+                        // wanted to do TAKETHIS, but article not found, so start from the top.
+                        continue;
                     }
+
                     // and queue item for the receiving side.
                     self.recv_queue.push_back(item);
                     xmit_busy = true;
@@ -1028,20 +1020,22 @@ impl Connection {
 
     // The remote server sent a response. Process it.
     async fn handle_response(&mut self, resp: NntpResponse) -> io::Result<bool> {
-        // It's a response to the item at the front of the queue.
+
+        // Remote side can close the connection at any time, if they are
+        // nice they send a 400 code so we know it's on purpose.
+        if resp.code == 400 {
+            log::info!(
+                "{}:{}: connection closed by remote ({})",
+                self.newspeer.label,
+                self.id,
+                resp.short()
+            );
+            return Ok(true);
+        }
+
+        // Must be a response to the item at the front of the queue.
         let item = match self.recv_queue.pop_front() {
-            None => {
-                if resp.code == 400 {
-                    log::info!(
-                        "{}:{}: connection closed by remote ({})",
-                        self.newspeer.label,
-                        self.id,
-                        resp.short()
-                    );
-                    return Ok(true);
-                }
-                return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short()));
-            },
+            None => return Err(ioerr!(InvalidData, "unsollicited response: {}", resp.short())),
             Some(item) => item,
         };
 
@@ -1112,15 +1106,17 @@ impl Connection {
     }
 
     // Put the ConnItem in the Sink.
-    async fn transmit_item(&mut self, item: ConnItem, part: ArtPart) -> io::Result<usize> {
+    //
+    // Returns 'false' if the article was not found when about to send TAKETHIS.
+    async fn transmit_item(&mut self, item: &mut ConnItem, part: ArtPart) -> io::Result<bool> {
         match item {
-            ConnItem::Check(art) => {
+            ConnItem::Check(ref art) => {
                 log::trace!("Connection::transmit_item: CHECK {}", art.msgid);
                 let line = format!("CHECK {}\r\n", art.msgid);
                 Pin::new(&mut self.writer).start_send(line.into())?;
-                Ok(0)
+                Ok(true)
             },
-            ConnItem::Takethis(art) => {
+            ConnItem::Takethis(ref mut art) => {
                 log::trace!("Connection::transmit_item: TAKETHIS {}", art.msgid);
                 let tmpbuf = Buffer::new();
                 let mut sp_art = match self.spool.read_art(art.location.clone(), part, tmpbuf).await {
@@ -1128,14 +1124,14 @@ impl Connection {
                     Err(e) => {
                         if e.kind() == io::ErrorKind::NotFound {
                             self.stats.art_notfound();
-                            return Ok(0);
+                            return Ok(false);
                         }
                         if e.kind() == io::ErrorKind::InvalidData {
                             // Corrupted article. Should not happen.
                             // Log an error and continue.
                             log::error!("Connection::transmit_item: {:?}: {}", art, e);
                             self.stats.art_notfound();
-                            return Ok(0);
+                            return Ok(false);
                         }
                         return Err(e);
                     },
@@ -1147,19 +1143,19 @@ impl Connection {
                 Pin::new(&mut self.writer).start_send(line.into())?;
                 if self.rewrite {
                     let (head, body) = self.rewrite_headers(sp_art);
-                    let len = head.len() + body.len() - 3;
+                    art.size = head.len() + body.len() - 3;
                     Pin::new(&mut self.writer).start_send(head)?;
                     Pin::new(&mut self.writer).start_send(body)?;
-                    Ok(len)
+                    Ok(true)
                 } else {
-                    let len = sp_art.data.len() - 3;
+                    art.size = sp_art.data.len() - 3;
                     Pin::new(&mut self.writer).start_send(sp_art.data)?;
-                    Ok(len)
+                    Ok(true)
                 }
             },
             ConnItem::Quit => {
                 Pin::new(&mut self.writer).start_send("QUIT\r\n".into())?;
-                Ok(0)
+                Ok(true)
             },
         }
     }
