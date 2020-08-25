@@ -21,19 +21,19 @@ const QUEUE_ROTATE_SECS: u64 = 300;
 
 /// A set of items that we got from the queue by calling read_items().
 #[derive(Default, Clone, Debug)]
-pub struct QItems {
-    pub(crate) id:    u64,
-    pub(crate) items: String,
-    pub(crate) pos:   usize,
-    pub(crate) done:  bool,
+pub(super) struct QItems {
+    pub(super) id:    u64,
+    pub(super) items: String,
+    pub(super) pos:   usize,
+    pub(super) done:  bool,
 }
 
 impl QItems {
-    pub fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.items[self.pos..].split('\n').filter(|s| *s != "").count()
     }
 
-    pub fn next_str(&mut self) -> Option<&str> {
+    pub(super) fn next_str(&mut self) -> Option<&str> {
         loop {
             match self.items[self.pos..].find('\n') {
                 Some(len) => {
@@ -57,7 +57,7 @@ impl QItems {
         }
     }
 
-    pub fn next_art(&mut self, spool: &Spool) -> Option<PeerArticle> {
+    pub(super) fn next_art(&mut self, spool: &Spool) -> Option<PeerArticle> {
         while let Some(s) = self.next_str() {
             if let Some((location, msgid)) = spool.text_to_token(s) {
                 return Some(PeerArticle {
@@ -419,7 +419,7 @@ impl QReader {
     }
 
     // get the lowest sequence number.
-    pub fn low_seq(&self) -> u64 {
+    pub(super) fn low_seq(&self) -> u64 {
         let mut seq = 0;
         for qfile in &self.qfiles {
             if seq == 0 || qfile.seq < seq {
@@ -436,13 +436,13 @@ struct InnerQueue {
 }
 
 #[derive(Clone)]
-pub struct Queue {
+pub(super) struct Queue {
     inner: Arc<InnerQueue>,
 }
 
 impl Queue {
     /// Create a new queue for this peer.
-    pub fn new(label: &str, queue_dir: &str, maxqueue: u32) -> Queue {
+    pub(super) fn new(label: &str, queue_dir: &str, maxqueue: u32) -> Queue {
         let mut path = PathBuf::from(queue_dir);
         path.push(&Path::new(label));
 
@@ -467,13 +467,13 @@ impl Queue {
         }
     }
 
-    pub async fn len(&self) -> usize {
+    pub(super) async fn len(&self) -> usize {
         let qreader = self.inner.qreader.lock().await;
         let qwriter = self.inner.qwriter.lock().await;
         qreader.qfiles.len() + (!qwriter.is_empty as usize)
     }
 
-    pub async fn init(&self) -> usize {
+    pub(super) async fn init(&self) -> usize {
         // scan qeueu files.
         let mut qreader = self.inner.qreader.lock().await;
         let _ = qreader.scan_qfiles().await;
@@ -517,7 +517,7 @@ impl Queue {
     }
 
     // get a block of items from the queue, LIFO mode.
-    pub async fn read_items(&self, num_entries: usize) -> Option<QItems> {
+    pub(super) async fn read_items(&self, num_entries: usize) -> Option<QItems> {
         let mut qreader = self.inner.qreader.lock().await;
 
         // If we still have a QItems queued up, return it.
@@ -614,13 +614,13 @@ impl Queue {
 
 
     /// Acknowledge that the items were processed and that we're done.
-    pub async fn ack_items(&self, items: QItems) {
+    pub(super) async fn ack_items(&self, items: QItems) {
         self.ack(items, true).await
     }
 
     /// Return the items, we did not process them (or not all of them).
     /// They will be re-queued for the next caller of read_items().
-    pub async fn return_items(&self, items: QItems) {
+    pub(super) async fn return_items(&self, items: QItems) {
         self.ack(items, false).await
     }
 
@@ -647,7 +647,7 @@ impl Queue {
         }
     }
 
-    pub async fn write_arts(&self, spool: &Spool, arts: &[PeerArticle]) -> io::Result<()> {
+    pub(super) async fn write_arts(&self, spool: &Spool, arts: &[PeerArticle]) -> io::Result<()> {
         if arts.len() == 0 {
             return Ok(());
         }
@@ -664,7 +664,7 @@ impl Queue {
         self.write_items(iter).await
     }
 
-    pub async fn write_items<I, S>(&self, items: I) -> io::Result<()>
+    pub(super) async fn write_items<I, S>(&self, items: I) -> io::Result<()>
     where
         I: Iterator<Item = S>,
         S: AsRef<str>,
