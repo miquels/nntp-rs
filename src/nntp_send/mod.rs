@@ -1,3 +1,5 @@
+//! nntp_send - send articles to peers.
+//!
 use std::net::IpAddr;
 use smartstring::alias::String as SmartString;
 
@@ -9,13 +11,13 @@ mod masterfeed;
 mod peerfeed;
 mod connection;
 
-pub use masterfeed::MasterFeed;
-
 use queue::{Queue, QItems};
 use peerfeed::PeerFeed;
 use connection::Connection;
 
-/// Sent to the MasterFeed.
+pub use masterfeed::MasterFeed;
+
+/// Articles sent to the MasterFeed channel.
 pub struct FeedArticle {
     /// Message-Id.
     pub msgid:    String,
@@ -50,6 +52,8 @@ struct PeerArticle {
     pub size:     usize,
     // Did it come from the backlog
     pub from_backlog: bool,
+    // How many times was this articles deferred.
+    pub deferred: u32,
 }
 
 // A shorter version of newsfeeds::NewsPeer.

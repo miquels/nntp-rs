@@ -65,6 +65,7 @@ impl QItems {
                     location,
                     size: 0,
                     from_backlog: true,
+                    deferred: 0,
                 });
             }
         }

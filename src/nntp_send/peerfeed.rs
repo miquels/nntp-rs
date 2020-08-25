@@ -134,9 +134,10 @@ impl PeerFeed {
                     if queue_len > 0 {
                         if queue_only {
                             if let Err(_e) = self.send_queue_to_backlog(true).await {
-                                // backlog fails. now what.
+                                // FIXME: backlog fails. now what.
                             }
                         } else {
+                            // TODO: scale number of connections in a smarter way.
                             if self.num_conns < self.newspeer.maxparallel / 2 {
                                 self.add_connection().await;
                             }
@@ -187,7 +188,7 @@ impl PeerFeed {
                                     let _ = self.tx_queue.try_send(art);
                                 },
                                 Err(_e) => {
-                                    // article dropped, and backlog fails. now what.
+                                    // FIXME: article dropped, and backlog fails. now what.
                                 },
                             }
                         },

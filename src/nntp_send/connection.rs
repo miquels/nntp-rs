@@ -13,13 +13,15 @@ use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::delay_for;
+use tokio::time::{Instant, delay_for};
+use tokio::stream::Stream;
 
 use crate::article::{HeaderName, HeadersParser};
 use crate::diag::TxSessionStats;
@@ -29,6 +31,19 @@ use crate::spool::{ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
 use super::{Peer, PeerArticle, PeerFeedItem, Queue, QItems};
+
+// How long to wait to re-offer a deferred article, initially.
+const DEFER_DELAY_INITIAL: u64 = 10u64;
+
+// How long to wait in case the article was deferred again.
+const DEFER_DELAY_NEXT: u64 = 5u64;
+
+// How many times to try to re-offer a deferred article.
+// After this many, we give up and drop the article.
+const DEFER_RETRIES: u32 = 3;
+
+// How many articles too keep in the deferred-retry buffer.
+const DEFER_MAX_QUEUE: usize = 1000;
 
 //
 // A connection.
@@ -620,6 +635,90 @@ impl Connection {
         let mut hb = Buffer::new();
         headers.header_bytes(&mut hb);
         (hb, body)
+    }
+}
+
+struct DeferredArticle {
+    art:    PeerArticle,
+    when:   Instant,
+}
+
+// Our own version of DeferredQueue.
+// Needed because the tokio version has no way to drain the
+// queue in one go, which we need when the connection is dropped.
+#[derive(Default)]
+struct DeferredQueue {
+    queue:  VecDeque<DeferredArticle>,
+    tick:   Option<tokio::time::Delay>,
+}
+
+impl DeferredQueue {
+    fn new() -> DeferredQueue {
+        DeferredQueue::default()
+    }
+
+    // Push an article onto the queue.
+    //
+    // If the queue exceeds `maxlen` items, remove the oldest
+    // item and return it as an error. The caller can then
+    // decide what to do with it.
+    fn push(&mut self, mut art: PeerArticle) -> Result<(), PeerArticle> {
+        art.deferred += 1;
+        if art.deferred > DEFER_RETRIES {
+            return Ok(());
+        }
+
+        let delay = if art.deferred == 1 { DEFER_DELAY_INITIAL } else { DEFER_DELAY_NEXT };
+        let when = Instant::now() + Duration::new(delay, 0);
+        if self.queue.is_empty() {
+            if let Some(ref mut tick) = self.tick {
+                tick.reset(when);
+            } else {
+                self.tick = Some(tokio::time::delay_until(when));
+            }
+        }
+        self.queue.push_back(DeferredArticle{ art, when });
+        if self.queue.len() > DEFER_MAX_QUEUE {
+            Err(self.queue.pop_front().unwrap().art)
+        } else {
+            Ok(())
+        }
+    }
+
+    // Turn this queue into an iterator of PeerArticles, in order to drain it.
+    fn into_iter(self) -> impl Iterator<Item=PeerArticle> {
+        self.queue.into_iter().map(|x| x.art)
+    }
+}
+
+impl Stream for DeferredQueue {
+    type Item = PeerArticle;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let mut this = self.as_mut();
+
+        // nothing to do?
+        if this.queue.is_empty() {
+            return Poll::Pending;
+        }
+
+        // See if an item at the front of the queue has expired.
+        // We allow a window of one second, to batch up items that
+        // expire at around the same time.
+        let now = Instant::now() - Duration::new(1, 0);
+        let when = this.queue[0].when;
+        if when >= now {
+            let art = this.queue.pop_front().unwrap().art;
+            return Poll::Ready(Some(art));
+        }
+
+        // set the next tick.
+        if let Some(ref mut tick) = this.tick {
+            tick.reset(when);
+        } else {
+            this.tick = Some(tokio::time::delay_until(when));
+        }
+        Poll::Pending
     }
 }
 

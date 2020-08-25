@@ -158,6 +158,7 @@ impl MasterFeed {
                     location: art.location.clone(),
                     size:     art.size,
                     from_backlog: false,
+                    deferred: 0,
                 };
                 if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
                     log::error!(
