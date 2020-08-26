@@ -2,7 +2,9 @@
 
 use std::cmp;
 use std::fmt;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use std::time::{Duration, SystemTime};
 
 use chrono::{
     self,
@@ -48,6 +50,14 @@ impl cmp::PartialEq for UnixTime {
     }
 }
 impl cmp::Eq for UnixTime {}
+
+impl std::ops::Add<Duration> for UnixTime {
+    type Output = UnixTime;
+
+    fn add(self, other: Duration) -> UnixTime {
+        UnixTime(self.0 + other.as_millis() as u64)
+    }
+}
 
 impl AsRef<UnixTime> for UnixTime {
     fn as_ref(&self) -> &Self {
@@ -127,8 +137,24 @@ impl UnixTime {
             0
         }
     }
+
+    pub fn to_atomic(&self, atomic: &AtomicU64) {
+        atomic.store(self.0, Ordering::Release)
+    }
 }
 
+impl From<&AtomicU64> for UnixTime {
+    fn from(t: &AtomicU64) -> UnixTime {
+        UnixTime(t.load(Ordering::Acquire))
+    }
+}
+
+impl From<SystemTime> for UnixTime {
+    fn from(t: SystemTime) -> UnixTime {
+        let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        UnixTime(d.as_millis() as u64)
+    }
+}
 
 pub struct DateTime<Tz: TimeZone>(chrono::DateTime<Tz>);
 

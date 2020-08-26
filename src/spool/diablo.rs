@@ -1,11 +1,31 @@
+//! Diablo spool implementation.
+//!
+//! Reimplementation of the article spool from Matt Dillon's Diablo.
+//!
+//! Each spool contains 'D.xxxxxxxx' directories. where 'xxxxxxxx' is a timestamp
+//! in hex: minutes since the unix epoch. Each directory then contains data files,
+//! which are named 'B.xxxx' where 'xxxx' is a hex number 0..4095 (12 bits). Each
+//! data file contains multiple articles.
+//!
+//! A storage token for diablo spool is built from:
+//!
+//! - spool number (u8, 0 .. 99)
+//! - D. directory  (u32)
+//! - B. file (u16, 12 bits)
+//! - file offset (32 bits)
+//! - article length (32 bits)
+//!
+use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs;
 use std::io;
 use std::io::Error as IoError;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -18,7 +38,6 @@ use crate::util::{self, Buffer, UnixTime};
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT: u32 = 600;
-//const DFL_DIR_REALLOCINT : u32 = 3600;
 
 /// A diablo spool instance.
 ///
@@ -33,6 +52,7 @@ pub struct DSpool {
     minfree:            u64,
     maxsize:            u64,
     keeptime:           u64,
+    oldest:             AtomicU64,
     writer:             Mutex<Writer>,
 }
 
@@ -158,6 +178,14 @@ fn article_readahead(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
     }
 }
 
+// Internal helper struct for expire.
+struct ExpFile {
+    path:   PathBuf,
+    size:   u64,
+    modified:   SystemTime,
+    created:    Option<SystemTime>,
+}
+
 /// This is the main backend implementation.
 impl DSpool {
     /// Create a new diablo-type spool backend.
@@ -167,7 +195,12 @@ impl DSpool {
         } else {
             DFL_FILE_REALLOCINT
         };
+
+        // round down file_reallocint to the nearest multiple of 60 (i.e. to the minute).
         let file_reallocint = (file_reallocint / 60) * 60;
+
+        // for now, dir_reallocint is 6 times that. so, for the default
+        // file_reallocint of 10 minutes, dir_reallocint is 60 minutes.
         let dir_reallocint = file_reallocint * 6;
 
         let sv = fs2::statvfs(&cfg.path).map_err(|e| ioerr!(e.kind(), "{}: {}", cfg.path, e))?;
@@ -209,8 +242,13 @@ impl DSpool {
             keeptime:        cfg.keeptime.as_secs(),
             minfree:         minfree,
             maxsize:         maxsize,
+            oldest:          AtomicU64::new(0),
             writer:          Mutex::new(Writer::default()),
         };
+
+        // Find the oldest article.
+        ds.do_expire(0, true)?;
+
         Ok(Box::new(ds))
     }
 
@@ -516,42 +554,112 @@ impl DSpool {
         })
     }
 
-    // Get a list of D.xxxxxxxx directories, and sort them. Then find the oldest
-    // non-empty directory, and return the xxxxxxxx part as a timestamp.
-    fn do_get_oldest(&self) -> io::Result<Option<UnixTime>> {
-        let d = match fs::read_dir(&self.path) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("get_oldest({:?}): {}", self.path, e);
-                return Err(e);
-            },
-        };
-        let d = d
+    // Remove oldest data until we have enough space available.
+    fn do_expire(&self, space_needed: u64, stat_only: bool) -> io::Result<()> {
+
+        let mut deleted = 0;
+
+        let mut dirs: Vec<_> = fs::read_dir(&self.path)
+            .map_err(|e| ioerr!(e.kind(), "spool: {:?}: {}", self.path, e))?
             .filter_map(|r| r.ok())
             .filter_map(|r| r.file_name().into_string().ok())
-            .filter(|f| f.starts_with("D.") && f.len() == 10);
-        let mut files: Vec<_> = d.collect();
-        files.sort();
-        for file in &files {
-            let when = match u64::from_str_radix(&file[2..], 16) {
-                Ok(w) => w * 60,
+            .filter(|f| f.starts_with("D.") && f.len() == 10)
+            .collect();
+        dirs.sort();
+
+        for dirname in &dirs {
+            // filename contains a timestamp in hex, in minutes.
+            let dir_timestamp = match u64::from_str_radix(&dirname[2..], 16) {
+                Ok(w) => UnixTime::from_secs(w * 60),
                 Err(_) => continue,
             };
-            let mut path = self.path.clone();
-            path.push(file);
 
-            // if the directory is not empty, then return it.
-            if let Ok(mut subdirs) = fs::read_dir(&path) {
-                if subdirs.next().is_some() {
-                    return Ok(Some(UnixTime::from_secs(when)));
+            // read directory. return an error if we fail - we can't ignore
+            // it and continue, since we then might start to delete
+            // articles that are too new.
+            let mut dirpath = self.path.clone();
+            dirpath.push(dirname);
+            let files = fs::read_dir(&dirpath).map_err(|e| ioerr!(e.kind(), "spool: {:?}: {}", dirpath, e))?;
+
+            // read all files. filter out the ones that start with "B." and
+            // get their `modified` time. Then sort by `modified`.
+            let mut files: Vec<_> = files
+                .filter_map(|f| {
+                    let file = f.ok()?;
+                    if file.file_name().to_str()?.starts_with("B.") {
+                        return None;
+                    }
+                    let meta = file.metadata().ok()?;
+                    let modified = meta.modified().ok()?;
+                    Some(ExpFile {
+                        path:   file.path(),
+                        size:   meta.blocks() * 512u64,
+                        modified,
+                        created: meta.created().ok(),
+                    })
+                }).collect();
+            files.sort_unstable_by(|a, b| a.modified.cmp(&b.modified));
+
+            // Maybe initialize 'self.oldest' timestamp.
+            if !files.is_empty() && self.oldest.load(Ordering::Acquire) == 0 {
+                dir_timestamp.to_atomic(&self.oldest);
+            }
+
+            // now walk over the files in the directory.
+            let mut files: VecDeque<_> = files.into();
+            while files.len() > 0 && !stat_only {
+                if deleted >= space_needed {
+                    break;
                 }
+                // delete until we have enough space.
+                let ExpFile {path, size, .. } = files.pop_front().unwrap();
+                fs::remove_file(&path)
+                    .map_err(|e| ioerr!(e.kind(), "spool: expire failed: {:?}: {}", path, e))?;
+                deleted += size;
+            }
+
+            // if we removed all the files, remove the directory as well,
+            // and then continue with the next directory.
+            if files.is_empty() {
+                if !stat_only {
+                    fs::remove_dir(&dirpath)
+                        .map_err(|e| ioerr!(e.kind(), "spool: expire failed: {:?}: {}", dirpath, e))?;
+                }
+                continue;
+            }
+
+            self.update_oldest(dir_timestamp, &files);
+        }
+
+        Ok(())
+    }
+
+    // Check the validity of all 'created' timestamps. They must all be OK,
+    // and fall between dir_timestamp and dir_timestamp + dir_reallocint.
+    // Then find the oldest timestamp.
+    fn update_oldest(&self, dir_timestamp: UnixTime, files: &VecDeque<ExpFile>) {
+        dir_timestamp.to_atomic(&self.oldest);
+        let max = dir_timestamp + Duration::new(self.dir_reallocint as u64, 0);
+        let mut oldest = None;
+        for file in files {
+            let tm = match file.created {
+                Some(tm) => UnixTime::from(tm),
+                None => return,
+            };
+            if tm < dir_timestamp || tm > max {
+                return;
+            }
+            if let Some(oldest) = oldest.as_mut() {
+                if tm < *oldest {
+                    *oldest = tm;
+                }
+            } else {
+                oldest = Some(tm);
             }
         }
-        log::warn!(
-            "get_oldest({:?}): no spooldirs - skipping history expire",
-            self.path
-        );
-        Ok(None)
+        if let Some(oldest) = oldest {
+            oldest.to_atomic(&self.oldest);
+        }
     }
 
     // Generate a line in dqueue spool file format.
@@ -623,7 +731,12 @@ impl SpoolBackend for DSpool {
     }
 
     fn get_oldest(&self) -> io::Result<Option<UnixTime>> {
-        self.do_get_oldest()
+        let t = UnixTime::from(&self.oldest);
+        if t.is_zero() {
+            Ok(None)
+        } else {
+            Ok(Some(t))
+        }
     }
 
     fn token_to_text(&self, art_loc: &ArtLoc, msgid: &str) -> String {
