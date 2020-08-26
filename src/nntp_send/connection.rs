@@ -83,6 +83,8 @@ pub(super) struct Connection {
     tx_chan:    mpsc::Sender<PeerFeedItem>,
     // article queue.
     rx_queue:   async_channel::Receiver<PeerArticle>,
+    // deferred article queue.
+    deferred:   DeferredQueue,
     // broadcast channel to receive notifications from the PeerFeed.
     broadcast:  broadcast::Receiver<PeerFeedItem>,
     // do we need to rewrite the headers?
@@ -167,6 +169,7 @@ impl Connection {
                             spool,
                             tx_chan,
                             rx_queue,
+                            deferred: DeferredQueue::new(),
                             broadcast: broadcast_rx,
                             rewrite,
                             queue,
@@ -222,6 +225,7 @@ impl Connection {
                 .iter()
                 .chain(self.recv_queue.iter())
                 .chain(self.dropped.iter())
+                .chain(self.deferred.iter())
             {
                 match item {
                     &ConnItem::Check(ref art) | &ConnItem::Takethis(ref art) => {
@@ -468,6 +472,19 @@ impl Connection {
                         },
                     }
                 }
+
+                // Check the deferred queue.
+                defer_art = self.deferred.next() => {
+                    let art = defer_art.unwrap();
+                    log::trace!(
+                        "Connection::feed: {}:{}: re-pushing CHECK {} onto send queue",
+                        self.newspeer.label,
+                        self.id,
+                        art.msgid(),
+                    );
+                    // For now ignore dropped articles when re-queuing.
+                    let _ = self.send_queue.push_back(art);
+                }
             }
         }
     }
@@ -511,9 +528,10 @@ impl Connection {
                     },
                     431 => {
                         // remote deferred it (aka "try again a bit later")
-                        // XXX TODO req-queue article.
-                        //self.stats.art_deferred(None);
-                        self.stats.art_deferred_fail(None); // XXX
+                        match self.deferred.push(ConnItem::Check(art)) {
+                            Ok(_) => self.stats.art_deferred(None),
+                            Err(_) => self.stats.art_deferred_fail(None),
+                        }
                     },
                     438 => {
                         // remote doesn't want it.
@@ -535,10 +553,9 @@ impl Connection {
                         self.stats.art_accepted(art.size);
                     },
                     431 => {
-                        // this is an invalid TAKETHIS reply!
-                        // XXX TODO req-queue article.
-                        //self.stats.art_deferred(Some(art.size));
-                        self.stats.art_deferred_fail(Some(art.size)); // XXX
+                        // NOTE: this is an invalid TAKETHIS reply!
+                        // So, we ignore this reply, and we do not re-queue the article.
+                        self.stats.art_deferred_fail(Some(art.size));
                     },
                     439 => {
                         // Remote already got it.
@@ -639,7 +656,7 @@ impl Connection {
 }
 
 struct DeferredArticle {
-    art:    PeerArticle,
+    art:    ConnItem,
     when:   Instant,
 }
 
@@ -662,13 +679,13 @@ impl DeferredQueue {
     // If the queue exceeds `maxlen` items, remove the oldest
     // item and return it as an error. The caller can then
     // decide what to do with it.
-    fn push(&mut self, mut art: PeerArticle) -> Result<(), PeerArticle> {
-        art.deferred += 1;
-        if art.deferred > DEFER_RETRIES {
-            return Ok(());
+    fn push(&mut self, mut art: ConnItem) -> Result<(), ConnItem> {
+        art.deferred_inc();
+        if art.deferred() > DEFER_RETRIES {
+            return Err(art);
         }
 
-        let delay = if art.deferred == 1 { DEFER_DELAY_INITIAL } else { DEFER_DELAY_NEXT };
+        let delay = if art.deferred() == 1 { DEFER_DELAY_INITIAL } else { DEFER_DELAY_NEXT };
         let when = Instant::now() + Duration::new(delay, 0);
         if self.queue.is_empty() {
             if let Some(ref mut tick) = self.tick {
@@ -686,13 +703,13 @@ impl DeferredQueue {
     }
 
     // Turn this queue into an iterator of PeerArticles, in order to drain it.
-    fn into_iter(self) -> impl Iterator<Item=PeerArticle> {
-        self.queue.into_iter().map(|x| x.art)
+    fn iter(&self) -> impl Iterator<Item=&ConnItem> {
+        self.queue.iter().map(|q| &q.art)
     }
 }
 
 impl Stream for DeferredQueue {
-    type Item = PeerArticle;
+    type Item = ConnItem;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = self.as_mut();
@@ -728,6 +745,30 @@ enum ConnItem {
     Check(PeerArticle),
     Takethis(PeerArticle),
     Quit,
+}
+
+impl ConnItem {
+    fn msgid(&self) -> &str {
+        match self {
+            ConnItem::Check(ref art) => art.msgid.as_str(),
+            ConnItem::Takethis(ref art) => art.msgid.as_str(),
+            ConnItem::Quit => "",
+        }
+    }
+    fn deferred(&self) -> u32 {
+        match self {
+            ConnItem::Check(ref art) => art.deferred,
+            ConnItem::Takethis(ref art) => art.deferred,
+            ConnItem::Quit => 0,
+        }
+    }
+    fn deferred_inc(&mut self) {
+        match self {
+            ConnItem::Check(ref mut art) => art.deferred += 1,
+            ConnItem::Takethis(ref mut art) => art.deferred += 1,
+            ConnItem::Quit => {},
+        }
+    }
 }
 
 impl fmt::Debug for ConnItem {
