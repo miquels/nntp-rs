@@ -9,6 +9,7 @@ pub(crate) mod clock;
 mod datetime;
 mod de;
 mod dhash;
+pub mod format;
 mod hashfeed;
 mod misc;
 mod mmap;

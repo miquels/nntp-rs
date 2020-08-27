@@ -14,7 +14,7 @@ use nntp_rs::logger::{self, LogTarget};
 use nntp_rs::nntp_client;
 use nntp_rs::server;
 use nntp_rs::spool::{self, Spool};
-use nntp_rs::util::{self, BlockingType, TcpListenerSets};
+use nntp_rs::util::{self, format, BlockingType, TcpListenerSets};
 
 // use jemalloc instead of system malloc.
 #[global_allocator]
@@ -58,6 +58,9 @@ pub enum Command {
     /// Read article from spool.
     SpoolRead(SpoolReadOpts),
     #[structopt(display_order = 6)]
+    /// Expire a spool.
+    SpoolExpire(SpoolExpireOpts),
+    #[structopt(display_order = 7)]
     /// Generate a test article and send it out.
     TestArticle(TestArticleOpts),
 }
@@ -105,6 +108,16 @@ pub struct SpoolReadOpts {
     pub file:  Option<String>,
     /// Message-Id.
     pub msgid: String,
+}
+
+#[derive(StructOpt, Debug)]
+pub struct SpoolExpireOpts {
+    #[structopt(short, long)]
+    /// Spool number to expire.
+    pub spool: u8,
+    #[structopt(short, long)]
+    /// Default is dry_run, use this to actually expire.
+    pub doit: bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -278,6 +291,7 @@ fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -
             Command::HistExpire(opts) => history_expire(config.unwrap(), opts).await,
             Command::HistInspect(opts) => history_inspect(config.unwrap(), opts).await,
             Command::SpoolRead(opts) => spool_read(config.unwrap(), opts).await,
+            Command::SpoolExpire(opts) => spool_expire(config.unwrap(), opts).await,
             Command::TestArticle(opts) => test_article(opts).await,
         }
     });
@@ -393,6 +407,19 @@ async fn spool_read(config: &config::Config, opts: SpoolReadOpts) -> Result<()> 
             let start = if line.starts_with(b".") { 1 } else { 0 };
             io::stdout().write_all(&line[start..])?;
         }
+    }
+    Ok(())
+}
+
+async fn spool_expire(config: &config::Config, opts: SpoolExpireOpts) -> Result<()> {
+    // open spool.
+    let spool = Spool::new(&config.spool, None, BlockingType::Blocking)
+        .map_err(|e| ioerr!(e.kind(), "nntp-rs: initializing spool: {}", e))?;
+    // call expire.
+    let bytes = spool.expire(opts.spool, !opts.doit).await?;
+    println!("{} article data total expired", format::size(bytes));
+    if let Some(oldest) = spool.get_oldest().get(&opts.spool) {
+        println!("oldest article: {}", oldest);
     }
     Ok(())
 }

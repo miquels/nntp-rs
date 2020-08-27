@@ -34,7 +34,7 @@ use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolArt, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
-use crate::util::{self, Buffer, UnixTime};
+use crate::util::{self, format, Buffer, UnixTime};
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT: u32 = 600;
@@ -203,33 +203,15 @@ impl DSpool {
         // file_reallocint of 10 minutes, dir_reallocint is 60 minutes.
         let dir_reallocint = file_reallocint * 6;
 
-        let sv = fs2::statvfs(&cfg.path).map_err(|e| ioerr!(e.kind(), "{}: {}", cfg.path, e))?;
-
         // minfree must be at least 10MB, if not force it.
+        const TEN_MIB: u64 = 10 * 1024 * 1024;
         let minfree = {
-            if cfg.minfree < 10_000_000 {
+            if cfg.minfree < TEN_MIB {
                 log::warn!("spool {}: setting minfree to 10MiB", cfg.spool_no);
-                10_000_000
+                TEN_MIB
             } else {
                 cfg.minfree
             }
-        };
-
-        // if maxsize is not set, take the size of the filesystem.
-        // check that it is bigger than minfree.
-        let maxsize = {
-            let m = if cfg.maxsize > 0 && cfg.maxsize < sv.total_space() {
-                cfg.maxsize
-            } else {
-                sv.total_space()
-            };
-            if minfree > m {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("spool {}: minfree > maxsize ({} > {})", cfg.spool_no, minfree, m),
-                ));
-            }
-            m
         };
 
         // Return DSpool.
@@ -241,13 +223,19 @@ impl DSpool {
             dir_reallocint:  dir_reallocint,
             keeptime:        cfg.keeptime.as_secs(),
             minfree:         minfree,
-            maxsize:         maxsize,
+            maxsize:         cfg.maxsize,
             oldest:          AtomicU64::new(0),
             writer:          Mutex::new(Writer::default()),
         };
 
         // Find the oldest article.
-        ds.do_expire(0, true)?;
+        ds.do_expire(true, false)?;
+        if let Ok(Some(t)) = ds.get_oldest() {
+            log::info!("spool {} ({}): age of oldest article: {}",
+                ds.spool_no, ds.rel_path, util::format::duration(&t.elapsed()));
+        } else {
+            log::info!("spool {} ({}): no articles", ds.spool_no, ds.rel_path);
+        }
 
         Ok(Box::new(ds))
     }
@@ -554,13 +542,40 @@ impl DSpool {
         })
     }
 
-    // Remove oldest data until we have enough space available.
-    fn do_expire(&self, space_needed: u64, stat_only: bool) -> io::Result<()> {
+    // Remove oldest data until
+    //
+    // - if 'keeptime' is set: we have removed all articles older than 'keeptime', and
+    // - if 'minfree' is set: 'minfree' bytes are available on the filesystem, and
+    // - if 'maxsize' is set: filesystem usage is < 'maxsize'
+    //
+    // We also update the `self.oldest` member variable to the timestamp
+    // of the oldest article after the expire.
+    //
+    // If `stat_only` is true, no files are actually removed, only `self.oldest` gets updated.
+    // If `dry_run` is true, go through the motions, but don't actually remove articles.
+    //
+    fn do_expire(&self, stat_only: bool, dry_run: bool) -> io::Result<u64> {
+
+        // get filesystem stats.
+        let sv = fs2::statvfs(&self.path)
+            .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?;
 
         let mut deleted = 0;
+        let mut to_delete = 0;
+
+        // if there's not enough free space, find out how much we need to free.
+        if self.minfree > 0 && sv.available_space() < self.minfree {
+            to_delete = self.minfree - sv.available_space();
+        }
+
+        // if we have used too much space, find out how much we need to free.
+        let used = sv.total_space() - sv.free_space();
+        if self.maxsize > 0 && self.maxsize > used {
+            to_delete = std::cmp::max(to_delete, self.maxsize - used);
+        }
 
         let mut dirs: Vec<_> = fs::read_dir(&self.path)
-            .map_err(|e| ioerr!(e.kind(), "spool: {:?}: {}", self.path, e))?
+            .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?
             .filter_map(|r| r.ok())
             .filter_map(|r| r.file_name().into_string().ok())
             .filter(|f| f.starts_with("D.") && f.len() == 10)
@@ -579,14 +594,15 @@ impl DSpool {
             // articles that are too new.
             let mut dirpath = self.path.clone();
             dirpath.push(dirname);
-            let files = fs::read_dir(&dirpath).map_err(|e| ioerr!(e.kind(), "spool: {:?}: {}", dirpath, e))?;
+            let files = fs::read_dir(&dirpath)
+                .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, dirpath, e))?;
 
             // read all files. filter out the ones that start with "B." and
             // get their `modified` time. Then sort by `modified`.
             let mut files: Vec<_> = files
                 .filter_map(|f| {
                     let file = f.ok()?;
-                    if file.file_name().to_str()?.starts_with("B.") {
+                    if !file.file_name().to_str()?.starts_with("B.") {
                         return None;
                     }
                     let meta = file.metadata().ok()?;
@@ -607,21 +623,36 @@ impl DSpool {
 
             // now walk over the files in the directory.
             let mut files: VecDeque<_> = files.into();
+            let now = SystemTime::now();
+            let mut removed = 0;
             while files.len() > 0 && !stat_only {
-                if deleted >= space_needed {
+
+                let &ExpFile {ref path, size, modified, .. } = &files[0];
+                let age = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
+
+                if (to_delete == 0 || deleted >= to_delete) &&
+                    (self.keeptime == 0 || age <= self.keeptime) {
                     break;
                 }
+
                 // delete until we have enough space.
-                let ExpFile {path, size, .. } = files.pop_front().unwrap();
-                fs::remove_file(&path)
-                    .map_err(|e| ioerr!(e.kind(), "spool: expire failed: {:?}: {}", path, e))?;
+                if !dry_run {
+                    fs::remove_file(&path)
+                        .map_err(|e| ioerr!(e.kind(), "spool {}: expire failed: {:?}: {}", self.spool_no, path, e))?;
+                }
+                removed += size;
+                files.pop_front();
                 deleted += size;
+            }
+
+            if removed > 0 {
+                log::info!("expire: spool {}: {}: removed {}", self.spool_no, dirname, format::size(removed));
             }
 
             // if we removed all the files, remove the directory as well,
             // and then continue with the next directory.
             if files.is_empty() {
-                if !stat_only {
+                if !stat_only && !dry_run {
                     fs::remove_dir(&dirpath)
                         .map_err(|e| ioerr!(e.kind(), "spool: expire failed: {:?}: {}", dirpath, e))?;
                 }
@@ -629,9 +660,10 @@ impl DSpool {
             }
 
             self.update_oldest(dir_timestamp, &files);
+            break;
         }
 
-        Ok(())
+        Ok(deleted)
     }
 
     // Check the validity of all 'created' timestamps. They must all be OK,
@@ -724,6 +756,10 @@ impl SpoolBackend for DSpool {
 
     fn write(&self, headers: Buffer, body: Buffer) -> io::Result<ArtLoc> {
         self.do_write(headers, body)
+    }
+
+    fn expire(&self, dry_run: bool) -> io::Result<u64> {
+        self.do_expire(false, dry_run)
     }
 
     fn get_maxsize(&self) -> u64 {

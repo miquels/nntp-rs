@@ -129,6 +129,15 @@ impl UnixTime {
         }
     }
 
+    pub fn elapsed(&self) -> Duration {
+        let now = UnixTime::coarse();
+        if now.0 >= self.0 {
+            Duration::from_millis(now.0 - self.0)
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+
     pub fn seconds_elapsed(&self) -> u64 {
         let now = UnixTime::coarse();
         if now.0 >= self.0 {

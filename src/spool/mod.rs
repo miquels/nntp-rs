@@ -51,6 +51,9 @@ pub trait SpoolBackend: Send + Sync {
     /// Write an article to the spool.
     fn write(&self, headers: Buffer, body: Buffer) -> io::Result<ArtLoc>;
 
+    /// Run expire on the spool.
+    fn expire(&self, dry_run: bool) -> io::Result<u64>;
+
     /// Get the maximum size of this spool.
     fn get_maxsize(&self) -> u64;
 
@@ -566,6 +569,21 @@ impl Spool {
                 log::trace!("spool writer on thread {:?}", thread::current().id());
                 let spool = &inner.spool.get(&spoolno).unwrap().backend;
                 spool.write(headers, body)
+            })
+            .await
+    }
+
+    /// Run `expire` on a spool.
+    ///
+    /// This is done automatically by the spool itself when it is needed.
+    /// This function is used for tooling and debugging.
+    pub async fn expire(&self, spoolno: u8, dry_run: bool) -> io::Result<u64> {
+        let inner = self.inner.clone();
+        self.pool
+            .spawn_fn(move || {
+                let spool = inner.spool.get(&spoolno)
+                    .ok_or_else(|| ioerr!(NotFound, "spoolno {}: not found", spoolno))?;
+                spool.backend.expire(dry_run)
             })
             .await
     }
