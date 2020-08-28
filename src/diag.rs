@@ -106,7 +106,16 @@ impl SessionStats {
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
         let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
         let host = match dns::RESOLVER.reverse_lookup(ipaddr).await {
-            Ok(m) => m.iter().next().map(|name| name.to_utf8()),
+            Ok(m) => {
+                let mut h = m.iter().next().map(|name| name.to_utf8());
+                if let Some(ref mut h) = h {
+                    // reverse lookup might return hostname terminated with a '.'.
+                    if h.ends_with(".") {
+                        h.truncate(h.len() - 1);
+                    }
+                }
+                h
+            },
             Err(_) => None,
         };
         self.hostname = host.unwrap_or(ipaddr_str);

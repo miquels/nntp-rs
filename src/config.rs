@@ -70,8 +70,11 @@ impl Default for Runtime {
 pub struct Server {
     #[serde(default = "util::hostname")]
     pub hostname:       String,
+    #[serde(default)]
     pub xrefhost:       String,
+    #[serde(default)]
     pub pathhost:       String,
+    #[serde(default)]
     pub commonpath:     String,
     pub listen:         Option<Vec<String>>,
     pub runtime:        Runtime,
