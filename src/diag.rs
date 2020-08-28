@@ -163,14 +163,26 @@ impl SessionStats {
         }
 
         let elapsed = self.instant.elapsed().as_millis();
-        let dt = std::cmp::max(1, elapsed) as f64 / 1000f64;
+        let dt = std::cmp::max(1000, elapsed) as f64 / 1000f64;
         let mut rate = nuse as f64 / dt;
-        if rate >= 10.0 {
-            rate = rate.round();
-        }
+        let mut unit = "sec";
 
-        log::info!("{} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/sec)",
-            self.hostname,
+        if rate < 0.1 && rate >= 0.0001 {
+            rate *= 60.0;
+            unit = "min";
+        }
+        let srate = if rate < 0.01 {
+            format!("{:.4}", rate)
+        } else if rate < 0.1 {
+            format!("{:.2}", rate)
+        } else if rate < 10.0 {
+            format!("{:.1}", rate)
+        } else {
+            format!("{}", rate.round() as u64)
+        };
+
+        log::info!("Stats {} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/{})",
+            self.fdno,
             (elapsed as f64) / 1000f64,
             self.stats[Stats::Ihave as usize],
             self.stats[Stats::Check as usize],
@@ -190,13 +202,14 @@ impl SessionStats {
             self.stats[Stats::ReceivedBytes as usize],
             self.stats[Stats::AcceptedBytes as usize],
             self.stats[Stats::RejectedBytes as usize],
-            rate,
+            srate,
+            unit,
         );
     }
 
     pub fn log_rejstats(&self) {
-        log::info!("{} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
-            self.hostname,
+        log::info!("Stats {} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
+            self.fdno,
             self.stats[Stats::Rejected as usize],
             self.stats[Stats::RejFailsafe as usize],
             self.stats[Stats::RejMissHdrs as usize],
@@ -333,19 +346,19 @@ impl TxSessionStats {
         self.id = id;
         self.start = Instant::now();
         self.mark = Instant::now();
-        log::info!("{}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
+        log::info!("Feed {}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
     }
 
     pub fn stats_update(&mut self) {
         log::info!(
-            "{}:{} mark {}",
+            "Feed {}:{} mark {}",
             self.label,
             self.id,
             self.log_stats(self.mark, &self.stats)
         );
         if self.stats[TxStats::Deferred as usize] > 0 || self.stats[TxStats::DeferredFail as usize] > 0 {
             log::info!(
-                "{}:{} mark {}",
+                "Feed {}:{} mark {}",
                 self.label,
                 self.id,
                 self.log_stats(self.mark, &self.stats)
@@ -357,14 +370,14 @@ impl TxSessionStats {
     pub fn stats_final(&mut self) {
         self.update_total();
         log::info!(
-            "{}:{} final {}",
+            "Feed {}:{} final {}",
             self.label,
             self.id,
             self.log_stats(self.start, &self.total)
         );
         if self.total[TxStats::Deferred as usize] > 0 || self.total[TxStats::DeferredFail as usize] > 0 {
             log::info!(
-                "{}:{} final {}",
+                "Feed {}:{} final {}",
                 self.label,
                 self.id,
                 self.log_defer(self.start, &self.total)
