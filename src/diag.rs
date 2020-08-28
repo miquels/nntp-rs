@@ -111,7 +111,7 @@ impl SessionStats {
                 if let Some(ref mut h) = h {
                     // reverse lookup might return hostname terminated with a '.'.
                     if h.ends_with(".") {
-                        h.truncate(h.len() - 1);
+                        h.pop();
                     }
                 }
                 h
