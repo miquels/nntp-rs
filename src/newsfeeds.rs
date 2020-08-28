@@ -281,9 +281,9 @@ impl NewsPeer {
     }
 }
 
-use std::sync::Arc;
 use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
+use std::sync::Arc;
 
 static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::new())));
 
@@ -294,4 +294,3 @@ pub(crate) fn get_default_newspeer() -> NewsPeer {
 pub(crate) fn set_default_newspeer(peer: NewsPeer) {
     GLOBAL.store(Arc::new(peer));
 }
-

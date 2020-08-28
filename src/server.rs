@@ -92,8 +92,17 @@ impl Server {
     }
 
     /// Run the server on a bunch of current_thread executors.
-    fn run_multisingle(self, mcfg: &MultiSingle, mut listener_sets: TcpListenerSets, bus_recv: bus::Receiver) {
-        let core_ids = mcfg.core_ids.as_ref().map(|c| c.iter().cloned().collect::<VecDeque<_>>());
+    fn run_multisingle(
+        self,
+        mcfg: &MultiSingle,
+        mut listener_sets: TcpListenerSets,
+        bus_recv: bus::Receiver,
+    )
+    {
+        let core_ids = mcfg
+            .core_ids
+            .as_ref()
+            .map(|c| c.iter().cloned().collect::<VecDeque<_>>());
         let mut core_ids = core_ids.unwrap_or(VecDeque::new());
 
         let mut n = 0;
@@ -106,7 +115,11 @@ impl Server {
             thread::spawn(move || {
                 if let Some(id) = core_id {
                     // tie this thread to a specific core.
-                    log::info!("runtime: binding tokio basic runtime #{} to core id {:?}", n, core_id);
+                    log::info!(
+                        "runtime: binding tokio basic runtime #{} to core id {:?}",
+                        n,
+                        core_id
+                    );
                     core_affinity::set_for_current(id);
                 }
 

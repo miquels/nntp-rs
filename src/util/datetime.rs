@@ -197,7 +197,6 @@ impl<Tz: TimeZone> DateTime<Tz> {
     }
 }
 
-
 static DT_RE: Lazy<Regex> = Lazy::new(|| {
     let re = [
         r"^\s*",

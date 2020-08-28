@@ -169,11 +169,11 @@ pub struct SpoolCfg {
 
 // used internally, and by dspool.ctl.
 #[doc(hidden)]
-#[derive(Clone,Default,Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct GroupMap(pub Vec<GroupMapEntry>);
 
 #[doc(hidden)]
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct GroupMapEntry {
     pub groups:     String,
     pub spoolgroup: String,
@@ -187,7 +187,7 @@ struct InnerGroupMap {
 }
 
 #[doc(hidden)]
-#[derive(Clone,Deserialize,Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub enum AllocStrat {
     #[serde(rename = "weighted")]
     Weighted,
@@ -311,7 +311,6 @@ impl Spool {
         // parse spool definitions.
         let mut spools = HashMap::new();
         for (n, cfg) in &spoolcfg.spool {
-
             let n = *n;
             if n >= 100 {
                 return Err(io::Error::new(
@@ -581,7 +580,9 @@ impl Spool {
         let inner = self.inner.clone();
         self.pool
             .spawn_fn(move || {
-                let spool = inner.spool.get(&spoolno)
+                let spool = inner
+                    .spool
+                    .get(&spoolno)
                     .ok_or_else(|| ioerr!(NotFound, "spoolno {}: not found", spoolno))?;
                 spool.backend.expire(dry_run)
             })

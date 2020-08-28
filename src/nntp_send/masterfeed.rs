@@ -15,7 +15,7 @@ use crate::config;
 use crate::newsfeeds::NewsFeeds;
 use crate::spool::Spool;
 
-use super::{FeedArticle, PeerFeedItem, Peer, PeerArticle, PeerFeed};
+use super::{FeedArticle, Peer, PeerArticle, PeerFeed, PeerFeedItem};
 
 /// The MasterFeed.
 pub struct MasterFeed {
@@ -154,11 +154,11 @@ impl MasterFeed {
         for peername in &art.peers {
             if let Some(peerfeed) = self.peerfeeds.get_mut(peername) {
                 let peer_art = PeerArticle {
-                    msgid:    art.msgid.clone(),
-                    location: art.location.clone(),
-                    size:     art.size,
+                    msgid:        art.msgid.clone(),
+                    location:     art.location.clone(),
+                    size:         art.size,
                     from_backlog: false,
-                    deferred: 0,
+                    deferred:     0,
                 };
                 if let Err(e) = peerfeed.send(PeerFeedItem::Article(peer_art)).await {
                     log::error!(
@@ -203,4 +203,3 @@ impl MasterFeed {
         self.orphans = orphans;
     }
 }
-

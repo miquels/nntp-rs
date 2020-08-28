@@ -124,7 +124,6 @@ impl DArtHead {
     }
 }
 
-
 // article location, this struct is serialized/deserialized
 // in the entry for this article in the history file.
 #[derive(Debug)]
@@ -180,10 +179,10 @@ fn article_readahead(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
 
 // Internal helper struct for expire.
 struct ExpFile {
-    path:   PathBuf,
-    size:   u64,
-    modified:   SystemTime,
-    created:    Option<SystemTime>,
+    path:     PathBuf,
+    size:     u64,
+    modified: SystemTime,
+    created:  Option<SystemTime>,
 }
 
 /// This is the main backend implementation.
@@ -231,8 +230,12 @@ impl DSpool {
         // Find the oldest article.
         ds.do_expire(true, false)?;
         if let Ok(Some(t)) = ds.get_oldest() {
-            log::info!("spool {} ({}): age of oldest article: {}",
-                ds.spool_no, ds.rel_path, util::format::duration(&t.elapsed()));
+            log::info!(
+                "spool {} ({}): age of oldest article: {}",
+                ds.spool_no,
+                ds.rel_path,
+                util::format::duration(&t.elapsed())
+            );
         } else {
             log::info!("spool {} ({}): no articles", ds.spool_no, ds.rel_path);
         }
@@ -555,7 +558,6 @@ impl DSpool {
     // If `dry_run` is true, go through the motions, but don't actually remove articles.
     //
     fn do_expire(&self, stat_only: bool, dry_run: bool) -> io::Result<u64> {
-
         // get filesystem stats.
         let sv = fs2::statvfs(&self.path)
             .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?;
@@ -608,12 +610,13 @@ impl DSpool {
                     let meta = file.metadata().ok()?;
                     let modified = meta.modified().ok()?;
                     Some(ExpFile {
-                        path:   file.path(),
-                        size:   meta.blocks() * 512u64,
+                        path: file.path(),
+                        size: meta.blocks() * 512u64,
                         modified,
                         created: meta.created().ok(),
                     })
-                }).collect();
+                })
+                .collect();
             files.sort_unstable_by(|a, b| a.modified.cmp(&b.modified));
 
             // Maybe initialize 'self.oldest' timestamp.
@@ -626,19 +629,29 @@ impl DSpool {
             let now = SystemTime::now();
             let mut removed = 0;
             while files.len() > 0 && !stat_only {
-
-                let &ExpFile {ref path, size, modified, .. } = &files[0];
+                let &ExpFile {
+                    ref path,
+                    size,
+                    modified,
+                    ..
+                } = &files[0];
                 let age = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
 
-                if (to_delete == 0 || deleted >= to_delete) &&
-                    (self.keeptime == 0 || age <= self.keeptime) {
+                if (to_delete == 0 || deleted >= to_delete) && (self.keeptime == 0 || age <= self.keeptime) {
                     break;
                 }
 
                 // delete until we have enough space.
                 if !dry_run {
-                    fs::remove_file(&path)
-                        .map_err(|e| ioerr!(e.kind(), "spool {}: expire failed: {:?}: {}", self.spool_no, path, e))?;
+                    fs::remove_file(&path).map_err(|e| {
+                        ioerr!(
+                            e.kind(),
+                            "spool {}: expire failed: {:?}: {}",
+                            self.spool_no,
+                            path,
+                            e
+                        )
+                    })?;
                 }
                 removed += size;
                 files.pop_front();
@@ -646,7 +659,12 @@ impl DSpool {
             }
 
             if removed > 0 {
-                log::info!("expire: spool {}: {}: removed {}", self.spool_no, dirname, format::size(removed));
+                log::info!(
+                    "expire: spool {}: {}: removed {}",
+                    self.spool_no,
+                    dirname,
+                    format::size(removed)
+                );
             }
 
             // if we removed all the files, remove the directory as well,

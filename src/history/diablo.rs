@@ -88,13 +88,7 @@ impl DHistHead {
 impl DHistory {
     /// open existing history database
     /// Note: blocking.
-    pub fn open(
-        path: &Path,
-        rw: bool,
-        threads: Option<usize>,
-        bt: BlockingType,
-    ) -> io::Result<DHistory>
-    {
+    pub fn open(path: &Path, rw: bool, threads: Option<usize>, bt: BlockingType) -> io::Result<DHistory> {
         let inner = DHistoryInner::open(path, rw)?;
         Ok(DHistory {
             inner:         ArcSwap::from(Arc::new(inner)),

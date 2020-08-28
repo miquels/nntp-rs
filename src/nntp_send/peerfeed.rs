@@ -20,8 +20,8 @@ use crate::config;
 use crate::server;
 use crate::spool::Spool;
 
-use super:: queue::Queue;
-use super::{Peer, PeerArticle, PeerFeedItem, Connection};
+use super::queue::Queue;
+use super::{Connection, Peer, PeerArticle, PeerFeedItem};
 
 // Size of the command channel for the peerfeed.
 // The Masterfeed sends articles and notification messages down.
@@ -295,17 +295,7 @@ impl PeerFeed {
 
         // We spawn a new Connection task.
         task::spawn(async move {
-            match Connection::new(
-                id,
-                newspeer,
-                tx_chan.clone(),
-                rx_queue,
-                broadcast,
-                spool,
-                queue,
-            )
-            .await
-            {
+            match Connection::new(id, newspeer, tx_chan.clone(), rx_queue, broadcast, spool, queue).await {
                 Ok(conn) => {
                     // On succes, we start talking nntp.
                     drop(tx_chan);
@@ -320,4 +310,3 @@ impl PeerFeed {
         });
     }
 }
-

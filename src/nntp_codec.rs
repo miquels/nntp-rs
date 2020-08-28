@@ -595,7 +595,7 @@ where
     S: Unpin,
 {
     fn poll_write(&mut self, cx: &mut Context, buf: &mut impl Buf) -> Poll<io::Result<()>> {
-        let mut wrote_something= false;
+        let mut wrote_something = false;
 
         while buf.remaining() > 0 {
             //
@@ -689,7 +689,6 @@ where
             }
         }
     }
-
 
     /// Write a buffer that can be turned into a `Buffer` struct.
     pub async fn write(&mut self, buf: impl Into<Buffer>) -> io::Result<()> {

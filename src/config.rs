@@ -19,7 +19,7 @@ use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by
 
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
-use crate::spool::{SpoolCfg, SpoolDef, MetaSpool};
+use crate::spool::{MetaSpool, SpoolCfg, SpoolDef};
 use crate::util;
 use crate::util::BlockingType;
 
@@ -172,8 +172,7 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
 
     // Check the [multisingle] config
     if let Runtime::MultiSingle(ref mut multisingle) = cfg.server.runtime {
-        check_multisingle(multisingle)
-            .map_err(|e| ioerr!(InvalidData, format!("multisingle: {}", e)))?;
+        check_multisingle(multisingle).map_err(|e| ioerr!(InvalidData, format!("multisingle: {}", e)))?;
     }
 
     if load_newsfeeds {

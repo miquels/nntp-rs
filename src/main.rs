@@ -117,7 +117,7 @@ pub struct SpoolExpireOpts {
     pub spool: u8,
     #[structopt(short, long)]
     /// Default is dry_run, use this to actually expire.
-    pub doit: bool,
+    pub doit:  bool,
 }
 
 #[derive(StructOpt, Debug)]
@@ -130,10 +130,10 @@ pub struct TestArticleOpts {
     pub subject:  Option<String>,
     #[structopt(short, long)]
     /// Number of articles to send (default: 1)
-    pub num_arts:  Option<u32>,
+    pub num_arts: Option<u32>,
     #[structopt(long)]
     /// Size of articles to send.
-    pub size:  Option<u32>,
+    pub size:     Option<u32>,
     #[structopt(short, long)]
     /// Delay between articles (ms)
     pub delay:    Option<f64>,
@@ -195,7 +195,11 @@ fn main() -> Result<()> {
     });
     let num_sets = match config.server.runtime {
         config::Runtime::MultiSingle(ref multisingle) => {
-            multisingle.core_ids.as_ref().map(|c| c.len()).unwrap_or(num_cpus::get())
+            multisingle
+                .core_ids
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(num_cpus::get())
         },
         config::Runtime::Threaded(_) => 1,
     };
@@ -442,7 +446,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
 
     let num_arts = opts.num_arts.unwrap_or(1);
 
-    for _ in 0 .. num_arts {
+    for _ in 0..num_arts {
         let msgid = nntp_client::message_id(None);
         let hostname = msgid.split("@").nth(1).unwrap();
 

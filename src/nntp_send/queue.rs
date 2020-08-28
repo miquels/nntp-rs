@@ -37,9 +37,9 @@ impl QItems {
         loop {
             match self.items[self.pos..].find('\n') {
                 Some(len) => {
-                    let s = &self.items[self.pos..self.pos+len];
+                    let s = &self.items[self.pos..self.pos + len];
                     self.pos += len + 1;
-                    if  s == "" {
+                    if s == "" {
                         continue;
                     }
                     return Some(s);
@@ -52,7 +52,7 @@ impl QItems {
                     } else {
                         return None;
                     }
-                }
+                },
             }
         }
     }
@@ -100,7 +100,6 @@ impl QWriter {
     // if all S.* queue files are gone but we still want to
     // rotate the current queue file to process it right now.
     async fn rotate(&mut self, low_seq: u64, not_next: bool) -> io::Result<Option<QFile>> {
-
         // Skip if we're empty.
         if self.is_empty {
             if !not_next {
@@ -529,7 +528,6 @@ impl Queue {
         // Check if the file is open and has content, or if not, see
         // if we can open the next queue file.
         if !qreader.open_qfile().await {
-
             // Now if we have no S.* queue files, but the currently being
             // written queue file has content, rotate it.
             let mut try_again = false;
@@ -563,7 +561,11 @@ impl Queue {
                         // Recovery strategy: close current file, return None.
                         log::warn!(
                             "QReader::read_items: {}: unexpectedly hit EOF. Bug.",
-                            qreader.cur_name.as_ref().map(|x| x.as_str()).unwrap_or("[unknown]"),
+                            qreader
+                                .cur_name
+                                .as_ref()
+                                .map(|x| x.as_str())
+                                .unwrap_or("[unknown]"),
                         );
                         qreader.cur_eof = true;
                         qreader.cur_file.replace(cur_file);
@@ -612,7 +614,6 @@ impl Queue {
             done: false,
         })
     }
-
 
     /// Acknowledge that the items were processed and that we're done.
     pub(super) async fn ack_items(&self, items: QItems) {

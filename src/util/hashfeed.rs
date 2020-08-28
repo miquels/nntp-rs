@@ -194,11 +194,8 @@ use serde::{de, Deserialize, Deserializer};
 
 impl<'de> Deserialize<'de> for HashFeed {
     fn deserialize<D>(deserializer: D) -> Result<HashFeed, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         let v = Vec::<String>::deserialize(deserializer)?;
         HashFeed::new(&v.join(",")).map_err(de::Error::custom)
     }
 }
-

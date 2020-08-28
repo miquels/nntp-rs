@@ -140,7 +140,7 @@ impl SessionStats {
 
         // reset stats.
         self.instant = Instant::now();
-        for i in 0 .. Stats::NumSlots as usize {
+        for i in 0..Stats::NumSlots as usize {
             self.stats[i] = 0;
         }
     }

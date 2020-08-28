@@ -1,19 +1,19 @@
 //! nntp_send - send articles to peers.
 //!
-use std::net::IpAddr;
 use smartstring::alias::String as SmartString;
+use std::net::IpAddr;
 
 use crate::newsfeeds::NewsPeer;
 use crate::spool::ArtLoc;
 
-mod queue;
+mod connection;
 mod masterfeed;
 mod peerfeed;
-mod connection;
+mod queue;
 
-use queue::{Queue, QItems};
-use peerfeed::PeerFeed;
 use connection::Connection;
+use peerfeed::PeerFeed;
+use queue::{QItems, Queue};
 
 pub use masterfeed::MasterFeed;
 
@@ -45,15 +45,15 @@ enum PeerFeedItem {
 #[derive(Clone, Debug)]
 struct PeerArticle {
     // Message-Id.
-    pub msgid:    String,
+    pub msgid:        String,
     // Location in the article spool.
-    pub location: ArtLoc,
+    pub location:     ArtLoc,
     // Size
-    pub size:     usize,
+    pub size:         usize,
     // Did it come from the backlog
     pub from_backlog: bool,
     // How many times was this articles deferred.
-    pub deferred: u32,
+    pub deferred:     u32,
 }
 
 // A shorter version of newsfeeds::NewsPeer.
@@ -89,4 +89,3 @@ impl Peer {
         }
     }
 }
-

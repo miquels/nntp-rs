@@ -316,9 +316,7 @@ impl<'a> MatchList<'a> {
 // it can be used in structs that implement Deserialize.
 impl<'de> Deserialize<'de> for WildMatList {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         struct WildMatVisitor {
             parser: Parser,
         }
@@ -331,9 +329,7 @@ impl<'de> Deserialize<'de> for WildMatList {
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: SeqAccess<'de>,
-            {
+            where A: SeqAccess<'de> {
                 let mut patterns = Vec::new();
                 let mut initial = MatchResult::NoMatch;
 
@@ -345,7 +341,7 @@ impl<'de> Deserialize<'de> for WildMatList {
                         "groupref" => value.insert_str(0, "="),
                         // filter / nofilter
                         "nofilter" => value.insert_str(0, "!"),
-                        _ => {}
+                        _ => {},
                     }
                     if patterns.len() == 0 && value.starts_with("!") {
                         initial = MatchResult::Match;
@@ -353,11 +349,11 @@ impl<'de> Deserialize<'de> for WildMatList {
                     patterns.push(value.parse().unwrap());
                 }
 
-                Ok(WildMatList{
-                    name:     "".to_string(),
+                Ok(WildMatList {
+                    name: "".to_string(),
                     initial,
                     patterns,
-                    id:       new_id(),
+                    id: new_id(),
                 })
             }
         }

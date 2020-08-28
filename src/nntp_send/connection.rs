@@ -1,5 +1,5 @@
 //! An active connection to a peer. Plucks articles from the in-memory
-//! queue in the PeerFeed, and if there are no articles left, articles 
+//! queue in the PeerFeed, and if there are no articles left, articles
 //! from the disk-queue.
 //!
 //! If a Connection gets closed while it is still processing articles,
@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use futures::sink::{Sink, SinkExt};
 use tokio::prelude::*;
+use tokio::stream::Stream;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{Instant, delay_for};
-use tokio::stream::Stream;
+use tokio::time::{delay_for, Instant};
 
 use crate::article::{HeaderName, HeadersParser};
 use crate::diag::TxSessionStats;
@@ -30,7 +30,7 @@ use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::spool::{ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
-use super::{Peer, PeerArticle, PeerFeedItem, Queue, QItems};
+use super::{Peer, PeerArticle, PeerFeedItem, QItems, Queue};
 
 // How long to wait to re-offer a deferred article, initially.
 const DEFER_DELAY_INITIAL: u64 = 10u64;
@@ -194,7 +194,6 @@ impl Connection {
                     }
                 }
             }
-
         }
     }
 
@@ -241,11 +240,7 @@ impl Connection {
     }
 
     // Connect to remote peer.
-    async fn connect(
-        newspeer: Arc<Peer>,
-        id: u64,
-    ) -> io::Result<(NntpCodec, IpAddr, String)>
-    {
+    async fn connect(newspeer: Arc<Peer>, id: u64) -> io::Result<(NntpCodec, IpAddr, String)> {
         let (cmd, code) = if newspeer.headfeed {
             ("MODE HEADFEED", 250)
         } else {
@@ -312,7 +307,11 @@ impl Connection {
 
             if processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
-                    log::trace!("Connection::feed: {}:{}: backlog run done", self.newspeer.label, self.id);
+                    log::trace!(
+                        "Connection::feed: {}:{}: backlog run done",
+                        self.newspeer.label,
+                        self.id
+                    );
                     if let Some(qitems) = self.qitems.take() {
                         self.queue.ack_items(qitems).await;
                     }
@@ -491,7 +490,6 @@ impl Connection {
 
     // The remote server sent a response. Process it.
     async fn handle_response(&mut self, resp: NntpResponse) -> io::Result<bool> {
-
         // Remote side can close the connection at any time, if they are
         // nice they send a 400 code so we know it's on purpose.
         if resp.code == 400 {
@@ -656,8 +654,8 @@ impl Connection {
 }
 
 struct DeferredArticle {
-    art:    ConnItem,
-    when:   Instant,
+    art:  ConnItem,
+    when: Instant,
 }
 
 // Our own version of DeferredQueue.
@@ -665,8 +663,8 @@ struct DeferredArticle {
 // queue in one go, which we need when the connection is dropped.
 #[derive(Default)]
 struct DeferredQueue {
-    queue:  VecDeque<DeferredArticle>,
-    tick:   Option<tokio::time::Delay>,
+    queue: VecDeque<DeferredArticle>,
+    tick:  Option<tokio::time::Delay>,
 }
 
 impl DeferredQueue {
@@ -685,7 +683,11 @@ impl DeferredQueue {
             return Err(art);
         }
 
-        let delay = if art.deferred() == 1 { DEFER_DELAY_INITIAL } else { DEFER_DELAY_NEXT };
+        let delay = if art.deferred() == 1 {
+            DEFER_DELAY_INITIAL
+        } else {
+            DEFER_DELAY_NEXT
+        };
         let when = Instant::now() + Duration::new(delay, 0);
         if self.queue.is_empty() {
             if let Some(ref mut tick) = self.tick {
@@ -694,7 +696,7 @@ impl DeferredQueue {
                 self.tick = Some(tokio::time::delay_until(when));
             }
         }
-        self.queue.push_back(DeferredArticle{ art, when });
+        self.queue.push_back(DeferredArticle { art, when });
         if self.queue.len() > DEFER_MAX_QUEUE {
             Err(self.queue.pop_front().unwrap().art)
         } else {
@@ -703,7 +705,7 @@ impl DeferredQueue {
     }
 
     // Turn this queue into an iterator of PeerArticles, in order to drain it.
-    fn iter(&self) -> impl Iterator<Item=&ConnItem> {
+    fn iter(&self) -> impl Iterator<Item = &ConnItem> {
         self.queue.iter().map(|q| &q.art)
     }
 }

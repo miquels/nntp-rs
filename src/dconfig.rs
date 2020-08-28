@@ -16,10 +16,10 @@ use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 
-use serde::{Deserialize, de::Deserializer, de::MapAccess, de::SeqAccess, de::Visitor};
+use serde::{de::Deserializer, de::MapAccess, de::SeqAccess, de::Visitor, Deserialize};
 
 use crate::newsfeeds::*;
-use crate::spool::{SpoolCfg, SpoolDef, MetaSpool, GroupMap, GroupMapEntry};
+use crate::spool::{GroupMap, GroupMapEntry, MetaSpool, SpoolCfg, SpoolDef};
 use crate::util::WildMatList;
 
 // A type where a "dnewsfeeds" file can deserialize into.
@@ -27,8 +27,8 @@ use crate::util::WildMatList;
 #[serde(default)]
 struct DNewsFeeds {
     #[serde(rename = "label")]
-    pub labels:     Labels,
-    pub groupdef:   Vec<GroupDef>,
+    pub labels:   Labels,
+    pub groupdef: Vec<GroupDef>,
 }
 
 // Convert the DnewsFeeds we just read into a NewsFeeds.
@@ -37,7 +37,7 @@ impl From<DNewsFeeds> for NewsFeeds {
         let mut nf = NewsFeeds::new();
         nf.infilter = dnf.labels.ifilter;
         nf.peers = dnf.labels.peers;
-        for idx in 0 .. nf.peers.len() {
+        for idx in 0..nf.peers.len() {
             nf.peer_map.insert(nf.peers[idx].label.as_str().into(), idx);
 
             let peer = &mut nf.peers[idx];
@@ -80,18 +80,16 @@ struct GroupDef {
 // labels like IFILTER/GLOBAL/ISPAM/ESPAM differently.
 #[derive(Default, Debug)]
 struct Labels {
-    global:     Option<NewsPeer>,
-    ifilter:    Option<NewsPeer>,
-    ispam:      Option<NewsPeer>,
-    espam:      Option<NewsPeer>,
-    peers:      Vec<NewsPeer>,
+    global:  Option<NewsPeer>,
+    ifilter: Option<NewsPeer>,
+    ispam:   Option<NewsPeer>,
+    espam:   Option<NewsPeer>,
+    peers:   Vec<NewsPeer>,
 }
 
 impl<'de> Deserialize<'de> for Labels {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         struct LabelsVisitor;
 
         impl<'de> Visitor<'de> for LabelsVisitor {
@@ -102,9 +100,7 @@ impl<'de> Deserialize<'de> for Labels {
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
+            where A: MapAccess<'de> {
                 let mut this = Labels::default();
 
                 while let Some(label) = map.next_key::<String>()? {
@@ -140,14 +136,12 @@ impl<'de> Deserialize<'de> for Labels {
 
 /// Read a NewsFeeds from a "dnewsfeeds" file.
 pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
-
     // First, do a compat check.
     check_dnewsfeeds(name)?;
 
     // Now build the config reader configuration.
     let dnf: DNewsFeeds = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
-
         .alias::<NewsPeer>("nofilter", "filter")
         .alias::<NewsPeer>("addgroup", "groups")
         .alias::<NewsPeer>("delgroup", "groups")
@@ -158,12 +152,10 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .alias::<NewsPeer>("deldist", "distributions")
         .alias::<NewsPeer>("hostname", "outhost")
         .alias::<NewsPeer>("headfeed", "send-headfeed")
-
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")
         .alias::<GroupDef>("groupref", "groups")
-
         .ignore::<NewsPeer>("transmitbuf")
         .ignore::<NewsPeer>("receivebuf")
         .ignore::<NewsPeer>("realtime")
@@ -194,7 +186,6 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .ignore::<NewsPeer>("genlines")
         .ignore::<NewsPeer>("setqos")
         .ignore::<NewsPeer>("settos")
-
         .from_file(name)?;
 
     // And build a 'NewsFeeds' struct.
@@ -212,16 +203,13 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
     // Then actually read the config.
     let mut cfg: SpoolCfg = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
-
         .alias::<SpoolCfg>("expire", "groupmap")
         .alias::<SpoolCfg>("metaspool", "spoolgroup")
         .alias::<MetaSpool>("addgroup", "groups")
         .alias::<MetaSpool>("label", "peer")
-
         .ignore::<SpoolDef>("expiremethod")
         .ignore::<SpoolDef>("minfreefiles")
         .ignore::<SpoolDef>("compresslvl")
-
         .from_file(name)?;
 
     for (_, sp) in cfg.spool.iter_mut() {
@@ -241,9 +229,7 @@ pub fn read_dspool_ctl(name: &str, spool_cfg: &mut SpoolCfg) -> io::Result<()> {
 // so that the "expire" line works in dspool.ctl.
 impl<'de> Deserialize<'de> for GroupMap {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         struct GroupMapVisitor;
 
         impl<'de> Visitor<'de> for GroupMapVisitor {
@@ -254,13 +240,11 @@ impl<'de> Deserialize<'de> for GroupMap {
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
+            where A: MapAccess<'de> {
                 let mut v = Vec::new();
                 while let Some(groups) = map.next_key::<String>()? {
-                     let spoolgroup = map.next_value()?;
-                    v.push(GroupMapEntry{groups, spoolgroup});
+                    let spoolgroup = map.next_value()?;
+                    v.push(GroupMapEntry { groups, spoolgroup });
                 }
                 Ok(GroupMap(v))
             }
@@ -272,9 +256,7 @@ impl<'de> Deserialize<'de> for GroupMap {
 
 // deserializer for `distributions: Vec<String>` so that 'addist' and 'deldist' work.
 pub(crate) fn deserialize_distributions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
+where D: Deserializer<'de> {
     use curlyconf::ParserAccess;
 
     struct DistVisitor {
@@ -289,16 +271,14 @@ where
         }
 
         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
+        where A: SeqAccess<'de> {
             let mut dists = Vec::new();
 
             while let Some(mut value) = seq.next_element::<String>()? {
                 match self.parser.value_name().as_str() {
                     // addist / deldist
                     "deldist" => value.insert_str(0, "!"),
-                    _ => {}
+                    _ => {},
                 }
                 dists.push(value);
             }
@@ -378,7 +358,7 @@ fn check_dnewsfeeds(name: &str) -> io::Result<()> {
 
     let mut line_no = 0;
     let mut info = String::new();
-    let mut state= DNState::Init;
+    let mut state = DNState::Init;
 
     let mut groupdefs: HashSet<String> = HashSet::new();
     let mut peers: HashSet<String> = HashSet::new();
@@ -400,7 +380,12 @@ fn check_dnewsfeeds(name: &str) -> io::Result<()> {
                 match words[0] {
                     "label" => {
                         if words.len() != 2 {
-                            Err(ioerr!(InvalidData, "{}: {}: expected one argument", info, words[0]))?;
+                            Err(ioerr!(
+                                InvalidData,
+                                "{}: {}: expected one argument",
+                                info,
+                                words[0]
+                            ))?;
                         }
                         if peers.contains(words[0]) {
                             Err(ioerr!(InvalidData, "{}: {}: duplicate label", info, words[1]))?;
@@ -416,7 +401,12 @@ fn check_dnewsfeeds(name: &str) -> io::Result<()> {
                     },
                     "groupdef" => {
                         if words.len() != 2 {
-                            Err(ioerr!(InvalidData, "{}: {}: expected one argument", info, words[0]))?;
+                            Err(ioerr!(
+                                InvalidData,
+                                "{}: {}: expected one argument",
+                                info,
+                                words[0]
+                            ))?;
                         }
                         if groupdefs.contains(words[0]) {
                             Err(ioerr!(InvalidData, "{}: {}: duplicate groupdef", info, words[1]))?;
@@ -456,7 +446,14 @@ fn check_dnewsfeeds(name: &str) -> io::Result<()> {
     match state {
         DNState::Init => {},
         DNState::Label => Err(ioerr!(InvalidData, "{}: unexpected EOF in label {}", info, label))?,
-        DNState::GroupDef => Err(ioerr!(InvalidData, "{}: unexpected EOF in groupdef {}", info, label))?,
+        DNState::GroupDef => {
+            Err(ioerr!(
+                InvalidData,
+                "{}: unexpected EOF in groupdef {}",
+                info,
+                label
+            ))?
+        },
     }
 
     Ok(())
@@ -513,10 +510,7 @@ fn check_newspeer_item(words: &[&str]) -> io::Result<()> {
 // Check one item of a Groupdef.
 fn check_groupdef_item(words: &[&str]) -> io::Result<()> {
     match words[0] {
-        "addgroup"|
-        "delgroup"|
-        "delgroupany"|
-        "groupref" => {},
+        "addgroup" | "delgroup" | "delgroupany" | "groupref" => {},
         _ => Err(ioerr!(InvalidData, "{}: unrecognized keyword", words[0]))?,
     }
     Ok(())
@@ -558,24 +552,39 @@ fn check_dspool_ctl(name: &str) -> io::Result<()> {
                 match words[0] {
                     "spool" => {
                         if words.len() != 2 {
-                            Err(ioerr!(InvalidData,"{}: {}: expected one argument", info, words[0]))?;
+                            Err(ioerr!(
+                                InvalidData,
+                                "{}: {}: expected one argument",
+                                info,
+                                words[0]
+                            ))?;
                         }
                         spool_no = match words[1].parse() {
                             Ok(n) => n,
-                            Err(e) => return Err(ioerr!(InvalidData,"{}: {}", info, e)),
+                            Err(e) => return Err(ioerr!(InvalidData, "{}: {}", info, e)),
                         };
                         state = DCState::Spool;
                     },
                     "metaspool" => {
                         if words.len() != 2 {
-                            Err(ioerr!(InvalidData,"{}: {}: expected one argument", info, words[0]))?;
+                            Err(ioerr!(
+                                InvalidData,
+                                "{}: {}: expected one argument",
+                                info,
+                                words[0]
+                            ))?;
                         }
                         metaspool = words[1].to_string();
                         state = DCState::MetaSpool;
                     },
                     "expire" => {
                         if words.len() != 3 {
-                            Err(ioerr!(InvalidData,"{}: {}: expected two arguments", info, words[0]))?;
+                            Err(ioerr!(
+                                InvalidData,
+                                "{}: {}: expected two arguments",
+                                info,
+                                words[0]
+                            ))?;
                         }
                     },
                     _ => {
@@ -592,14 +601,14 @@ fn check_dspool_ctl(name: &str) -> io::Result<()> {
                 if words[0] == "end" {
                     state = DCState::Init;
                 } else {
-                    check_spooldef_item(&words).map_err(|e| ioerr!(InvalidData,"{}: {}", info, e))?;
+                    check_spooldef_item(&words).map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
                 }
             },
             DCState::MetaSpool => {
                 if words[0] == "end" {
                     state = DCState::Init;
                 } else {
-                    check_metaspool_item(&words).map_err(|e| ioerr!(InvalidData,"{}: {}", info, e))?;
+                    check_metaspool_item(&words).map_err(|e| ioerr!(InvalidData, "{}: {}", info, e))?;
                 }
             },
         }
@@ -635,7 +644,7 @@ fn check_spooldef_item(words: &[&str]) -> io::Result<()> {
         "minfreefiles" | "compresslvl" => log::warn!("{}: unsupported keyword, ignoring", words[0]),
 
         // we do not support this, error and return.
-        "spooldirs" => Err(ioerr!(InvalidData,"{}: unsupported keyword", words[0]))?,
+        "spooldirs" => Err(ioerr!(InvalidData, "{}: unsupported keyword", words[0]))?,
 
         _ => {},
     }
@@ -647,15 +656,28 @@ fn check_metaspool_item(words: &[&str]) -> io::Result<()> {
     match words[0] {
         "allocstrat" => {
             if words.len() < 2 {
-                Err(ioerr!(InvalidData,"{}: missing argument", words[0]))?;
+                Err(ioerr!(InvalidData, "{}: missing argument", words[0]))?;
             }
             match words[1] {
-                "space" => Err(ioerr!(InvalidData,"{} space: not supported (only weighted)", words[0]))?,
+                "space" => {
+                    Err(ioerr!(
+                        InvalidData,
+                        "{} space: not supported (only weighted)",
+                        words[0]
+                    ))?
+                },
                 "sequential" | "single" => {
                     log::warn!("{} {}: ignoring, always using \"weighted\"", words[0], words[1])
                 },
                 "weighted" => {},
-                _ => Err(ioerr!(InvalidData,"{} {}: unknown allocstrat", words[0], words[1]))?,
+                _ => {
+                    Err(ioerr!(
+                        InvalidData,
+                        "{} {}: unknown allocstrat",
+                        words[0],
+                        words[1]
+                    ))?
+                },
             }
         },
 
@@ -667,4 +689,3 @@ fn check_metaspool_item(words: &[&str]) -> io::Result<()> {
     }
     Ok(())
 }
-
