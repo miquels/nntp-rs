@@ -92,6 +92,7 @@ struct FileData {
 
 // Type of log.
 enum LogDest {
+    Stdout,
     Stderr,
     File(String),
     Syslog,
@@ -242,7 +243,7 @@ impl LogDest {
             LogDest::FileData(_) => {
                 self.log_line(is_log, r.0, format!("[{}] [{}] {}\n", r.0, r.1, r.2));
             },
-            LogDest::Stderr => {
+            LogDest::Stderr | LogDest::Stdout => {
                 self.log_line(is_log, r.0, format!("[{}] [{}] {}", r.0, r.1, r.2));
             },
             LogDest::File(_) => {
@@ -297,6 +298,9 @@ impl LogDest {
                 );
                 let _ = write!(file, "{} {}\n", t, line);
             },
+            LogDest::Stdout => {
+                let _ = println!("{}", line);
+            },
             LogDest::Stderr => {
                 let _ = eprintln!("{}", line);
             },
@@ -319,6 +323,7 @@ impl LogDest {
     // Open a log destination.
     fn open(dest: LogDest, config: &Config) -> io::Result<LogDest> {
         let d = match dest {
+            LogDest::Stdout => LogDest::Stdout,
             LogDest::Stderr => LogDest::Stderr,
             LogDest::Syslog => LogDest::Syslog,
             LogDest::FileData(_) => unreachable!(),
@@ -397,6 +402,7 @@ impl LogTarget {
     pub fn new_with(d: &str, cfg: &Config) -> io::Result<LogTarget> {
         let dest = match d {
             "" | "null" | "/dev/null" => LogDest::Null,
+            "stdout" => LogDest::Stdout,
             "stderr" => LogDest::Stderr,
             "syslog" => LogDest::Syslog,
             name => LogDest::open(LogDest::File(name.to_string()), cfg)?,
@@ -405,9 +411,9 @@ impl LogTarget {
     }
 
     /// Simple logtarget for CLI utils.
-    pub fn new_stderr() -> LogTarget {
+    pub fn new_stdout() -> LogTarget {
         LogTarget {
-            dest: LogDest::Stderr,
+            dest: LogDest::Stdout,
         }
     }
 

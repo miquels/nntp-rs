@@ -282,7 +282,7 @@ fn main() -> Result<()> {
 
 fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -> ! {
     // set up the logger.
-    let target = LogTarget::new_stderr();
+    let target = LogTarget::new_stdout();
     logger::logger_init(target, Some("nntp_rs_server".to_string()));
 
     let mut runtime = tokio::runtime::Runtime::new().unwrap();
