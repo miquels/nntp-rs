@@ -25,6 +25,7 @@ use smartstring::alias::String as SmartString;
 
 use crate::article::Article;
 use crate::arttype::ArtType;
+use crate::config;
 use crate::dconfig;
 use crate::dns::HostCache;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
@@ -74,6 +75,13 @@ impl NewsFeeds {
             e.inhost = hosts;
         }
         self.hcache.update(&self);
+    }
+
+    /// Check all peers to see if one of them is actually ourself.
+    pub fn check_self(&mut self, cfg: &config::Config) {
+        for e in self.peers.iter_mut() {
+            e.is_self = e.pathalias.contains(&cfg.server.pathhost);
+        }
     }
 
     /// Update the hostcache, after changes to self.
@@ -181,6 +189,8 @@ pub struct NewsPeer {
     /// non-config items.
     #[serde(skip)]
     pub index:              usize,
+    #[serde(skip)]
+    pub is_self:            bool,
 }
 
 impl NewsPeer {
@@ -207,6 +217,11 @@ impl NewsPeer {
     {
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
+            return false;
+        }
+
+        // If one of the pathaliases contains our pathalias, skip.
+        if self.is_self {
             return false;
         }
 

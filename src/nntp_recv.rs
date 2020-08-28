@@ -417,10 +417,13 @@ impl NntpServer {
         }
 
         // should match one of the pathaliases.
-        if !thispeer.nomismatch {
-            let is_match = thispeer.pathalias.iter().find(|s| s == &pathelems[0]).is_some();
-            if !is_match {
-                // XXX TODO ratelimit message.
+        if !thispeer.nomismatch && !thispeer.pathalias.contains(art.pathhost.as_ref().unwrap()) {
+            use std::sync::atomic::AtomicU64;
+            static LAST_MSG: AtomicU64 = AtomicU64::new(0);
+            let last_msg: UnixTime =  (&LAST_MSG).into();
+            if last_msg.seconds_elapsed() >= 10 {
+                // Ratelimited message, max 1 per 10 secs.
+                UnixTime::now().to_atomic(&LAST_MSG);
                 log::warn!(
                     "{} {} Path element fails to match aliases: {} in {}",
                     thispeer.label,
@@ -428,13 +431,17 @@ impl NntpServer {
                     pathelems[0],
                     art.msgid
                 );
-                mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
-                pathelems.insert(0, mm.as_ref().unwrap());
             }
+            mm.get_or_insert(format!("{}.MISMATCH", self.remote.ip()));
+            pathelems.insert(0, mm.as_ref().unwrap());
         }
 
         // insert our own name.
-        pathelems.insert(0, &self.config.server.hostname);
+        let commonpath = self.config.server.commonpath.as_str();
+        if commonpath != "" && !pathelems.contains(&commonpath) {
+            pathelems.insert(0, commonpath);
+        }
+        pathelems.insert(0, &self.config.server.pathhost);
         new_path = pathelems.join("!");
 
         // update.

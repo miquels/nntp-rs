@@ -70,6 +70,9 @@ impl Default for Runtime {
 pub struct Server {
     #[serde(default = "util::hostname")]
     pub hostname:       String,
+    pub xrefhost:       String,
+    pub pathhost:       String,
+    pub commonpath:     String,
     pub listen:         Option<Vec<String>>,
     pub runtime:        Runtime,
     pub user:           Option<String>,
@@ -167,6 +170,17 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
         _ => {},
     }
 
+    // Set some values to default if not set.
+    if cfg.server.pathhost == "" {
+        cfg.server.pathhost = cfg.server.hostname.clone();
+    }
+    if cfg.server.commonpath == "" {
+        cfg.server.commonpath = cfg.server.hostname.clone();
+    }
+    if cfg.server.xrefhost == "" {
+        cfg.server.xrefhost = cfg.server.hostname.clone();
+    }
+
     // If user or group was set
     resolve_user_group(&mut cfg)?;
 
@@ -194,6 +208,7 @@ pub fn set_config(mut cfg: Config) -> Arc<Config> {
     if let Some(mut feeds) = cfg.newsfeeds.take() {
         // replace the NEWSFEEDS config.
         feeds.init_hostcache();
+        feeds.check_self(&cfg);
         *NEWSFEEDS.write() = Some(Arc::new(feeds));
     }
 
