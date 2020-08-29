@@ -59,6 +59,18 @@ impl std::ops::Add<Duration> for UnixTime {
     }
 }
 
+impl std::ops::Sub for UnixTime {
+    type Output = Duration;
+
+    fn sub(self, other: UnixTime) -> Duration {
+        if other.0 > self.0 {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(self.0 - other.0)
+        }
+    }
+}
+
 impl AsRef<UnixTime> for UnixTime {
     fn as_ref(&self) -> &Self {
         self

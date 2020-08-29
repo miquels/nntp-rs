@@ -24,6 +24,7 @@ use std::io::Error as IoError;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -38,11 +39,13 @@ use crate::util::{self, format, Buffer, UnixTime};
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
 const DFL_FILE_REALLOCINT: u32 = 600;
+const EXPIRE_CHECK: u32 = 300;
 
 /// A diablo spool instance.
 ///
 /// Can be used for reading and writing articles from/to this spool.
 #[rustfmt::skip]
+#[derive(Clone)]
 pub struct DSpool {
     path:               PathBuf,
     rel_path:           String,
@@ -52,8 +55,14 @@ pub struct DSpool {
     minfree:            u64,
     maxsize:            u64,
     keeptime:           u64,
-    oldest:             AtomicU64,
+    shared:             Arc<DSpoolShared>,
+}
+
+struct DSpoolShared {
+    expire_lock:        Mutex<bool>,
     writer:             Mutex<Writer>,
+    oldest:             AtomicU64,
+    last_expire:        AtomicU64,
 }
 
 // The file we have open for writing.
@@ -223,8 +232,12 @@ impl DSpool {
             keeptime:        cfg.keeptime.as_secs(),
             minfree:         minfree,
             maxsize:         cfg.maxsize,
-            oldest:          AtomicU64::new(0),
-            writer:          Mutex::new(Writer::default()),
+            shared: Arc::new(DSpoolShared {
+                oldest:          AtomicU64::new(0),
+                last_expire:     AtomicU64::new(0),
+                expire_lock:     Mutex::new(true),
+                writer:          Mutex::new(Writer::default()),
+            }),
         };
 
         // Find the oldest article.
@@ -396,11 +409,15 @@ impl DSpool {
     // way to introduce parallelism again.
     fn do_write(&self, mut headers: Buffer, mut body: Buffer) -> io::Result<ArtLoc> {
         // lock the writer so we have unique access.
-        let mut writer = self.writer.lock();
+        let mut writer = self.shared.writer.lock();
+
+        // see if we need to kick off an expire thread.
+        let unix_now = UnixTime::now();
+        self.auto_expire(unix_now);
 
         // check if we had this file open for more than file_reallocint secs,
         // or if we need to move to a new directory.
-        let now = UnixTime::now().as_secs();
+        let now = unix_now.as_secs();
         if writer.fh.is_some() {
             let cur_dirslot = ((now / 60) as u32) / (self.dir_reallocint / 60);
             let wri_dirslot = writer.dir / (self.dir_reallocint / 60);
@@ -545,36 +562,77 @@ impl DSpool {
         })
     }
 
+    fn auto_expire(&self, now: UnixTime) {
+        let last_expire: UnixTime = (&self.shared.last_expire).into();
+        if now - last_expire >= Duration::new(EXPIRE_CHECK as u64, 0) {
+            let this = self.clone();
+            std::thread::spawn(move || {
+                let _guard = match this.shared.expire_lock.try_lock() {
+                    Some(guard) => guard,
+                    None => {
+                        log::info!("auto_expire: already running");
+                        return;
+                    }
+                };
+                now.to_atomic(&this.shared.last_expire);
+                if let Err(e) = this.do_expire(false, false) {
+                    log::error!("auto_expire: {}", e);
+                }
+            });
+        }
+    }
+
     // Remove oldest data until
     //
     // - if 'keeptime' is set: we have removed all articles older than 'keeptime', and
     // - if 'minfree' is set: 'minfree' bytes are available on the filesystem, and
     // - if 'maxsize' is set: filesystem usage is < 'maxsize'
     //
-    // We also update the `self.oldest` member variable to the timestamp
+    // We also update the `self.shared.oldest` member variable to the timestamp
     // of the oldest article after the expire.
     //
-    // If `stat_only` is true, no files are actually removed, only `self.oldest` gets updated.
+    // If `stat_only` is true, no files are actually removed, only `self.shared.oldest` gets updated.
     // If `dry_run` is true, go through the motions, but don't actually remove articles.
     //
     fn do_expire(&self, stat_only: bool, dry_run: bool) -> io::Result<u64> {
-        // get filesystem stats.
-        let sv = fs2::statvfs(&self.path)
-            .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?;
+
+        let mut to_delete = 0;
+        let mut do_expire = false;
+
+        if self.minfree > 0 || self.maxsize > 0 {
+            // get filesystem stats.
+            let sv = fs2::statvfs(&self.path)
+                .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?;
+
+            // if there's not enough free space, find out how much we need to free.
+            if self.minfree > 0 && sv.available_space() < self.minfree {
+                to_delete = self.minfree - sv.available_space();
+                do_expire = true;
+            }
+
+            // if we have used too much space, find out how much we need to free.
+            let used = sv.total_space() - sv.free_space();
+            if self.maxsize > 0 && self.maxsize > used {
+                to_delete = std::cmp::max(to_delete, self.maxsize - used);
+                do_expire = true;
+            }
+        }
+
+        if self.keeptime > 0 {
+            if let Ok(Some(oldest)) = self.get_oldest() {
+                if oldest + Duration::new(self.keeptime, 0) < UnixTime::now() {
+                    do_expire = true;
+                }
+            } else {
+                do_expire = true;
+            }
+        }
+
+        if !do_expire && !stat_only && !dry_run {
+            return Ok(0)
+        }
 
         let mut deleted = 0;
-        let mut to_delete = 0;
-
-        // if there's not enough free space, find out how much we need to free.
-        if self.minfree > 0 && sv.available_space() < self.minfree {
-            to_delete = self.minfree - sv.available_space();
-        }
-
-        // if we have used too much space, find out how much we need to free.
-        let used = sv.total_space() - sv.free_space();
-        if self.maxsize > 0 && self.maxsize > used {
-            to_delete = std::cmp::max(to_delete, self.maxsize - used);
-        }
 
         let mut dirs: Vec<_> = fs::read_dir(&self.path)
             .map_err(|e| ioerr!(e.kind(), "spool {}: {:?}: {}", self.spool_no, self.path, e))?
@@ -619,9 +677,9 @@ impl DSpool {
                 .collect();
             files.sort_unstable_by(|a, b| a.modified.cmp(&b.modified));
 
-            // Maybe initialize 'self.oldest' timestamp.
-            if !files.is_empty() && self.oldest.load(Ordering::Acquire) == 0 {
-                dir_timestamp.to_atomic(&self.oldest);
+            // Maybe initialize 'self.shared.oldest' timestamp.
+            if !files.is_empty() && self.shared.oldest.load(Ordering::Acquire) == 0 {
+                dir_timestamp.to_atomic(&self.shared.oldest);
             }
 
             // now walk over the files in the directory.
@@ -688,7 +746,7 @@ impl DSpool {
     // and fall between dir_timestamp and dir_timestamp + dir_reallocint.
     // Then find the oldest timestamp.
     fn update_oldest(&self, dir_timestamp: UnixTime, files: &VecDeque<ExpFile>) {
-        dir_timestamp.to_atomic(&self.oldest);
+        dir_timestamp.to_atomic(&self.shared.oldest);
         let max = dir_timestamp + Duration::new(self.dir_reallocint as u64, 0);
         let mut oldest = None;
         for file in files {
@@ -708,7 +766,7 @@ impl DSpool {
             }
         }
         if let Some(oldest) = oldest {
-            oldest.to_atomic(&self.oldest);
+            oldest.to_atomic(&self.shared.oldest);
         }
     }
 
@@ -785,7 +843,7 @@ impl SpoolBackend for DSpool {
     }
 
     fn get_oldest(&self) -> io::Result<Option<UnixTime>> {
-        let t = UnixTime::from(&self.oldest);
+        let t = UnixTime::from(&self.shared.oldest);
         if t.is_zero() {
             Ok(None)
         } else {
