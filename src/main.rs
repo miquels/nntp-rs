@@ -67,6 +67,9 @@ pub enum Command {
 
 #[derive(StructOpt, Debug)]
 pub struct ServeOpts {
+    #[structopt(short = "-D", long)]
+    /// Run in the background.
+    pub daemonize: bool,
     #[structopt(short, long)]
     /// listen address/port ([::]:1119)
     pub listen: Option<Vec<String>>,
@@ -264,6 +267,13 @@ fn main() -> Result<()> {
             exit(1);
         })
         .unwrap();
+
+    if run_opts.daemonize {
+        if let Err(e) = util::daemonize(config.server.pidfile.as_ref(), true) {
+            eprintln!("nntp-rs: daemonizing: {}", e);
+            exit(1);
+        }
+    }
 
     log::info!("Listening on {:?}", addrs);
 

@@ -83,6 +83,8 @@ pub struct Server {
     pub uid:            Option<users::uid_t>,
     pub gid:            Option<users::gid_t>,
     #[serde(default)]
+    pub pidfile:        Option<String>,
+    #[serde(default)]
     pub log_panics:     bool,
     #[serde(default,deserialize_with = "util::option_deserialize_size")]
     pub maxartsize:     Option<u64>,
