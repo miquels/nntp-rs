@@ -726,7 +726,7 @@ impl Stream for DeferredQueue {
         // expire at around the same time.
         let now = Instant::now() - Duration::new(1, 0);
         let when = this.queue[0].when;
-        if when >= now {
+        if now > when {
             let art = this.queue.pop_front().unwrap().art;
             return Poll::Ready(Some(art));
         }
