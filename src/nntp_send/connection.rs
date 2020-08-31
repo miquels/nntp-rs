@@ -118,7 +118,7 @@ impl Connection {
 
         loop {
             log::info!(
-                "outfeed: {}:{}: connecting to {}",
+                "Feed {}:{}: connecting to {}",
                 newspeer.label,
                 id,
                 newspeer.outhost
@@ -202,7 +202,7 @@ impl Connection {
         let _ = tokio::spawn(async move {
             // call feeder loop.
             if let Err(e) = self.feed().await {
-                log::error!("outfeed: {}:{}: fatal: {}", self.newspeer.label, self.id, e);
+                log::error!("Feed {}:{}: fatal: {}", self.newspeer.label, self.id, e);
                 // We got an error, delay a bit so the main loop doesn't
                 // reconnect right away. We should have a better strategy.
                 delay_for(Duration::new(1, 0)).await;

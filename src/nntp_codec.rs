@@ -130,6 +130,7 @@ impl<S> NntpCodecBuilder<S> {
             bus_recv:        self.bus_recv,
             rd:              Buffer::new(),
             rd_pos:          0,
+            rd_eof:          false,
             rd_overflow:     false,
             rd_reserve_size: 0,
             rd_state:        State::Lf1Seen,
@@ -154,6 +155,7 @@ pub struct NntpCodec<S = TcpStream> {
     bus_recv:        Option<bus::Receiver>,
     rd:              Buffer,
     rd_pos:          usize,
+    rd_eof:          bool,
     rd_overflow:     bool,
     rd_state:        State,
     rd_line_start:   usize,
@@ -196,6 +198,7 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
             bus_recv:        self.bus_recv,
             rd:              self.rd,
             rd_pos:          self.rd_pos,
+            rd_eof:          self.rd_eof,
             rd_overflow:     self.rd_overflow,
             rd_state:        self.rd_state,
             rd_line_start:   self.rd_line_start,
@@ -216,6 +219,7 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
             bus_recv:        None,
             rd:              Buffer::new(),
             rd_pos:          0,
+            rd_eof:          false,
             rd_overflow:     false,
             rd_state:        State::Data,
             rd_line_start:   0,
@@ -263,6 +267,9 @@ where
 {
     // fill the read buffer as much as possible.
     fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<usize, io::Error>> {
+        if self.rd_eof {
+            return Poll::Ready(Ok(0));
+        }
         let mut bytes_read = 0usize;
         loop {
             // in a overflow situation, truncate the buffer. 32768 should be enough
@@ -294,6 +301,7 @@ where
             match socket.poll_read_buf(cx, &mut self.rd) {
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
+                        self.rd_eof = true;
                         return Poll::Ready(Ok(bytes_read));
                     }
                     bytes_read += n;
