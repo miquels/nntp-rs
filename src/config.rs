@@ -179,9 +179,6 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     if cfg.server.pathhost == "" {
         cfg.server.pathhost = cfg.server.hostname.clone();
     }
-    if cfg.server.commonpath == "" {
-        cfg.server.commonpath = cfg.server.hostname.clone();
-    }
     if cfg.server.xrefhost == "" {
         cfg.server.xrefhost = cfg.server.hostname.clone();
     }
