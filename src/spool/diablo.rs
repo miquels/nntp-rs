@@ -38,7 +38,7 @@ use crate::util::byteorder::*;
 use crate::util::{self, format, Buffer, UnixTime};
 
 const MAX_SPOOLFILE_SIZE: u64 = 1_000_000_000;
-const DFL_FILE_REALLOCINT: u32 = 600;
+const DFL_DIR_REALLOCINT: u32 = 600;
 const EXPIRE_CHECK: u32 = 300;
 
 /// A diablo spool instance.
@@ -198,18 +198,19 @@ struct ExpFile {
 impl DSpool {
     /// Create a new diablo-type spool backend.
     pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<dyn SpoolBackend>> {
-        let file_reallocint = if ms.reallocint.as_secs() > 0 {
-            ms.reallocint.as_secs() as u32
+        let dir_reallocint = if ms.reallocint.as_secs() > 0 {
+            // cannot go lower than 300 secs (5 mins).
+            std::cmp::max(300, ms.reallocint.as_secs() as u32)
         } else {
-            DFL_FILE_REALLOCINT
+            DFL_DIR_REALLOCINT
         };
 
-        // round down file_reallocint to the nearest multiple of 60 (i.e. to the minute).
-        let file_reallocint = (file_reallocint / 60) * 60;
+        // round down dir_reallocint to the nearest multiple of 60 (i.e. to the minute).
+        let dir_reallocint = (dir_reallocint / 60) * 60;
 
-        // for now, dir_reallocint is 6 times that. so, for the default
-        // file_reallocint of 10 minutes, dir_reallocint is 60 minutes.
-        let dir_reallocint = file_reallocint * 6;
+        // Set file_reallocint to dir_reallocint / 100, so that we get 100
+        // files per directory. However, it can not go lower than 1 per minute.
+        let file_reallocint = std::cmp::max(dir_reallocint / 100, 60);
 
         // minfree must be at least 10MB, if not force it.
         const TEN_MIB: u64 = 10 * 1024 * 1024;
