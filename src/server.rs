@@ -212,13 +212,23 @@ impl Server {
         // now busy-wait until all connections are closed.
         while TOT_SESSIONS.load(Ordering::SeqCst) > 0 {
             if waited == 50 {
+                // after 5 seconds.
                 log::info!("sending Notification::ExitNow to all remaining sessions");
                 let _ = bus_sender.send(Notification::ExitNow);
             }
             waited += 1;
             let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
-            if waited == 100 || waited % 600 == 0 {
+            if waited % 100 == 0 {
+                // every 10 seconds.
                 log::warn!("still waiting!");
+            }
+            if waited == 600 {
+                // after one minute.
+                log::error!(
+                    "shutting down server: {} sessions stuck, exiting anyway",
+                    TOT_SESSIONS.load(Ordering::SeqCst)
+                );
+                std::process::exit(1);
             }
         }
 
