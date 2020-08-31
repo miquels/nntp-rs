@@ -262,7 +262,8 @@ where
     S: Unpin,
 {
     // fill the read buffer as much as possible.
-    fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<(), io::Error>> {
+    fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<usize, io::Error>> {
+        let mut bytes_read = 0usize;
         loop {
             // in a overflow situation, truncate the buffer. 32768 should be enough
             // to still have the headers available. Maybe we should scan to find the
@@ -291,10 +292,14 @@ where
             let socket = &mut self.socket;
             pin!(socket);
             match socket.poll_read_buf(cx, &mut self.rd) {
-                Poll::Ready(Ok(n)) if n == 0 => return Poll::Ready(Ok(())),
+                Poll::Ready(Ok(n)) => {
+                    if n == 0 {
+                        return Poll::Ready(Ok(bytes_read));
+                    }
+                    bytes_read += n;
+                },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => return Poll::Pending,
-                _ => {},
             };
         }
     }
@@ -456,10 +461,22 @@ where
 
         // read as much data as we can.
         let sock_closed = match self.fill_read_buf(cx) {
-            Poll::Ready(Ok(())) => true,
+            Poll::Ready(Ok(0)) => true,
+            Poll::Ready(Ok(_)) => false,
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Pending => false,
         };
+
+        // see if the other side closed the socket.
+        if sock_closed {
+            if self.rd.len() > 0 {
+                // We were still reading a line, or a block, and hit EOF
+                // before the end. That's unexpected.
+                return Poll::Ready(Err(ioerr!(UnexpectedEof, "UnexpectedEof")));
+            }
+            // EOF.
+            return Poll::Ready(Ok(NntpInput::Eof));
+        }
 
         // Now if we have no input yet process the notifications.
         if self.rd.len() == 0 && self.rd_mode == CodecMode::ReadLine {
