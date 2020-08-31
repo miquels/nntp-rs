@@ -463,7 +463,7 @@ impl TxSessionStats {
 }
 
 fn format_rate(elapsed_ms: u64, count: u64) -> String {
-    let dt = std::cmp::max(1000, elapsed_ms) as f64 / 1000f64;
+    let dt = std::cmp::max(100, elapsed_ms) as f64 / 1000f64;
     let mut rate = count as f64 / dt;
     let mut unit = "sec";
 
