@@ -8,6 +8,9 @@ use crate::article::Article;
 use crate::dns;
 use crate::errors::ArtError;
 
+// After how many articles sent a stats update should be logged.
+const MARK_AFTER_OFFERED_N: u64 = 1000;
+
 #[repr(usize)]
 #[rustfmt::skip]
 pub enum Stats {
@@ -162,26 +165,10 @@ impl SessionStats {
             nuse = self.stats[Stats::Received as usize];
         }
 
-        let elapsed = self.instant.elapsed().as_millis();
-        let dt = std::cmp::max(1000, elapsed) as f64 / 1000f64;
-        let mut rate = nuse as f64 / dt;
-        let mut unit = "sec";
+        let elapsed = self.instant.elapsed().as_millis() as u64;
+        let rate = format_rate(elapsed, nuse);
 
-        if rate < 0.1 && rate >= 0.0001 {
-            rate *= 60.0;
-            unit = "min";
-        }
-        let srate = if rate < 0.01 {
-            format!("{:.4}", rate)
-        } else if rate < 0.1 {
-            format!("{:.2}", rate)
-        } else if rate < 10.0 {
-            format!("{:.1}", rate)
-        } else {
-            format!("{}", rate.round() as u64)
-        };
-
-        log::info!("Stats {} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({}/{})",
+        log::info!("Stats {} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({})",
             self.fdno,
             (elapsed as f64) / 1000f64,
             self.stats[Stats::Ihave as usize],
@@ -202,8 +189,7 @@ impl SessionStats {
             self.stats[Stats::ReceivedBytes as usize],
             self.stats[Stats::AcceptedBytes as usize],
             self.stats[Stats::RejectedBytes as usize],
-            srate,
-            unit,
+            rate,
         );
     }
 
@@ -349,7 +335,7 @@ impl TxSessionStats {
         log::info!("Feed {}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
     }
 
-    pub fn stats_update(&mut self) {
+    fn stats_update(&mut self) {
         log::info!(
             "Feed {}:{} mark {}",
             self.label,
@@ -361,7 +347,7 @@ impl TxSessionStats {
                 "Feed {}:{} mark {}",
                 self.label,
                 self.id,
-                self.log_stats(self.mark, &self.stats)
+                self.log_defer(self.mark, &self.stats)
             );
         }
         self.update_total();
@@ -393,30 +379,27 @@ impl TxSessionStats {
         }
     }
 
-    pub fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
-        let secs = self.mark.saturating_duration_since(start).as_secs();
+    fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
+        let elapsed_ms = std::cmp::max(1, Instant::now().saturating_duration_since(start).as_millis());
+        let rate = format_rate(elapsed_ms as u64, stats[TxStats::Offered as usize]);
         format!(
-            "secs={} acc={} dup={} rej={} tot={} bytes={} ({}/min) avpend={:.1}",
-            secs,
+            "secs={} acc={} dup={} rej={} tot={} bytes={} ({}) avpend={:.1}",
+            format_secs(elapsed_ms as u64),
             stats[TxStats::Accepted as usize],
             stats[TxStats::Refused as usize],
             stats[TxStats::Rejected as usize],
             stats[TxStats::Offered as usize],
             stats[TxStats::AcceptedBytes as usize],
-            if secs > 0 {
-                stats[TxStats::Offered as usize] * 60 / secs
-            } else {
-                0
-            },
+            rate,
             1,
         )
     }
 
     pub fn log_defer(&self, start: Instant, stats: &[u64]) -> String {
-        let secs = self.mark.saturating_duration_since(start).as_secs();
+        let elapsed_ms = std::cmp::max(1, Instant::now().saturating_duration_since(start).as_millis());
         format!(
             "secs={} defer={} deferfail={}",
-            secs,
+            format_secs(elapsed_ms as u64),
             stats[TxStats::Deferred as usize],
             stats[TxStats::DeferredFail as usize],
         )
@@ -435,6 +418,7 @@ impl TxSessionStats {
         if let Some(size) = size {
             self.add(TxStats::DeferredBytes, size as u64);
         }
+        self.check_mark();
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431) where we failed to re-queue.
@@ -444,12 +428,14 @@ impl TxSessionStats {
         if let Some(size) = size {
             self.add(TxStats::DeferredBytes, size as u64);
         }
+        self.check_mark();
     }
 
     // CHECK 438
     pub fn art_refused(&mut self) {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Refused);
+        self.check_mark();
     }
 
     // TAKETHIS 239
@@ -457,6 +443,7 @@ impl TxSessionStats {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Accepted);
         self.add(TxStats::AcceptedBytes, size as u64);
+        self.check_mark();
     }
 
     // TAKETHIS 439
@@ -464,5 +451,48 @@ impl TxSessionStats {
         self.inc(TxStats::Offered);
         self.inc(TxStats::Rejected);
         self.add(TxStats::RejectedBytes, size as u64);
+        self.check_mark();
+    }
+
+    #[inline]
+    fn check_mark(&mut self) {
+        if self.stats[TxStats::Offered as usize] % MARK_AFTER_OFFERED_N == 0 {
+            self.stats_update();
+        }
     }
 }
+
+fn format_rate(elapsed_ms: u64, count: u64) -> String {
+    let dt = std::cmp::max(1000, elapsed_ms) as f64 / 1000f64;
+    let mut rate = count as f64 / dt;
+    let mut unit = "sec";
+
+    if rate < 0.1 && rate >= 0.0001 {
+        rate *= 60.0;
+        unit = "min";
+    }
+    if rate < 0.01 {
+        format!("{:.4}/{}", rate, unit)
+    } else if rate < 0.1 {
+        format!("{:.2}/{}", rate, unit)
+    } else if rate < 10.0 {
+        format!("{:.1}/{}", rate, unit)
+    } else {
+        format!("{}/{}", rate.round() as u64, unit)
+    }
+}
+
+fn format_secs(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{:.2}", ms as f64 / 1000.0)
+    } else if ms < 10_000 {
+        format!("{:.1}", ms as f64 / 1000.0)
+    } else {
+        format!("{}", ms / 1000)
+    }
+}
+
+
+
+
+
