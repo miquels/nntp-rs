@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use futures::future::FutureExt;
 use futures::sink::{Sink, SinkExt};
 use tokio::prelude::*;
 use tokio::stream::Stream;
@@ -44,6 +45,15 @@ const DEFER_RETRIES: u32 = 3;
 
 // How many articles too keep in the deferred-retry buffer.
 const DEFER_MAX_QUEUE: usize = 1000;
+
+macro_rules! conditional_fut {
+    ($cond:expr, $fut:expr) => {
+        {
+            use futures::future::{Either, FutureExt, pending};
+            { if $cond { Either::Left($fut.fuse()) } else { Either::Right(pending()) } }
+        }
+    }
+}
 
 //
 // A connection.
@@ -127,16 +137,15 @@ impl Connection {
             let conn_fut = Connection::connect(newspeer.clone(), id);
             tokio::pin!(conn_fut);
 
-            if do_delay {
+            let mut delay_fut = conditional_fut!(do_delay, {
                 log::debug!("Connection::new: delay {} ms", fail_delay as u64);
-            }
-            let delay_fut = delay_for(Duration::from_millis(fail_delay as u64));
-            tokio::pin!(delay_fut);
+                delay_for(Duration::from_millis(fail_delay as u64))
+            });
 
             // Start connecting, but also listen to broadcasts while connecting.
             loop {
                 tokio::select! {
-                    _ = &mut delay_fut, if do_delay => {
+                    _ = &mut delay_fut => {
                         do_delay = false;
                         delay_increase(&mut fail_delay, 120_000);
                         delay_jitter(&mut fail_delay);
@@ -368,10 +377,10 @@ impl Connection {
                 }
             }
 
-            tokio::select! {
+            futures::select_biased! {
 
                 // If we need to, get an item from the global queue for this feed.
-                res = self.rx_queue.recv(), if need_item && !processing_backlog => {
+                res = conditional_fut!(need_item && !processing_backlog, self.rx_queue.recv()) => {
                     match res {
                         Ok(art) => {
                             log::trace!(
@@ -398,8 +407,60 @@ impl Connection {
                     }
                 }
 
+                // If we're writing, keep driving it.
+                res = conditional_fut!(xmit_busy, self.writer.flush()) => {
+                    // Done sending either CHECK or TAKETHIS.
+                    if let Err(e) = res {
+                        return Err(ioerr!(e.kind(), "writing to socket: {}", e));
+                    }
+                    xmit_busy = false;
+                }
+
+                // process a response from the remote server.
+                res = self.reader.next().fuse() => {
+
+                    // Remap None (end of stream) to EOF.
+                    let res = res.unwrap_or_else(|| Err(ioerr!(UnexpectedEof, "Connection closed")));
+
+                    // What did we receive?
+                    match res.and_then(NntpResponse::try_from) {
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::UnexpectedEof {
+                                if self.recv_queue.len() == 0 {
+                                    log::info!(
+                                        "{}:{}: connection closed by remote",
+                                        self.newspeer.label,
+                                        self.id
+                                    );
+                                    return Ok(());
+                                }
+                                return Err(ioerr!(e.kind(), "connection closed unexpectedly"));
+                            }
+                            return Err(ioerr!(e.kind(), "reading from socket: {}", e));
+                        },
+                        Ok(resp) => {
+                            if self.handle_response(resp).await? {
+                                return Ok(());
+                            }
+                        },
+                    }
+                }
+
+                // Check the deferred queue.
+                defer_art = self.deferred.next().fuse() => {
+                    let art = defer_art.unwrap();
+                    log::trace!(
+                        "Connection::feed: {}:{}: re-pushing CHECK {} onto send queue",
+                        self.newspeer.label,
+                        self.id,
+                        art.msgid(),
+                    );
+                    // For now ignore dropped articles when re-queuing.
+                    let _ = self.send_queue.push_back(art);
+                }
+
                 // check for notifications from the broadcast channel.
-                res = self.broadcast.recv() => {
+                res = self.broadcast.recv().fuse() => {
                     log::trace!(
                         "Connection::feed: {}:{}: received broadcast {:?}",
                         self.newspeer.label,
@@ -431,58 +492,6 @@ impl Connection {
                         },
                         _ => {},
                     }
-                }
-
-                // If we're writing, keep driving it.
-                res = self.writer.flush(), if xmit_busy => {
-                    // Done sending either CHECK or TAKETHIS.
-                    if let Err(e) = res {
-                        return Err(ioerr!(e.kind(), "writing to socket: {}", e));
-                    }
-                    xmit_busy = false;
-                }
-
-                // process a response from the remote server.
-                res = self.reader.next() => {
-
-                    // Remap None (end of stream) to EOF.
-                    let res = res.unwrap_or_else(|| Err(ioerr!(UnexpectedEof, "Connection closed")));
-
-                    // What did we receive?
-                    match res.and_then(NntpResponse::try_from) {
-                        Err(e) => {
-                            if e.kind() == io::ErrorKind::UnexpectedEof {
-                                if self.recv_queue.len() == 0 {
-                                    log::info!(
-                                        "{}:{}: connection closed by remote",
-                                        self.newspeer.label,
-                                        self.id
-                                    );
-                                    return Ok(());
-                                }
-                                return Err(ioerr!(e.kind(), "connection closed unexpectedly"));
-                            }
-                            return Err(ioerr!(e.kind(), "reading from socket: {}", e));
-                        },
-                        Ok(resp) => {
-                            if self.handle_response(resp).await? {
-                                return Ok(());
-                            }
-                        },
-                    }
-                }
-
-                // Check the deferred queue.
-                defer_art = self.deferred.next() => {
-                    let art = defer_art.unwrap();
-                    log::trace!(
-                        "Connection::feed: {}:{}: re-pushing CHECK {} onto send queue",
-                        self.newspeer.label,
-                        self.id,
-                        art.msgid(),
-                    );
-                    // For now ignore dropped articles when re-queuing.
-                    let _ = self.send_queue.push_back(art);
                 }
             }
         }
@@ -797,3 +806,4 @@ fn delay_increase(fail_delay: &mut f64, max: u64) {
         *fail_delay = max as f64;
     }
 }
+
