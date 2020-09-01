@@ -13,10 +13,11 @@ A list in no particular order.
 ### History
 
 - new history file format, larger hash, larger offsets, multiple files.
-- keep history file in memory option (mmap)
+- keep history file in memory option (mmap) (options: index only, all)
 
 ### General
 - add periodic timer infra for hist expire etc
+- detect changed config and reload
 
 ### Feed
 
@@ -24,7 +25,6 @@ A list in no particular order.
 
 ### Outgoing
 - don't start outgoing feed (or queue!) until first article
-- connections: close after timeout (10 mins? not sure)
 - close feed itself after idle?
 
 ### Stats
@@ -36,6 +36,7 @@ A list in no particular order.
 
 - keep active file
 - xref generation on/off
+- global atomic with an Instant, updated every X seconds, so we have a cheap time source.
 
 ### article.rs
 
@@ -60,3 +61,6 @@ DONE:
 - hostname / xrefhost / pathhost / commonpath
 - welcome message
 - readonly
+
+### Outgoing
+- connections: close after timeout (1 mins)

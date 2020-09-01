@@ -33,6 +33,9 @@ use crate::util::Buffer;
 
 use super::{Peer, PeerArticle, PeerFeedItem, QItems, Queue};
 
+// Close idle connections after one minute.
+const CONNECTION_MAX_IDLE: u32 = 60;
+
 // How long to wait to re-offer a deferred article, initially.
 const DEFER_DELAY_INITIAL: u64 = 10u64;
 
@@ -93,6 +96,8 @@ pub(super) struct Connection {
     // Backlog.
     queue:      Queue,
     qitems:     Option<QItems>,
+    // Idle counter, incremented every 10 secs.
+    idle_counter: u32,
 }
 
 impl Connection {
@@ -174,6 +179,7 @@ impl Connection {
                             rewrite,
                             queue,
                             qitems: None,
+                            idle_counter: 0,
                         };
 
                         // Initialize stats logger and log connect message.
@@ -276,6 +282,8 @@ impl Connection {
             ArtPart::Article
         };
         let mut processing_backlog = false;
+
+        let mut interval = tokio::time::interval(Duration::new(10, 0));
 
         loop {
             // If there is an item in the send queue, and we're not still busy
@@ -380,7 +388,7 @@ impl Connection {
                                 self.id,
                                 art.msgid,
                             );
-                            self.send_queue.push_back(ConnItem::Check(art))
+                            self.send_queue.push_back(ConnItem::Check(art));
                         },
                         Err(_) => {
                             log::trace!(
@@ -405,6 +413,7 @@ impl Connection {
                         return Err(ioerr!(e.kind(), "writing to socket: {}", e));
                     }
                     xmit_busy = false;
+                    self.idle_counter = 0;
                 }
 
                 // process a response from the remote server.
@@ -435,6 +444,7 @@ impl Connection {
                             }
                         },
                     }
+                    self.idle_counter = 0;
                 }
 
                 // Check the deferred queue.
@@ -448,6 +458,21 @@ impl Connection {
                     );
                     // For now ignore dropped articles when re-queuing.
                     let _ = self.send_queue.push_back(art);
+                }
+
+                // Timer tick.
+                _ = interval.next().fuse() => {
+                    self.idle_counter += 1;
+                    if self.idle_counter >= CONNECTION_MAX_IDLE / 10 {
+                        // if the queues are not empty, we're not really idle.
+                        if self.send_queue.len() == 0 && self.recv_queue.len() == 0 && self.deferred.len() == 0 {
+                            // exit gracefully.
+                            log::info!("{}:{}: connection is idle, closing", self.newspeer.label, self.id);
+                            self.send_queue.push_back(ConnItem::Quit);
+                            maxstream = 0;
+                        }
+                        self.idle_counter = 0;
+                    }
                 }
 
                 // check for notifications from the broadcast channel.
@@ -670,6 +695,10 @@ struct DeferredQueue {
 impl DeferredQueue {
     fn new() -> DeferredQueue {
         DeferredQueue::default()
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
     }
 
     // Push an article onto the queue.
