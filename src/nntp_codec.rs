@@ -445,28 +445,6 @@ where
     }
 
     fn poll_read(&mut self, cx: &mut Context) -> Poll<io::Result<NntpInput>> {
-        // first, check the notification channel.
-        if let Some(bus_recv) = self.bus_recv.as_mut() {
-            let n = {
-                let fut = bus_recv.recv();
-                pin!(fut);
-                match fut.poll(cx) {
-                    Poll::Ready(item) => {
-                        match item {
-                            Some(Notification::ExitNow) => {
-                                return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
-                            },
-                            other => other,
-                        }
-                    },
-                    Poll::Pending => None,
-                }
-            };
-            if n.is_some() {
-                self.notification = n;
-            }
-        }
-
         // read as much data as we can.
         let sock_closed = match self.fill_read_buf(cx) {
             Poll::Ready(Ok(0)) => true,
@@ -484,13 +462,6 @@ where
             }
             // EOF.
             return Poll::Ready(Ok(NntpInput::Eof));
-        }
-
-        // Now if we have no input yet process the notifications.
-        if self.rd.len() == 0 && self.rd_mode == CodecMode::ReadLine {
-            if let Some(notification) = self.notification.take() {
-                return Poll::Ready(Ok(NntpInput::Notification(notification)));
-            }
         }
 
         // Then process the data.
@@ -521,6 +492,35 @@ where
             }
             // EOF.
             return Poll::Ready(Ok(NntpInput::Eof));
+        }
+
+        // Check the notification channel.
+        if let Some(bus_recv) = self.bus_recv.as_mut() {
+            let n = {
+                let fut = bus_recv.recv();
+                pin!(fut);
+                match fut.poll(cx) {
+                    Poll::Ready(item) => {
+                        match item {
+                            Some(Notification::ExitNow) => {
+                                return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
+                            },
+                            other => other,
+                        }
+                    },
+                    Poll::Pending => None,
+                }
+            };
+            if n.is_some() {
+                self.notification = n;
+            }
+        }
+
+        // Now if we have no input yet process the notifications.
+        if self.rd.len() == 0 && self.rd_mode == CodecMode::ReadLine {
+            if let Some(notification) = self.notification.take() {
+                return Poll::Ready(Ok(NntpInput::Notification(notification)));
+            }
         }
 
         // check the timer.

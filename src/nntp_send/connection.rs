@@ -46,15 +46,6 @@ const DEFER_RETRIES: u32 = 3;
 // How many articles too keep in the deferred-retry buffer.
 const DEFER_MAX_QUEUE: usize = 1000;
 
-macro_rules! conditional_fut {
-    ($cond:expr, $fut:expr) => {
-        {
-            use futures::future::{Either, FutureExt, pending};
-            { if $cond { Either::Left($fut.fuse()) } else { Either::Right(pending()) } }
-        }
-    }
-}
-
 //
 // A connection.
 //

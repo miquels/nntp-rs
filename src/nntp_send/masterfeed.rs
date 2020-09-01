@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
@@ -108,8 +109,8 @@ impl MasterFeed {
         let mut recv_arts = true;
 
         loop {
-            tokio::select! {
-                article = self.art_chan.next(), if recv_arts => {
+            futures::select_biased! {
+                article = conditional_fut!(recv_arts, self.art_chan.next()) => {
                     let art = match article {
                         Some(article) => article,
                         None => {
@@ -125,7 +126,7 @@ impl MasterFeed {
                     // Forwards only to the peerfeeds in the list.
                     self.fanout(art).await;
                 }
-                notification = self.bus.recv() => {
+                notification = self.bus.recv().fuse() => {
                     match notification {
                         Some(Notification::ExitGraceful) | None => {
                             log::debug!("MasterFeed: broadcasting ExitGraceful to peerfeeds");

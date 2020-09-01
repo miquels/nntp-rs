@@ -6,6 +6,15 @@ use std::net::IpAddr;
 use crate::newsfeeds::NewsPeer;
 use crate::spool::ArtLoc;
 
+macro_rules! conditional_fut {
+    ($cond:expr, $fut:expr) => {
+        {
+            use futures::future::{Either, FutureExt, pending};
+            { if $cond { Either::Left($fut.fuse()) } else { Either::Right(pending()) } }
+        }
+    }
+}
+
 mod connection;
 mod masterfeed;
 mod peerfeed;
