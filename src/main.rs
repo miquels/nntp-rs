@@ -54,13 +54,16 @@ pub enum Command {
     #[structopt(display_order = 4)]
     /// History file expire (offline)
     HistExpire(HistExpireOpts),
-    #[structopt(display_order = 5)]
+    #[structopt(display_order = 4)]
+    /// Initialize new history file.
+    HistInit(HistInitOpts),
+    #[structopt(display_order = 6)]
     /// Read article from spool.
     SpoolRead(SpoolReadOpts),
-    #[structopt(display_order = 6)]
+    #[structopt(display_order = 7)]
     /// Expire a spool.
     SpoolExpire(SpoolExpireOpts),
-    #[structopt(display_order = 7)]
+    #[structopt(display_order = 8)]
     /// Generate a test article and send it out.
     TestArticle(TestArticleOpts),
 }
@@ -87,6 +90,17 @@ pub struct HistExpireOpts {
     #[structopt(short, long)]
     /// history file.
     pub file: Option<String>,
+}
+
+// XXX for now this is diablo specific, fix that later.
+#[derive(StructOpt, Debug)]
+pub struct HistInitOpts {
+    #[structopt(short, long)]
+    /// history file.
+    pub file: Option<String>,
+    #[structopt(short = "N", long = "num-buckets")]
+    /// number of hash buckets (default 256K)
+    pub num_buckets: Option<u32>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -303,6 +317,7 @@ fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -
             Command::Serve(_) => unreachable!(),
             Command::HistLookup(opts) => history_lookup(config.unwrap(), opts, pretty).await,
             Command::HistExpire(opts) => history_expire(config.unwrap(), opts).await,
+            Command::HistInit(opts) => diablo_history_init(config.unwrap(), opts).await,
             Command::HistInspect(opts) => history_inspect(config.unwrap(), opts).await,
             Command::SpoolRead(opts) => spool_read(config.unwrap(), opts).await,
             Command::SpoolExpire(opts) => spool_expire(config.unwrap(), opts).await,
@@ -356,6 +371,15 @@ async fn history_expire(config: &config::Config, opts: HistExpireOpts) -> Result
         .expire(&spool, config.history.remember.clone(), true, true)
         .await?;
     Ok(res)
+}
+
+// For now, diablo specific. fix later
+async fn diablo_history_init(config: &config::Config, opts: HistInitOpts) -> Result<()> {
+    let num_buckets = opts.num_buckets.unwrap_or(256 * 1024 * 1024);
+    let cfg_hfile = &config.history.file;
+    let hfile = opts.file.as_ref().unwrap_or(cfg_hfile);
+    nntp_rs::history::diablo::DHistory::create(std::path::Path::new(hfile), num_buckets)?;
+    Ok(())
 }
 
 async fn history_lookup(config: &config::Config, opts: HistLookupOpts, pretty: bool) -> Result<()> {
