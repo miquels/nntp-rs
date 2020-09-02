@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "nntp-rs-server"
 path = "src/main.rs"
 
+[features]
+# The MPMC implementation. Either "async-channel" or "crossfire"
+default = [ "crossfire" ]
+
 # Include debug info in release builds.
 [profile.release]
 debug = true
@@ -26,13 +30,14 @@ opt-level = 0
 
 [dependencies]
 arc-swap = "0.4.7"
-async-channel = "1.1.1"
+async-channel = { version = "1.1.1", optional = true }
 bytes = "0.5.5"
 chrono = "0.4.12"
 clap = "2.33.1"
 core_affinity = "0.5.10"
 crossbeam-channel = "0.4.2"
 crossbeam-queue = "0.2.3"
+crossfire = { version = "0.1.4", optional = true }
 curlyconf = { version = "0.1.0-alpha.3" }
 futures = "0.3.5"
 fs2 = "0.4.3"

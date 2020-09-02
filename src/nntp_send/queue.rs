@@ -208,7 +208,7 @@ impl QWriter {
         }
         let mut path = PathBuf::from(&self.dir);
         path.push(&format!(".{}.seq", &self.label));
-        let data = format!("{} {} {:x}", low_seqno, self.next_seq, util::unixtime());
+        let data = format!("{} {} {:x}\n", low_seqno, self.next_seq, util::unixtime());
         fs::write(&path, &data).await
     }
 

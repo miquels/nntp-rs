@@ -32,6 +32,7 @@ use crate::spool::{ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
 use super::{Peer, PeerArticle, PeerFeedItem, QItems, Queue};
+use super::mpmc;
 
 // Close idle connections after one minute.
 const CONNECTION_MAX_IDLE: u32 = 60;
@@ -86,7 +87,7 @@ pub(super) struct Connection {
     // channel to send information to the PeerFeed.
     tx_chan:    mpsc::Sender<PeerFeedItem>,
     // article queue.
-    rx_queue:   async_channel::Receiver<PeerArticle>,
+    rx_queue:   mpmc::Receiver<PeerArticle>,
     // deferred article queue.
     deferred:   DeferredQueue,
     // broadcast channel to receive notifications from the PeerFeed.
@@ -110,7 +111,7 @@ impl Connection {
         id: u64,
         newspeer: Arc<Peer>,
         tx_chan: mpsc::Sender<PeerFeedItem>,
-        rx_queue: async_channel::Receiver<PeerArticle>,
+        rx_queue: mpmc::Receiver<PeerArticle>,
         broadcast: broadcast::Sender<PeerFeedItem>,
         spool: Spool,
         queue: Queue,
@@ -343,7 +344,7 @@ impl Connection {
 
             if need_item && !processing_backlog {
                 // Try to get one item from the main queue.
-                match self.rx_queue.try_recv() {
+                match self.rx_queue.try_recv().map_err(|e| e.into()) {
                     Ok(art) => {
                         log::trace!(
                             "Connection::feed: {}:{}: push onto send queue: CHECK {}",
@@ -354,7 +355,7 @@ impl Connection {
                         self.send_queue.push_back(ConnItem::Check(art));
                         continue;
                     },
-                    Err(async_channel::TryRecvError::Empty) => {
+                    Err(mpmc::TryRecvError::Empty) => {
                         log::trace!(
                             "Connection::feed: {}:{}: empty, trying backlog",
                             self.newspeer.label,

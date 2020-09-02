@@ -20,6 +20,7 @@ use crate::config;
 use crate::server;
 use crate::spool::Spool;
 
+use super::mpmc;
 use super::queue::Queue;
 use super::{Connection, Peer, PeerArticle, PeerFeedItem};
 
@@ -58,8 +59,8 @@ pub(super) struct PeerFeed {
     tx_chan: mpsc::Sender<PeerFeedItem>,
 
     // MPSC channel that is the article queue for the Connections.
-    rx_queue: async_channel::Receiver<PeerArticle>,
-    tx_queue: async_channel::Sender<PeerArticle>,
+    rx_queue: mpmc::Receiver<PeerArticle>,
+    tx_queue: mpmc::Sender<PeerArticle>,
 
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
@@ -86,7 +87,7 @@ impl PeerFeed {
     pub(super) fn new(peer: Peer, spool: &Spool) -> PeerFeed {
         let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(PEERFEED_COMMAND_CHANNEL_SIZE);
         let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
-        let (tx_queue, rx_queue) = async_channel::bounded(PEERFEED_QUEUE_SIZE);
+        let (tx_queue, rx_queue) = mpmc::bounded(PEERFEED_QUEUE_SIZE);
         let config = config::get_config();
         let queue_dir = &config.paths.queue;
 
@@ -172,15 +173,15 @@ impl PeerFeed {
                         }
                     }
 
-                    match self.tx_queue.try_send(art) {
+                    match self.tx_queue.try_send(art).map_err(|e| e.into()) {
                         Ok(()) => {},
-                        Err(async_channel::TrySendError::Closed(_)) => {
+                        Err(mpmc::TrySendError::Closed(_)) => {
                             // This code is never reached. It happens if all
                             // senders or all receivers are dropped, but we hold one
                             // to one of both so that can't happen.
                             unreachable!();
                         },
-                        Err(async_channel::TrySendError::Full(art)) => {
+                        Err(mpmc::TrySendError::Full(art)) => {
                             // Queue is full. Send half to the backlog.
                             match self.send_queue_to_backlog(false).await {
                                 Ok(_) => {
@@ -264,8 +265,7 @@ impl PeerFeed {
 
     // Write half or the entire current queue to the backlog.
     async fn send_queue_to_backlog(&mut self, entire_queue: bool) -> io::Result<()> {
-        let capacity = self.tx_queue.capacity().unwrap_or(0);
-        let target_len = if entire_queue { 0 } else { capacity / 2 };
+        let target_len = if entire_queue { 0 } else { PEERFEED_QUEUE_SIZE / 2 };
         let mut arts = Vec::new();
         while self.rx_queue.len() > target_len {
             match self.rx_queue.try_recv() {

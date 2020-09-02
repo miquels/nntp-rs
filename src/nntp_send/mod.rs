@@ -17,6 +17,7 @@ macro_rules! conditional_fut {
 
 mod connection;
 mod masterfeed;
+mod mpmc;
 mod peerfeed;
 mod queue;
 
