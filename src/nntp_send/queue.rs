@@ -212,11 +212,19 @@ impl QWriter {
         fs::write(&path, &data).await
     }
 
-    async fn open_qfile(&mut self) -> io::Result<()> {
+    async fn open_qfile(&mut self, create: bool) -> io::Result<()> {
         let mut path = PathBuf::from(&self.dir);
         path.push(&self.label);
         self.is_empty = true;
-        let file = open_append(&path).await?;
+        let file = match open_append(&path, create).await {
+            Ok(file) => file,
+            Err(e) => {
+                if !create && e.kind() == io::ErrorKind::NotFound {
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         match file.metadata().await {
             Ok(m) if m.len() > 0 => self.is_empty = false,
             _ => {},
@@ -506,10 +514,9 @@ impl Queue {
             }
         }
 
-        // Open the main backlog queue file, then close it again. This has the
-        // effect of creating an empty file if it didn't exist yet,
-        // and of setting qwriter.is_empty if it did exist.
-        let _ = qwriter.open_qfile().await;
+        // Open the main backlog queue file if it exists. Sets qwriter.is_empty
+        // if the file does not exist or is empty.
+        let _ = qwriter.open_qfile(false).await;
         qwriter.file.take();
 
         // Return the number of queue files.
@@ -690,7 +697,7 @@ impl Queue {
 
         if qwriter.file.is_none() {
             // open the queue file, return error on fail.
-            qwriter.open_qfile().await?;
+            qwriter.open_qfile(true).await?;
         }
         let file = qwriter.file.as_mut().unwrap();
         file.write_all(data.as_bytes()).await?;
@@ -806,9 +813,9 @@ mod tests {
     }
 }
 
-async fn open_append(path: impl AsRef<Path>) -> io::Result<fs::File> {
+async fn open_append(path: impl AsRef<Path>, create: bool) -> io::Result<fs::File> {
     fs::OpenOptions::new()
-        .create(true)
+        .create(create)
         .append(true)
         .open(&path.as_ref())
         .await
