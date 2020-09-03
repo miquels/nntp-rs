@@ -19,9 +19,31 @@ A list in no particular order.
 - add periodic timer infra for hist expire etc
 - detect changed config and reload
 
-### Feed
+- do something on disk I/O errors (writing to spool or queue files)
+  + spool/hist/log write error on incoming feed:
+    - start to give errors on all connections that are not read-only
+  + queue write error on outgoing feed:
+    - start to give errors on all incoming connections that are not read-only
+    - put outgoing feed that caused the error in paused mode
+  + spool/hist read error on outgoing feed:
+    - start to give errors on all incoming connections that are not read-only
+    - put outgoing feed that caused the error in spool-to-backlog mode
 
+  In all cases, set the global error state (an atomic) if there error has
+  higher prio than the previous state. write-EIO > read-EIO > ENOSPC > EDQUOT > NoError
+
+  + run a separate task that does a statfs every .. minute?
+    - if any filesystems are 100% full, handle as "spool/hist write error on incoming feed".
+    - if the global error state is "ENOSPC" and all filesystems have
+      enough space again (define "enough?"), clear the error (cmpxchg)
+
+### Feed
 - welcome message
+
+### Incoming
+- might be worth it to keep peerfeeds on the multisingle runtime,
+  but run readers on the threaded runtime? Need socket handoff
+  from multisingle to threaded somehow.
 
 ### Outgoing
 - don't start outgoing feed (or queue!) until first article
@@ -31,6 +53,29 @@ A list in no particular order.
 - keep global stats per peer
 - make available through http, maybe prometheus format as well
 - html stats page?
+
+
+  + ENOSPC: 
+### Feed
+- welcome message
+
+### Incoming
+- might be worth it to keep peerfeeds on the multisingle runtime,
+  but run readers on the threaded runtime? Need socket handoff
+  from multisingle to threaded somehow.
+
+### Outgoing
+- don't start outgoing feed (or queue!) until first article
+- close feed itself after idle?
+
+### Stats
+- keep global stats per peer
+- make available through http, maybe prometheus format as well
+- html stats page?
+
+### Logger
+- for syslog logging, do not re-initialize the syslogger every log line.
+
 
 ### Other
 
