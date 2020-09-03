@@ -146,6 +146,7 @@ pub struct MultiSingle {
 /// The (default) threaded executor.
 #[derive(Default,Deserialize,Debug)]
 #[rustfmt::skip]
+#[serde(default)]
 pub struct Threaded {
     #[serde(rename = "blocking_io")]
     pub blocking_type:      BlockingType,
