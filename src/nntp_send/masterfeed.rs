@@ -5,6 +5,7 @@
 //!
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
@@ -107,6 +108,7 @@ impl MasterFeed {
     pub async fn run(&mut self) {
         log::debug!("MasterFeed::run: starting");
         let mut recv_arts = true;
+        let mut closing = false;
 
         loop {
             futures::select_biased! {
@@ -114,12 +116,13 @@ impl MasterFeed {
                     let art = match article {
                         Some(article) => article,
                         None => {
-                            // Hitting end-of-stream on the art_chan means that
-                            // all incoming connections are gone. Translate that
-                            // into an `ExitGraceful` for the PeerFeeds.
+                            // Hitting end-of-stream on the art_chan means that the receiving side
+                            // of the server has closed down, no more articles are coming.
+                            // Only now tell the peerfeed to exit.
                             log::debug!("MasterFeed: hit end-of-stream on article channel");
-                            self.broadcast(PeerFeedItem::ExitGraceful).await;
+                            self.broadcast(PeerFeedItem::ExitFeed, closing).await;
                             recv_arts = false;
+                            closing = true;
                             continue;
                         }
                     };
@@ -128,14 +131,19 @@ impl MasterFeed {
                 }
                 notification = self.bus.recv().fuse() => {
                     match notification {
-                        Some(Notification::ExitGraceful) | None => {
-                            log::debug!("MasterFeed: broadcasting ExitGraceful to peerfeeds");
-                            self.broadcast(PeerFeedItem::ExitGraceful).await;
+                        Some(Notification::ExitGraceful) => {
+                            log::debug!("MasterFeed: broadcasting ExitGraceful to connections");
+                            self.broadcast(PeerFeedItem::ExitGraceful, closing).await;
+                            closing = true;
                         }
-                        Some(Notification::ExitNow) => {
+                        Some(Notification::ExitNow) | None => {
                             // Time's up!
+                            log::debug!("MasterFeed: broadcasting ExitNow to connections");
+                            self.broadcast(PeerFeedItem::ExitNow, closing).await;
+                            let _ = tokio::time::delay_for(Duration::from_millis(1000)).await;
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
-                            self.broadcast(PeerFeedItem::ExitNow).await;
+                            self.broadcast(PeerFeedItem::ExitNow, closing).await;
+                            closing = true;
                             return;
                         }
                         Some(Notification::Reconfigure) => {
@@ -172,19 +180,16 @@ impl MasterFeed {
         }
     }
 
-    async fn broadcast(&mut self, item: PeerFeedItem) {
+    async fn broadcast(&mut self, item: PeerFeedItem, quiet: bool) {
         // Forward to all peerfeeds.
         for (name, peer) in self.peerfeeds.iter_mut() {
             if let Err(e) = peer.send(item.clone()).await {
-                match item {
-                    PeerFeedItem::ExitNow => {},
-                    _ => {
-                        log::error!(
-                            "MasterFeed::broadcast: internal error: send to PeerFeed({}): {}",
-                            name,
-                            e
-                        );
-                    },
+                if !quiet {
+                    log::error!(
+                        "MasterFeed::broadcast: internal error: send to PeerFeed({}): {}",
+                        name,
+                        e
+                    );
                 }
             }
         }

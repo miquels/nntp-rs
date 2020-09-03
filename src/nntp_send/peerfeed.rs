@@ -35,8 +35,17 @@ const PEERFEED_COMMAND_CHANNEL_SIZE: usize = 512;
 // no backpressure even if there are bursts (which there won't be).
 const CONNECTION_BCAST_CHANNEL_SIZE: usize = 64;
 
-// Size of the article queue in a PeerFeed from which the Connections read.
-const PEERFEED_QUEUE_SIZE: usize = 5000;
+// Max size of the article queue in a PeerFeed from which the Connections read.
+const PEERFEED_QUEUE_SIZE: usize = 2000;
+
+// If no articles have been taken from the main article queue in a PeerFeed for this
+// many seconds, start writing the incoming feed from the masterfeed to the backlog on disk.
+const MOVE_TO_BACKLOG_AFTER_SECS: u64 = 10;
+
+// How often to flush the in-memory queue of a PeerFeed to disk, if it
+// is in queue-only mode, or if no articles have been taken from it by
+// a Connection after START_SPOOLING_AFTER_SECS.
+const MOVE_TO_BACKLOG_EVERY_SECS: u64 = 5;
 
 // A peerfeed contains an in memory queue, an on-disk backlog queue,
 // and zero or more active NNTP connections to remote peers.
@@ -118,15 +127,16 @@ impl PeerFeed {
     pub(super) async fn run(mut self) {
         log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut exiting = false;
+        let mut masterfeed_eof = false;
         let mut queue_only = self.newspeer.queue_only;
-        let mut tx_queue_len = 0;
-        let mut tx_queue_len_unchanged_secs = 0u64;
+        let mut prev_tx_queue_len = 0;
+        let mut main_queue_unread_secs = 0u64;
 
         // Tick every 5 seconds.
-        let mut interval = tokio::time::interval(Duration::from_millis(5000));
+        let mut interval = tokio::time::interval(Duration::new(MOVE_TO_BACKLOG_EVERY_SECS, 0));
 
         loop {
-            if exiting && self.num_conns == 0 {
+            if exiting && masterfeed_eof && self.num_conns == 0 {
                 break;
             }
 
@@ -143,30 +153,35 @@ impl PeerFeed {
                     }
                 }
                 _ = interval.next().fuse() => {
+
+                    // queue_only mode, so every tick (5 secs) we flush the
+                    // main queue to the backlog on disk.
+                    if queue_only {
+                        if let Err(_e) = self.send_queue_to_backlog(true).await {
+                            // FIXME: backlog fails. now what.
+                        }
+                        continue;
+                    }
+
+                    // see if the main queue has been unread for too long,
+                    // meaning no active connections takeing articles from the queue.
+                    main_queue_unread_secs += MOVE_TO_BACKLOG_EVERY_SECS;
+                    if main_queue_unread_secs >= MOVE_TO_BACKLOG_AFTER_SECS {
+                        if let Err(_e) = self.send_queue_to_backlog(true).await {
+                            // FIXME: backlog fails. now what.
+                        }
+                        prev_tx_queue_len = 0;
+                    }
+
                     // see if we need to add connections to process the backlog.
                     let backlog_len = self.backlog_queue.len().await;
                     if backlog_len > 0 {
-                        if queue_only {
-                            if let Err(_e) = self.send_queue_to_backlog(true).await {
-                                // FIXME: backlog fails. now what.
-                            }
-                        } else {
-                            // TODO: scale number of connections in a smarter way.
-                            if self.num_conns < self.newspeer.maxparallel / 2 {
-                                self.add_connection().await;
-                            }
-                            // wake up sleeping connections.
-                            let _ = self.broadcast.send(PeerFeedItem::Ping);
-
-                            // see if queue length has been static for too long.
-                            tx_queue_len_unchanged_secs += 5;
-                            if tx_queue_len_unchanged_secs >= 10 {
-                                if let Err(_e) = self.send_queue_to_backlog(true).await {
-                                    // FIXME: backlog fails. now what.
-                                }
-                                tx_queue_len = 0;
-                            }
+                        // TODO: scale number of connections in a smarter way.
+                        if self.num_conns < self.newspeer.maxparallel / 2 {
+                            self.add_connection().await;
                         }
+                        // wake up sleeping connections.
+                        let _ = self.broadcast.send(PeerFeedItem::Ping);
                     }
                     continue;
                 }
@@ -180,19 +195,22 @@ impl PeerFeed {
                     let qlen = self.tx_queue.len();
                     if self.num_conns < self.newspeer.maxparallel && !queue_only {
                         // TODO: use average queue length.
-                        if self.num_conns == 0 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
+                        if self.num_conns < 2 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
                             self.add_connection().await;
                         }
                     }
 
                     match self.tx_queue.try_send(art).map_err(|e| e.into()) {
                         Ok(()) => {
-                            tx_queue_len += 1;
-                            if tx_queue_len != qlen {
+                            // compare the previous queue length to the queue length
+                            // _before_ we pushed an article onto it.
+                            if prev_tx_queue_len != qlen {
                                 // queue len has changed.
-                                tx_queue_len_unchanged_secs = 0;
-                                tx_queue_len = qlen;
+                                main_queue_unread_secs = 0;
+                                prev_tx_queue_len = qlen;
                             }
+                            // increase length by one (because we pushed an article).
+                            prev_tx_queue_len += 1;
                         },
                         Err(mpmc::TrySendError::Closed(_)) => {
                             // This code is never reached. It happens if all
@@ -214,13 +232,33 @@ impl PeerFeed {
                         },
                     }
                 },
+                PeerFeedItem::ExitFeed => {
+                    // The masterfeed has closed down. only now can we really exit, because a few
+                    // articles might still have arrived in the interim, and we need to write
+                    // those to the backlog queue as well.
+                    if !exiting {
+                        let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                        exiting = true;
+                    }
+                    masterfeed_eof = true;
+                },
                 PeerFeedItem::ExitGraceful => {
-                    exiting = true;
-                    let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                    // this only asks the connections to close down, we wait
+                    // until all of them are gone.
+                    if !exiting {
+                        let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                        exiting = true;
+                    }
                 },
                 PeerFeedItem::ExitNow => {
+                    // last call. we dont exit yet, if a connection is hanging,
+                    // let's wait for it as long as possible. that's what the
+                    // timeout in the main loop is _for_, right.
                     exiting = true;
+                    masterfeed_eof = true;
                     let _ = self.broadcast.send(PeerFeedItem::ExitNow);
+                    // do write the queue as-is, though.
+                    let _ = self.send_queue_to_backlog(true).await;
                 },
                 PeerFeedItem::Reconfigure => {},
                 PeerFeedItem::ReconfigurePeer(peer) => {

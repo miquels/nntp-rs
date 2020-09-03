@@ -493,6 +493,7 @@ impl Connection {
                     );
                     match res {
                         Ok(PeerFeedItem::ExitNow) => {
+                            self.dropped.extend(self.send_queue.drain(..));
                             return Err(ioerr!(Interrupted, "forced exit"));
                         }
                         Ok(PeerFeedItem::ExitGraceful) => {

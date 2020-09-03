@@ -47,6 +47,7 @@ enum PeerFeedItem {
     ReconfigurePeer(Peer),
     Reconfigure,
     ExitGraceful,
+    ExitFeed,
     ExitNow,
     Ping,
 }
