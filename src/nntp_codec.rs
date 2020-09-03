@@ -759,7 +759,7 @@ where S: AsyncWrite + Unpin
         }
 
         let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
-        loop {
+        let res = loop {
             let res = this.poll_write(cx, &mut bufs[0]);
             if bufs[0].remaining() == 0 {
                 bufs.remove(0);
@@ -767,12 +767,14 @@ where S: AsyncWrite + Unpin
             if bufs.len() == 0 {
                 return Poll::Ready(Ok(()));
             }
-            if let Poll::Pending = res {
-                break;
+            match res {
+                Poll::Pending => break Poll::Pending,
+                Poll::Ready(Err(e)) => break Poll::Ready(Err(e)),
+                _ => {},
             }
-        }
+        };
         this.wr_bufs = bufs;
-        Poll::Pending
+        res
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Buffer) -> Result<(), Self::Error> {
