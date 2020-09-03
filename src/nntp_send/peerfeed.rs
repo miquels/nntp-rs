@@ -11,6 +11,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
@@ -72,7 +73,7 @@ pub(super) struct PeerFeed {
     spool: Spool,
 
     // Outgoing queue for this peer.
-    pub(super) queue: Queue,
+    pub(super) backlog_queue: Queue,
 }
 
 impl Drop for PeerFeed {
@@ -103,7 +104,7 @@ impl PeerFeed {
             broadcast,
             num_conns: 0,
             spool: spool.clone(),
-            queue: Queue::new(&peer.label, queue_dir, peer.maxqueue),
+            backlog_queue: Queue::new(&peer.label, queue_dir, peer.maxqueue),
             newspeer: Arc::new(peer),
         }
     }
@@ -118,6 +119,8 @@ impl PeerFeed {
         log::trace!("PeerFeed::run: {}: starting", self.label);
         let mut exiting = false;
         let mut queue_only = self.newspeer.queue_only;
+        let mut tx_queue_len = 0;
+        let mut tx_queue_len_unchanged_secs = 0u64;
 
         // Tick every 5 seconds.
         let mut interval = tokio::time::interval(Duration::from_millis(5000));
@@ -128,11 +131,21 @@ impl PeerFeed {
             }
 
             let item;
-            tokio::select! {
-                _ = interval.next() => {
+            futures::select_biased! {
+                res = self.rx_chan.recv().fuse() => {
+                    // we got an item from the masterfeed.
+                    match res {
+                        Some(an_item) => item = Some(an_item),
+                        None => {
+                            // unreachable!(), but let's be careful.
+                            break;
+                        },
+                    }
+                }
+                _ = interval.next().fuse() => {
                     // see if we need to add connections to process the backlog.
-                    let queue_len = self.queue.len().await;
-                    if queue_len > 0 {
+                    let backlog_len = self.backlog_queue.len().await;
+                    if backlog_len > 0 {
                         if queue_only {
                             if let Err(_e) = self.send_queue_to_backlog(true).await {
                                 // FIXME: backlog fails. now what.
@@ -144,19 +157,18 @@ impl PeerFeed {
                             }
                             // wake up sleeping connections.
                             let _ = self.broadcast.send(PeerFeedItem::Ping);
+
+                            // see if queue length has been static for too long.
+                            tx_queue_len_unchanged_secs += 5;
+                            if tx_queue_len_unchanged_secs >= 10 {
+                                if let Err(_e) = self.send_queue_to_backlog(true).await {
+                                    // FIXME: backlog fails. now what.
+                                }
+                                tx_queue_len = 0;
+                            }
                         }
                     }
                     continue;
-                }
-                res = self.rx_chan.recv() => {
-                    // we got an item from the masterfeed.
-                    match res {
-                        Some(an_item) => item = Some(an_item),
-                        None => {
-                            // unreachable!(), but let's be careful.
-                            break;
-                        },
-                    }
                 }
             }
             let item = item.unwrap();
@@ -165,8 +177,8 @@ impl PeerFeed {
             match item {
                 PeerFeedItem::Article(art) => {
                     // if we have no connections, or less than maxconn, create a connection here.
+                    let qlen = self.tx_queue.len();
                     if self.num_conns < self.newspeer.maxparallel && !queue_only {
-                        let qlen = self.tx_queue.len();
                         // TODO: use average queue length.
                         if self.num_conns == 0 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
                             self.add_connection().await;
@@ -174,7 +186,14 @@ impl PeerFeed {
                     }
 
                     match self.tx_queue.try_send(art).map_err(|e| e.into()) {
-                        Ok(()) => {},
+                        Ok(()) => {
+                            tx_queue_len += 1;
+                            if tx_queue_len != qlen {
+                                // queue len has changed.
+                                tx_queue_len_unchanged_secs = 0;
+                                tx_queue_len = qlen;
+                            }
+                        },
                         Err(mpmc::TrySendError::Closed(_)) => {
                             // This code is never reached. It happens if all
                             // senders or all receivers are dropped, but we hold one
@@ -251,7 +270,7 @@ impl PeerFeed {
         if arts.len() > 0 {
             let res = async {
                 self.send_queue_to_backlog(false).await?;
-                self.queue.write_arts(&self.spool, &arts).await?;
+                self.backlog_queue.write_arts(&self.spool, &arts).await?;
                 Ok(())
             }
             .await;
@@ -274,7 +293,7 @@ impl PeerFeed {
             }
         }
 
-        if let Err(e) = self.queue.write_arts(&self.spool, &arts).await {
+        if let Err(e) = self.backlog_queue.write_arts(&self.spool, &arts).await {
             self.queue_error(&e).await;
             return Err(e);
         }
@@ -288,7 +307,7 @@ impl PeerFeed {
         let spool = self.spool.clone();
         let broadcast = self.broadcast.clone();
         let id = self.next_id;
-        let queue = self.queue.clone();
+        let queue = self.backlog_queue.clone();
 
         self.next_id += 1;
         self.num_conns += 1;

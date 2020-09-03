@@ -93,7 +93,7 @@ impl MasterFeed {
         for peer in &self.newsfeeds.peers {
             if !self.peerfeeds.contains_key(&peer.label) && peer.outhost != "" {
                 let peer_feed = PeerFeed::new(Peer::new(peer), &self.spool);
-                peer_feed.queue.init().await;
+                peer_feed.backlog_queue.init().await;
                 let tx_chan = peer_feed.get_tx_chan();
                 tokio::spawn(async move { peer_feed.run().await });
                 self.peerfeeds.insert(peer.label.clone().into(), tx_chan);
