@@ -228,15 +228,15 @@ impl Connection {
             let mut arts = Vec::new();
             for item in self
                 .send_queue
-                .iter()
-                .chain(self.recv_queue.iter())
-                .chain(self.dropped.iter())
-                .chain(self.deferred.iter())
+                .drain(..)
+                .chain(self.recv_queue.drain(..))
+                .chain(self.dropped.drain(..))
+                .chain(self.deferred.drain(..))
             {
                 match item {
-                    &ConnItem::Check(ref art) | &ConnItem::Takethis(ref art) => {
+                    ConnItem::Check(art) | ConnItem::Takethis(art) => {
                         if !art.from_backlog {
-                            arts.push(art.clone());
+                            arts.push(art);
                         }
                     },
                     _ => {},
@@ -283,6 +283,7 @@ impl Connection {
             ArtPart::Article
         };
         let mut processing_backlog = false;
+        let mut sent_quit = false;
 
         let mut interval = tokio::time::interval(Duration::new(10, 0));
 
@@ -426,6 +427,11 @@ impl Connection {
                     // What did we receive?
                     match res.and_then(NntpResponse::try_from) {
                         Err(e) => {
+                            if sent_quit {
+                                // We sent quit, the remote side closed the
+                                // connection without a 205. don't complain.
+                                return Ok(());
+                            }
                             if e.kind() == io::ErrorKind::UnexpectedEof {
                                 if self.recv_queue.len() == 0 {
                                     log::info!(
@@ -470,6 +476,7 @@ impl Connection {
                             // exit gracefully.
                             log::info!("{}:{}: connection is idle, closing", self.newspeer.label, self.id);
                             self.send_queue.push_back(ConnItem::Quit);
+                            sent_quit = true;
                             maxstream = 0;
                         }
                         self.idle_counter = 0;
@@ -496,6 +503,7 @@ impl Connection {
                         },
                         Ok(PeerFeedItem::Reconfigure) => {
                             // config changed. drain slowly and quit.
+                            self.dropped.extend(self.send_queue.drain(..));
                             self.send_queue.push_back(ConnItem::Quit);
                             maxstream = 0;
                         },
@@ -734,9 +742,12 @@ impl DeferredQueue {
         }
     }
 
-    // Turn this queue into an iterator of PeerArticles, in order to drain it.
-    fn iter(&self) -> impl Iterator<Item = &ConnItem> {
-        self.queue.iter().map(|q| &q.art)
+    // Drain the queue.
+    fn drain<R>(&mut self, range: R) -> impl Iterator<Item=ConnItem> + '_
+    where
+        R: std::ops::RangeBounds<usize>,
+    {
+        self.queue.drain(range).map(|art| art.art)
     }
 }
 
