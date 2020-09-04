@@ -16,6 +16,8 @@ use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{de::Deserializer, de::MapAccess, de::SeqAccess, de::Visitor, Deserialize};
 
 use crate::newsfeeds::*;
@@ -101,6 +103,10 @@ impl<'de> Deserialize<'de> for Labels {
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where A: MapAccess<'de> {
+                static NUMERIC_TRAILER: Lazy<Regex> = Lazy::new(|| {
+                    let re = r"_\d{2}$";
+                    Regex::new(re).expect("could not compile NUMERIC_TRAILER regexp")
+                });
                 let mut this = Labels::default();
 
                 while let Some(label) = map.next_key::<String>()? {
@@ -116,14 +122,17 @@ impl<'de> Deserialize<'de> for Labels {
                             }
                             set_default_newspeer(peer);
                         },
-                        // old xs4all legacy.
-                        /*"%XCLIENT" => {},*/
                         // filters
                         "IFILTER" => this.ifilter = Some(peer),
                         "ISPAM" => this.ispam = Some(peer),
                         "ESPAM" => this.espam = Some(peer),
                         // peer.
-                        _ => this.peers.push(peer),
+                        label => {
+                            // XS4ALL legacy -- if it ends in _\d{2}, skip it.
+                            if !NUMERIC_TRAILER.is_match(label) {
+                                this.peers.push(peer);
+                            }
+                        },
                     }
                 }
                 Ok(this)
