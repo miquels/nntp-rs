@@ -54,6 +54,7 @@ pub struct DSpool {
     dir_reallocint:     u32,
     minfree:            u64,
     maxsize:            u64,
+    weight:             u32,
     keeptime:           u64,
     shared:             Arc<DSpoolShared>,
 }
@@ -223,6 +224,20 @@ impl DSpool {
             }
         };
 
+        // Calculate the "weight" factor. It is the maximum size of this spool in GB.
+        let sv = fs2::statvfs(&cfg.path)
+            .map_err(|e| ioerr!(e.kind(), "spool {}: {}: {}", cfg.spool_no, cfg.path, e))?;
+        let reserved = sv.free_space() - sv.available_space();
+        let fs_size = sv.total_space() - reserved;
+        let mut weight = if cfg.maxsize != 0 && cfg.maxsize < fs_size {
+            cfg.maxsize / 1_000_000_000
+        } else {
+            fs_size / 1_000_000_000
+        } as u32;
+        if weight == 0 {
+            weight = 1;
+        }
+
         // Return DSpool.
         let ds = DSpool {
             path:            PathBuf::from(&cfg.path),
@@ -233,6 +248,7 @@ impl DSpool {
             keeptime:        cfg.keeptime.as_secs(),
             minfree:         minfree,
             maxsize:         cfg.maxsize,
+            weight,
             shared: Arc::new(DSpoolShared {
                 oldest:          AtomicU64::new(0),
                 last_expire:     AtomicU64::new(0),
@@ -839,8 +855,8 @@ impl SpoolBackend for DSpool {
         self.do_expire(false, dry_run)
     }
 
-    fn get_maxsize(&self) -> u64 {
-        self.maxsize
+    fn get_weight(&self) -> u32 {
+        self.weight
     }
 
     fn get_oldest(&self) -> io::Result<Option<UnixTime>> {

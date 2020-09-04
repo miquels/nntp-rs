@@ -55,7 +55,7 @@ pub trait SpoolBackend: Send + Sync {
     fn expire(&self, dry_run: bool) -> io::Result<u64>;
 
     /// Get the maximum size of this spool.
-    fn get_maxsize(&self) -> u64;
+    fn get_weight(&self) -> u32;
 
     /// Get the timestamp of the oldest article.
     fn get_oldest(&self) -> io::Result<Option<UnixTime>>;
@@ -237,6 +237,7 @@ pub struct MetaSpool {
     pub rejectarts:     bool,
 
     #[doc(hidden)]
+    #[serde(default)]
     pub allocstrat:     AllocStrat,
 
     #[doc(hidden)]
@@ -363,12 +364,7 @@ impl Spool {
             let weight = if cfg.weight != 0 {
                 cfg.weight
             } else {
-                let w = (be.get_maxsize() / 1_000_000_000) as u32;
-                if w == 0 {
-                    1
-                } else {
-                    w
-                }
+                be.get_weight()
             };
             log::debug!("XXX insert {} into spools, weight {}", n, weight);
             spools.insert(
@@ -408,6 +404,7 @@ impl Spool {
                 }
                 ms.insert(m.name.clone(), i);
             }
+            log::debug!("XXX spoolgroup {} totweight {}", spoolgroup[i].name, totweight);
             spoolgroup[i].totweight = totweight;
         }
 
@@ -504,7 +501,9 @@ impl Spool {
             }
             let ms = &self.inner.metaspool[g.spoolgroup];
 
-            // XXX FIXME: match hashfeed.
+            if !ms.hashfeed.matches(art.hash) {
+                continue;
+            }
 
             if !art.arttype.matches(&ms.arttypes) {
                 continue;
