@@ -61,7 +61,7 @@ impl Server {
             });
 
             // Create server struct.
-            let server = Server {
+            let mut server = Server {
                 history,
                 spool,
                 conns: Arc::new(Mutex::new(HashMap::new())),
@@ -85,6 +85,11 @@ impl Server {
 
             // SIGUSR1 -> expire.
             server.listen_expire(bus_recv.clone());
+
+            // Do not hold on to the masterfeed channel.
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            server.outfeed = tx;
+            drop(rx);
 
             server.wait(bus_sender, bus_recv).await;
             Ok(())

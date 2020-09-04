@@ -275,6 +275,11 @@ impl PeerFeed {
                 PeerFeedItem::ConnExit(arts) => {
                     let _ = self.requeue(arts).await;
                     self.num_conns -= 1;
+                    if exiting && self.num_conns == 0 {
+                        if let Err(_e) = self.send_queue_to_backlog(true).await {
+                            // FIXME: backlog fails. now what.
+                        }
+                    }
                 },
                 PeerFeedItem::Ping => {},
             }

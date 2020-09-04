@@ -60,13 +60,17 @@ impl MasterFeed {
         for peer in removed.iter() {
             if let Some(mut orphan) = self.peerfeeds.remove(peer.as_str()) {
                 // notify NewsPeer to shut down.
-                match orphan.send(PeerFeedItem::ExitGraceful).await {
+                let mut res = orphan.send(PeerFeedItem::ExitGraceful).await;
+                if res.is_ok() {
+                    res = orphan.send(PeerFeedItem::ExitFeed).await;
+                }
+                match res {
                     Ok(_) => self.orphans.push(orphan),
                     Err(e) => {
                         // already gone. cannot happen, but expect the
                         // unexpected and log it anyway.
                         log::error!(
-                            "MasterFeed::reconfigure: removed {}, but it was already vanished: {}",
+                            "MasterFeed::reconfigure: removed {}, but it had already vanished: {}",
                             peer,
                             e
                         );
