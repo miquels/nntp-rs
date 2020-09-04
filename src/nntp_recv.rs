@@ -454,11 +454,14 @@ impl NntpServer {
         }
 
         // insert our own name.
-        let commonpath = self.config.server.commonpath.as_str();
-        if commonpath != "" && !pathelems.contains(&commonpath) {
-            pathelems.insert(0, commonpath);
+        for commonpath in self.config.server.commonpath.iter().map(|p| p.as_str()) {
+            if !pathelems.contains(&commonpath) {
+                pathelems.insert(0, commonpath);
+            }
         }
-        pathelems.insert(0, &self.config.server.pathhost);
+        for pathhost in self.config.server.pathhost.iter().map(|p| p.as_str()) {
+            pathelems.insert(0, pathhost);
+        }
         new_path = pathelems.join("!");
 
         // update.

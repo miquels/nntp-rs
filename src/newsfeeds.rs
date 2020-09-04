@@ -80,7 +80,12 @@ impl NewsFeeds {
     /// Check all peers to see if one of them is actually ourself.
     pub fn check_self(&mut self, cfg: &config::Config) {
         for e in self.peers.iter_mut() {
-            e.is_self = e.pathalias.contains(&cfg.server.pathhost);
+            for pathhost in &cfg.server.pathhost {
+                if e.pathalias.contains(pathhost) {
+                    e.is_self = true;
+                    break;
+                }
+            }
         }
     }
 

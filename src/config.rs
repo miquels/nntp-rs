@@ -73,9 +73,9 @@ pub struct Server {
     #[serde(default)]
     pub xrefhost:       String,
     #[serde(default)]
-    pub pathhost:       String,
+    pub pathhost:       Vec<String>,
     #[serde(default)]
-    pub commonpath:     String,
+    pub commonpath:     Vec<String>,
     pub listen:         Option<Vec<String>>,
     pub runtime:        Runtime,
     pub user:           Option<String>,
@@ -177,12 +177,16 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     // Set some values to default if not set.
-    if cfg.server.pathhost == "" {
-        cfg.server.pathhost = cfg.server.hostname.clone();
+    if cfg.server.pathhost.len() == 0 {
+        cfg.server.pathhost.push(cfg.server.hostname.clone());
     }
     if cfg.server.xrefhost == "" {
         cfg.server.xrefhost = cfg.server.hostname.clone();
     }
+
+    // Fix up pathhost and commonpath.
+    pathhosts_fixup(&mut cfg.server.pathhost);
+    pathhosts_fixup(&mut cfg.server.commonpath);
 
     // If user or group was set
     resolve_user_group(&mut cfg)?;
@@ -220,6 +224,18 @@ pub fn set_config(mut cfg: Config) -> Arc<Config> {
     *CONFIG.write() = Some(Arc::new(cfg));
 
     get_config()
+}
+
+// Any elements separated by '!' get split into sub-elements, and reversed.
+// This way a setting like "pathhost clustername!hostname" works as expected.
+fn pathhosts_fixup(path: &mut Vec<String>) {
+    let mut newpath = Vec::new();
+    for elem in path.iter() {
+        let mut elems = elem.split("!").map(|e| e.to_string()).collect::<Vec<_>>();
+        elems.reverse();
+        newpath.extend(elems);
+    }
+    *path = newpath;
 }
 
 // lookup user and group.
