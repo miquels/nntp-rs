@@ -161,12 +161,14 @@ impl NntpServer {
         }
 
         // save final stats.
-        self.stats.on_disconnect();
+        if !self.thispeer().xclient {
+            self.stats.on_disconnect();
+        }
     }
 
     // Initial connect. Here we decide if we want to accept this
     // connection, or refuse it.
-    async fn on_connect(&mut self) -> Result<NntpResult, NntpResult> {
+    pub(crate) async fn on_connect(&mut self) -> Result<NntpResult, NntpResult> {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
@@ -177,6 +179,13 @@ impl NntpServer {
             Some(x) => x,
         };
         self.peer_idx = idx;
+
+        if peer.xclient {
+            self.parser.remove_cap(Capb::Basic);
+            self.parser.add_cap(Capb::XClient);
+            let msg = format!("200 {} XCLIENT mode", self.config.server.hostname);
+            return Ok(NntpResult::text(msg));
+        }
 
         let count = self.server.add_connection(&peer.label);
         self.active = true;
@@ -384,6 +393,9 @@ impl NntpServer {
             },
             Cmd::Takethis => {
                 return self.cmd_takethis(args).await;
+            },
+            Cmd::XClient => {
+                return self.cmd_xclient(args).await;
             },
             _ => {},
         }

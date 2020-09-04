@@ -212,6 +212,7 @@ pub fn set_config(mut cfg: Config) -> Arc<Config> {
         // replace the NEWSFEEDS config.
         feeds.init_hostcache();
         feeds.check_self(&cfg);
+        feeds.setup_xclient();
         *NEWSFEEDS.write() = Some(Arc::new(feeds));
     }
 

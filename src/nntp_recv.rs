@@ -5,6 +5,7 @@
 use std;
 use std::io;
 use std::mem;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
@@ -102,6 +103,22 @@ impl NntpServer {
             ArtAccept::Defer | ArtAccept::Reject => 439,
         };
         Ok(NntpResult::text(&format!("{} {}", code, art.msgid)))
+    }
+
+    pub(crate) async fn cmd_xclient(&mut self, args: Vec<&str>) -> io::Result<NntpResult> {
+        let remote_ip = match args[0].parse::<IpAddr>() {
+            Ok(remote) => remote,
+            Err(_) => return Ok(NntpResult::text("501 invalid ip-address")),
+        };
+        self.remote = SocketAddr::new(remote_ip, 119);
+        let reply = match self.on_connect().await {
+            Ok(msg) => msg,
+            Err(msg) => {
+                self.quit = true;
+                msg
+            }
+        };
+        Ok(reply)
     }
 
     pub(crate) async fn reject_art(

@@ -13,23 +13,25 @@ use crate::util::Buffer;
 pub enum Capb {
     Never           = 0x00000,
     Always          = 0x00001,
-    Authinfo        = 0x00002,
-    Hdr             = 0x00004,
-    Ihave           = 0x00008,
-    NewNews         = 0x00010,
-    Over            = 0x00020,
-    Post            = 0x00040,
-    Reader          = 0x00080,
-    Sasl            = 0x00100,
-    StartTls        = 0x00200,
-    Streaming       = 0x00400,
-    Version         = 0x00800,
-    ListActive      = 0x01000,
-    ListActiveTimes = 0x02000,
-    ListDistribPats = 0x04000,
-    ModeHeadfeed    = 0x08000,
-    ModeReader      = 0x10000,
-    ModeStream      = 0x20000,
+    Basic           = 0x00002,
+    Authinfo        = 0x00004,
+    Hdr             = 0x00008,
+    Ihave           = 0x00010,
+    NewNews         = 0x00020,
+    Over            = 0x00040,
+    Post            = 0x00080,
+    Reader          = 0x00100,
+    Sasl            = 0x00200,
+    StartTls        = 0x00400,
+    Streaming       = 0x00800,
+    Version         = 0x01000,
+    ListActive      = 0x02000,
+    ListActiveTimes = 0x04000,
+    ListDistribPats = 0x08000,
+    ModeHeadfeed    = 0x10000,
+    ModeReader      = 0x20000,
+    ModeStream      = 0x40000,
+    XClient         = 0x80000,
 }
 
 #[derive(Debug)]
@@ -82,17 +84,17 @@ macro_rules! cmd {
 
 // And here it is actually generated.
 cmd! {
-    ( "article",            Article,            0, 1, Capb::Always,          "[%M]" ),
+    ( "article",            Article,            0, 1, Capb::Basic,           "[%M]" ),
     ( "authinfo user",      Authinfo_User,      2, 2, Capb::Authinfo,        "name" ),
     ( "authinfo pass",      Authinfo_Pass,      2, 2, Capb::Authinfo,        "password" ),
     ( "authinfo",           Authinfo,           1, 0, Capb::Never   ,        "" ),
-    ( "body",               Body,               0, 1, Capb::Always,          "[%M]" ),
+    ( "body",               Body,               0, 1, Capb::Basic,           "[%M]" ),
     ( "capabilities",       Capabilities,       0, 1, Capb::Always,          "[keyword]" ),
     ( "check",              Check,              1, 1, Capb::Streaming,       "%m" ),
     ( "date",               Date,               0, 0, Capb::Always,          "" ),
     ( "group",              Group,              1, 1, Capb::Reader,          "newsgroup" ),
     ( "hdr",                Hdr ,               3, 3, Capb::Hdr,             "[%R]" ),
-    ( "head",               Head,               0, 1, Capb::Always,          "[%M]" ),
+    ( "head",               Head,               0, 1, Capb::Basic,           "[%M]" ),
     ( "help",               Help,               0, 0, Capb::Always,          "" ),
     ( "ihave",              Ihave,              1, 1, Capb::Ihave,           "%m" ),
     ( "last",               Last,               0, 0, Capb::Reader,          "" ),
@@ -109,13 +111,14 @@ cmd! {
     ( "mode stream",        Mode_Stream,        0, 0, Capb::Streaming,       "" ),
     ( "mode",               Mode,               1, 0, Capb::Never,           "" ),
     ( "newgroups",          NewGroups,          1, 4, Capb::Reader,          "[yy]yymmdd hhmmss [GMT]" ),
-    ( "newnews",            NewNews,            1, 5, Capb::NewNews,         " %w [yy]yymmdd <hhmmss> [GMT]" ),
+    ( "newnews",            NewNews,            1, 5, Capb::NewNews,         "%w [yy]yymmdd <hhmmss> [GMT]" ),
     ( "next",               Next,               0, 0, Capb::Reader,          "" ),
     ( "over",               Over,               0, 1, Capb::Over,            "[%r]" ),
     ( "post",               Post,               0, 0, Capb::Post,            "" ),
     ( "quit",               Quit,               0, 0, Capb::Always,          "" ),
-    ( "stat",               Stat,               0, 1, Capb::Always,          "[%M]" ),
+    ( "stat",               Stat,               0, 1, Capb::Basic,           "[%M]" ),
     ( "takethis",           Takethis,           1, 1, Capb::Streaming,       "%m" ),
+    ( "xclient",            XClient ,           1, 1, Capb::XClient,         "%i" ),
     ( "xhdr",               XHdr ,              3, 3, Capb::Hdr,             "[%R]" ),
     ( "xover",              XOver,              0, 1, Capb::Over,            "[%r]" ),
     ( "xpat",               XPat,               3, 0, Capb::Hdr,             "header %R pattern [pattern..]" )
@@ -156,7 +159,7 @@ impl CmdParser {
     /// Return a fresh Cmd.
     pub fn new() -> CmdParser {
         CmdParser {
-            caps:       Capb::Always as usize,
+            caps:       Capb::Always as usize | Capb::Basic as usize,
             cmd_map:    &*CMD_MAP,
             keyword_re: Regex::new("^[A-Za-z][A-Za-z0-9.-]{2,}$").unwrap(),
         }
@@ -248,6 +251,7 @@ impl CmdParser {
                 continue;
             }
             let mut s = cmd.h.replace("%w", "wildmat");
+            s = s.replace("%i", "IP-address");
             s = s.replace("%m", "message-ID");
             s = s.replace("%r", "range");
             if (self.caps & Capb::Reader as usize) > 0 {

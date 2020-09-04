@@ -117,7 +117,7 @@ impl<'de> Deserialize<'de> for Labels {
                             set_default_newspeer(peer);
                         },
                         // old xs4all legacy.
-                        "%XCLIENT" => {},
+                        /*"%XCLIENT" => {},*/
                         // filters
                         "IFILTER" => this.ifilter = Some(peer),
                         "ISPAM" => this.ispam = Some(peer),
