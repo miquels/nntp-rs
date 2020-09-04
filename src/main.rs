@@ -66,6 +66,12 @@ pub enum Command {
     #[structopt(display_order = 8)]
     /// Generate a test article and send it out.
     TestArticle(TestArticleOpts),
+    #[structopt(display_order = 9)]
+    /// Dump the main configuration.
+    DumpConfig,
+    #[structopt(display_order = 10)]
+    /// Dump the newsfeeds configuration.
+    DumpNewsfeeds,
 }
 
 #[derive(StructOpt, Debug)]
@@ -187,6 +193,7 @@ fn main() -> Result<()> {
     // first read the config file.
     let load_newsfeeds = match opts.cmd {
         Command::Serve(_) => true,
+        Command::DumpNewsfeeds => true,
         _ => false,
     };
     let config = match config::read_config(&opts.config, load_newsfeeds) {
@@ -322,6 +329,8 @@ fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -
             Command::SpoolRead(opts) => spool_read(config.unwrap(), opts).await,
             Command::SpoolExpire(opts) => spool_expire(config.unwrap(), opts).await,
             Command::TestArticle(opts) => test_article(opts).await,
+            Command::DumpConfig => dump_config(config.unwrap()),
+            Command::DumpNewsfeeds => dump_newsfeeds(),
         }
     });
 
@@ -566,3 +575,14 @@ fn handle_panic() {
         }
     }));
 }
+
+fn dump_config(config: &config::Config) -> Result<()> {
+    println!("{:#?}", config);
+    Ok(())
+}
+
+fn dump_newsfeeds() -> Result<()> {
+    println!("{:#?}", config::get_newsfeeds());
+    Ok(())
+}
+
