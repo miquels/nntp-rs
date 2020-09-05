@@ -477,8 +477,7 @@ impl DSpool {
                 writer.dir = dir;
             }
 
-            let start = writer.file;
-            for _ in start..4095 {
+            for _ in 0..32768 {
                 // get spoolfile name.
                 let mut name = path.clone();
                 name.push(format!("B.{:04x}", writer.file));
@@ -489,7 +488,10 @@ impl DSpool {
                     // we left off (can happen after a reload/restart).
                     Ok(_) => {
                         if !re_open {
-                            writer.file = (writer.file + 1) & 0x7fff;
+                            // Limit to 2^15, it seems that the original diablo code also
+                            // does that in some places (but not everywhere...). also
+                            // make sure never to generate 0xffff or 0x0000.
+                            writer.file = writer.file.wrapping_add(1) & 0x7fff;
                             if writer.file == 0 {
                                 writer.file = 1;
                             }

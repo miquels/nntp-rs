@@ -44,34 +44,20 @@ A list in no particular order.
 - might be worth it to keep peerfeeds on the multisingle runtime,
   but run readers on the threaded runtime? Need socket handoff
   from multisingle to threaded somehow.
+- refactor xclient support.
 
 ### Outgoing
 - don't start outgoing feed (or queue!) until first article
 - close feed itself after idle?
+- keep "average pending" stats and log actual avpend instead of "1"
 
 ### Stats
 - keep global stats per peer
 - make available through http, maybe prometheus format as well
 - html stats page?
 
-
-  + ENOSPC: 
 ### Feed
 - welcome message
-
-### Incoming
-- might be worth it to keep peerfeeds on the multisingle runtime,
-  but run readers on the threaded runtime? Need socket handoff
-  from multisingle to threaded somehow.
-
-### Outgoing
-- don't start outgoing feed (or queue!) until first article
-- close feed itself after idle?
-
-### Stats
-- keep global stats per peer
-- make available through http, maybe prometheus format as well
-- html stats page?
 
 ### Logger
 - for syslog logging, do not re-initialize the syslogger every log line.
