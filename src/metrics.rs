@@ -755,7 +755,7 @@ macro_rules! prom_metrics {
                 // Then, for each metric, add the stats for this peer.
                 $(
                     let metric = metrics.entry(stringify!($metric)).or_insert_with(|| {
-                        PromMetric::new(stringify!($metric).to_string(), $type, $help)
+                        PromMetric::new(stringify!($metric), $help, $type)
                     });
                     let value = stats.$mfield.load(Ordering::Acquire);
                     metric.add_value(labels.clone(), value, None);
@@ -821,15 +821,15 @@ impl PromLabels {
 }
 
 struct PromMetric {
-    ptype:  String,
     name:   &'static str,
     help:   &'static str,
+    ptype:  &'static str,
     values: Vec<(u64, PromLabels, Option<UnixTime>)>,
 }
 
 impl PromMetric {
-    fn new(ptype: String, name: &'static str, help: &'static str) -> PromMetric {
-        PromMetric{ ptype, name, help, values: Vec::new() }
+    fn new(name: &'static str, help: &'static str, ptype: &'static str) -> PromMetric {
+        PromMetric{ name, help, ptype, values: Vec::new() }
     }
 
     fn add_value(&mut self, labels: PromLabels, mut value: u64, timestamp: Option<UnixTime>) {

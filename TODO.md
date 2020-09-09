@@ -52,9 +52,7 @@ A list in no particular order.
 - keep "average pending" stats and log actual avpend instead of "1"
 
 ### Stats
-- keep global stats per peer
-- make available through http, maybe prometheus format as well
-- html stats page?
+- http access ?
 
 ### Feed
 - welcome message
@@ -95,3 +93,7 @@ DONE:
 
 ### Outgoing
 - connections: close after timeout (1 mins)
+
+### Stats
+- keep global stats per peer
+- maybe prometheus format as well
