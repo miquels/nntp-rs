@@ -119,6 +119,8 @@ pub struct CfgFiles {
 pub struct Logging {
     pub general:        Option<String>,
     pub incoming:       Option<String>,
+    pub metrics:        Option<String>,
+    pub prometheus:     Option<String>,
 }
 
 /// Histfile config table in Toml config file.
@@ -187,6 +189,11 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     // Fix up pathhost and commonpath.
     pathhosts_fixup(&mut cfg.server.pathhost);
     pathhosts_fixup(&mut cfg.server.commonpath);
+
+    // metrics must be set if prometheus is set.
+    if cfg.logging.prometheus.is_some() && cfg.logging.metrics.is_none() {
+        return Err(ioerr!(InvalidData, "log: metrics cannot be empty if prometheus is set"));
+    }
 
     // If user or group was set
     resolve_user_group(&mut cfg)?;

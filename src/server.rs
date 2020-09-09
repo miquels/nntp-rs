@@ -15,7 +15,7 @@ use tokio::task;
 
 use crate::bus::{self, Notification};
 use crate::config::{self, MultiSingle};
-use crate::metrics::RxSessionStats;
+use crate::metrics::{self, RxSessionStats};
 use crate::dns::HostCache;
 use crate::history::History;
 use crate::logger;
@@ -53,6 +53,10 @@ impl Server {
             HostCache::start(bus_recv.clone())
                 .await
                 .map_err(|e| ioerr!(Other, "initializing trust dns resolver: {}", e))?;
+
+            // Start the periodic stats saver.
+            metrics::load().await?;
+            metrics::metrics_task(bus_recv.clone()).await;
 
             // Start the outgoing feed.
             let (mut master, master_chan) = MasterFeed::new(bus_recv.clone(), spool.clone()).await;

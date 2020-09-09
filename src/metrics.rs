@@ -1,16 +1,24 @@
 //! Diagnostics, statistics and telemetry.
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::default::Default;
+use std::io;
+use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
+use serde::{Serialize, Deserialize};
+use tokio::time::delay_for;
 
 use crate::article::Article;
+use crate::bus::{self, Notification};
+use crate::config;
 use crate::dns;
 use crate::errors::ArtError;
 
@@ -18,8 +26,12 @@ use crate::errors::ArtError;
 const MARK_AFTER_OFFERED_N: u64 = 1000;
 
 // Global per-peer stats.
-static PEER_RECV_STATS: Lazy<Mutex<HashMap<String, Arc<PeerRecvStats>>>> = Lazy::new(Default::default);
-static PEER_SENT_STATS: Lazy<Mutex<HashMap<String, Arc<PeerSentStats>>>> = Lazy::new(Default::default);
+#[derive(Default, Debug, Serialize, Deserialize)]
+struct PeerStats {
+    recv: HashMap<String, Arc<PeerRecvStats>>,
+    sent: HashMap<String, Arc<PeerSentStats>>,
+}
+static PEER_STATS: Lazy<RwLock<PeerStats>> = Lazy::new(Default::default);
 
 //
 // A macro to generate the `Stats` enum and the `ConnRecvStats` and `PeerRecvStats` structs.
@@ -45,11 +57,13 @@ macro_rules! recv_stats {
             )*
         }
         /// Metrics per peer (all connections), persistent.
-        #[derive(Default, Debug)]
+        #[derive(Default, Debug, Serialize, Deserialize)]
+        #[serde(default)]
         pub struct PeerRecvStats {
             $(
                 $struct_field: AtomicU64,
             )*
+            connections:    AtomicU64,
         }
         /// Add a value to a metric.
         fn stats_add(this: &mut RxSessionStats, metric: Stats, count: u64) {
@@ -120,25 +134,21 @@ pub struct RxSessionStats {
     ipaddr:     String,
     label:      String,
     fdno:       u32,
+    connected:  bool,
     // stats
     instant:    Instant,
     pub conn_stats: ConnRecvStats,
     pub peer_stats: Arc<PeerRecvStats>,
 }
 
-impl Default for RxSessionStats {
-    fn default() -> RxSessionStats {
-        RxSessionStats {
-            hostname: String::new(),
-            ipaddr:   String::new(),
-            label:    String::new(),
-            fdno:     0,
-            instant:  Instant::now(),
-            conn_stats: ConnRecvStats::default(),
-            peer_stats: Arc::new(PeerRecvStats::default()),
+impl Drop for RxSessionStats {
+    fn drop(&mut self) {
+        if self.connected {
+            self.peer_stats.connections.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
+
 
 impl RxSessionStats {
     pub fn new(ipaddr: std::net::SocketAddr, fdno: u32) -> RxSessionStats {
@@ -147,7 +157,10 @@ impl RxSessionStats {
             ipaddr: ipaddr.to_string(),
             label: "unknown".to_string(),
             fdno: fdno,
-            ..RxSessionStats::default()
+            connected: false,
+            instant:  Instant::now(),
+            conn_stats: ConnRecvStats::default(),
+            peer_stats: Arc::new(PeerRecvStats::default()),
         }
     }
 
@@ -195,12 +208,17 @@ impl RxSessionStats {
             Err(_) => None,
         };
         let peer_stats = {
-            let mut stats = PEER_RECV_STATS.lock();
-            stats.entry(label.clone()).or_insert_with(|| Arc::new(PeerRecvStats::default())).clone()
+            let mut stats = PEER_STATS.write();
+            stats.recv.entry(label.clone()).or_insert_with(|| Arc::new(PeerRecvStats::default())).clone()
         };
         self.hostname = host.unwrap_or(ipaddr_str);
         self.label = label;
         self.peer_stats = peer_stats;
+        if !self.connected {
+            // on_connect might be called twice in the XCLIENT case.
+            self.connected = true;
+            self.peer_stats.connections.fetch_add(1, Ordering::SeqCst);
+        }
         log::info!(
             "Connection {} from {} {} [{}]",
             self.fdno,
@@ -366,7 +384,8 @@ struct ConnSentStats {
     not_found: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PeerSentStats {
     offered: AtomicU64,
     accepted: AtomicU64,
@@ -378,6 +397,7 @@ pub struct PeerSentStats {
     deferred_bytes: AtomicU64,
     deferred_fail: AtomicU64,
     not_found: AtomicU64,
+    connections:    AtomicU64,
 }
 
 macro_rules! stats_add {
@@ -394,6 +414,7 @@ pub struct TxSessionStats {
     id:          u64,
     start:       Instant,
     mark:        Instant,
+    connected:  bool,
     // stats
     conn_stats:  ConnSentStats,
     delta_stats: ConnSentStats,
@@ -407,6 +428,7 @@ impl Default for TxSessionStats {
             id:    0,
             start: Instant::now(),
             mark:  Instant::now(),
+            connected: false,
             conn_stats: ConnSentStats::default(),
             delta_stats: ConnSentStats::default(),
             peer_stats: Arc::new(PeerSentStats::default()),
@@ -414,17 +436,27 @@ impl Default for TxSessionStats {
     }
 }
 
+impl Drop for TxSessionStats {
+    fn drop(&mut self) {
+        if self.connected {
+            self.peer_stats.connections.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
 impl TxSessionStats {
     pub fn on_connect(&mut self, label: &str, id: u64, outhost: &str, ipaddr: IpAddr, line: &str) {
         let peer_stats = {
-            let mut stats = PEER_SENT_STATS.lock();
-            stats.entry(label.to_string()).or_insert_with(|| Arc::new(PeerSentStats::default())).clone()
+            let mut stats = PEER_STATS.write();
+            stats.sent.entry(label.to_string()).or_insert_with(|| Arc::new(PeerSentStats::default())).clone()
         };
         self.label = label.to_string();
         self.id = id;
         self.start = Instant::now();
         self.mark = Instant::now();
+        self.connected = true;
         self.peer_stats = peer_stats;
+        self.peer_stats.connections.fetch_add(1, Ordering::SeqCst);
         log::info!("Feed {}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
     }
 
@@ -589,5 +621,97 @@ fn format_secs(ms: u64) -> String {
     } else {
         format!("{}", ms / 1000)
     }
+}
+
+pub async fn load() -> io::Result<()> {
+
+    // load file data.
+    let config = config::get_config();
+    let filename = match config.logging.metrics.as_ref() {
+        Some(filename) => filename,
+        None => return Ok(()),
+    };
+    let mut path = PathBuf::from(&config.paths.db);
+    path.push(filename);
+    let json = match tokio::fs::read_to_string(&path).await {
+        Ok(json) => json,
+        Err(e) => {
+            if e.kind() == io::ErrorKind::NotFound {
+                log::info!("metrics: no existing metrics file found, starting empty");
+                return Ok(());
+            }
+            return Err(ioerr!(e.kind(), "metrics: {:?}: {}", path, e));
+        },
+    };
+
+    // deserialize json.
+    let data: PeerStats = serde_json::from_str(&json).map_err(|e| {
+        ioerr!(InvalidData, "metrics: {:?}: could not deserialize JSON data: {}", path, e)
+    })?;
+
+    // save into global.
+    *PEER_STATS.write() = data;
+
+    Ok(())
+}
+
+/// Save metrics to disk.
+///
+/// Returns the hash of the json text. If a hash value is passed in,
+/// and the generated json text has the same hash, the file is
+/// considered not to have changed and consequently, not written.
+pub async fn save(hash: Option<u64>) -> io::Result<u64> {
+    let config = config::get_config();
+    let filename = match config.logging.metrics.as_ref() {
+        Some(filename) => filename,
+        None => return Ok(0),
+    };
+    let mut path = PathBuf::from(&config.paths.db);
+    path.push(filename);
+    let text = serde_json::to_string(&*PEER_STATS.read()).unwrap();
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let newhash = hasher.finish();
+    if hash != Some(newhash) {
+        tokio::fs::write(&path, text).await.map_err(|e| ioerr!(e.kind(), "metrics: {:?}: {}", path, e))?;
+    }
+    Ok(newhash)
+}
+
+/// Start a task to write the metrics to disk periodically (once every minute).
+pub async fn metrics_task(mut bus_recv: bus::Receiver) {
+    tokio::spawn(async move {
+        let mut error = false;
+        let mut hash = None;
+        loop {
+            tokio::select! {
+                _ = delay_for(Duration::from_secs(60)) => {
+                    match save(hash).await {
+                        Ok(val) => {
+                            if error {
+                                log::info!("metrics: save: ok");
+                                error = false;
+                            }
+                            hash = Some(val);
+                        },
+                        Err(e) => {
+                            if !error {
+                                log::error!("{}", e);
+                                error = true;
+                            }
+                        },
+                    }
+                }
+                item = bus_recv.recv() => {
+                    match item {
+                        Some(Notification::ExitGraceful) => break,
+                        Some(Notification::ExitNow) => break,
+                        Some(_) => {},
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
 }
 
