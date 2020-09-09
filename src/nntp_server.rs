@@ -172,7 +172,7 @@ impl NntpServer {
         let remote = self.remote.ip();
         let (idx, peer) = match self.newsfeeds.find_peer(&remote) {
             None => {
-                log::info!("Connection {} from {} (no permission)", self.stats.fdno, remote);
+                log::info!("Connection {} from {} (no permission)", self.stats.fdno(), remote);
                 let msg = format!("502 permission denied to {}", remote);
                 return Err(NntpResult::text(msg));
             },
@@ -225,16 +225,16 @@ impl NntpServer {
         if err.kind() == io::ErrorKind::NotFound {
             log::info!(
                 "Forcibly closed connection {} from {} {}",
-                stats.fdno,
-                stats.hostname,
-                stats.ipaddr
+                stats.fdno(),
+                stats.hostname(),
+                stats.ipaddr()
             );
         } else {
             log::info!(
                 "Write error on connection {} from {} {}: {}",
-                stats.fdno,
-                stats.hostname,
-                stats.ipaddr,
+                stats.fdno(),
+                stats.hostname(),
+                stats.ipaddr(),
                 err
             );
         }
@@ -247,16 +247,16 @@ impl NntpServer {
         if err.kind() == io::ErrorKind::NotFound {
             log::info!(
                 "Forcibly closed connection {} from {} {}",
-                stats.fdno,
-                stats.hostname,
-                stats.ipaddr
+                stats.fdno(),
+                stats.hostname(),
+                stats.ipaddr()
             );
         } else {
             log::info!(
                 "Read error on connection {} from {} {}: {}",
-                stats.fdno,
-                stats.hostname,
-                stats.ipaddr,
+                stats.fdno(),
+                stats.hostname(),
+                stats.ipaddr(),
                 err
             );
         }
@@ -273,9 +273,9 @@ impl NntpServer {
         let stats = &self.stats;
         log::info!(
             "Error on connection {} from {} {}: {}",
-            stats.fdno,
-            stats.hostname,
-            stats.ipaddr,
+            stats.fdno(),
+            stats.hostname(),
+            stats.ipaddr(),
             err
         );
     }

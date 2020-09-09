@@ -276,14 +276,7 @@ impl Server {
                 .read_timeout(nntp_codec::READ_TIMEOUT)
                 .write_timeout(nntp_codec::WRITE_TIMEOUT)
                 .build();
-
-            let stats = SessionStats {
-                hostname: peer.to_string(),
-                ipaddr: peer.to_string(),
-                label: "unknown".to_string(),
-                fdno: fdno,
-                ..SessionStats::default()
-            };
+            let stats = SessionStats::new(peer, fdno);
 
             // build and run an nntp session.
             let session = NntpServer::new(peer, codec, self.clone(), stats);

@@ -1,8 +1,14 @@
 //! Diagnostics, statistics and telemetry.
 
+use std::collections::HashMap;
 use std::default::Default;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
 use crate::article::Article;
 use crate::dns;
@@ -11,64 +17,113 @@ use crate::errors::ArtError;
 // After how many articles sent a stats update should be logged.
 const MARK_AFTER_OFFERED_N: u64 = 1000;
 
-#[repr(usize)]
-#[rustfmt::skip]
-pub enum Stats {
-    Offered,            // offered (ihave/check)
-    Accepted,           // accepted
-    AcceptedBytes,
-    Received,           // received
-    ReceivedBytes,
-    Refused,            // refused
-    RefHistory,         // ref, in history
-    RefPreCommit,       // ref, offered by another host
-    RefPostCommit,      // ref, in history cache
-    RefBadMsgId,        // ref, bad msgid
-    RefIfiltHash,       // ref, by IFILTER hash
-    Ihave,              // ihave
-    Check,              // check
-    Takethis,           // takethis
-    Control,            // control message
-    Rejected,           // rejected
-    RejectedBytes,
-    RejFailsafe,        // rej, failsafe
-    RejMissHdrs,        // rej, missing headers
-    RejTooOld,          // rej, too old
-    RejGrpFilter,       // rej, incoming grp filter
-    RejIntSpamFilter,   // rej, internal spam filter
-    RejExtSpamFilter,   // rej, external spam filter
-    RejIncFilter,       // rej, incoming filter
-    RejNoSpool,         // rej, no spool object
-    RejIOError,         // rej, io error
-    RejNotInActv,       // rej, not in active file
-    RejPathTab,         // rej, TAB in Path: header
-    RejNgTab,           // rej, TAB in Newsgroups: hdr
-    RejPosDup,          // rej, dup detected after receive
-    RejHdrError,        // rej, dup or missing headers
-    RejTooSmall,        // rej, article too small
-    RejArtIncompl,      // rej, article incomplete
-    RejArtNul,          // rej, article has a nul
-    RejNoBytes,         // rej, header only, no Bytes:
-    RejProtoErr,        // rej, protocol error
-    RejMsgIdMis,        // rej, msgid mismatch
-    RejErr,             // rej, unknown error
-    RejTooBig,          // rej, too big
-    RejBigHeader,       // header too big
-    RejNoHdrEnd,        // header too big
-    RejBareCR,          // article has a CR without LF
-    NumSlots,
+// Global per-peer stats.
+static PEER_RECV_STATS: Lazy<Mutex<HashMap<String, Arc<PeerRecvStats>>>> = Lazy::new(Default::default);
+static PEER_SENT_STATS: Lazy<Mutex<HashMap<String, Arc<PeerSentStats>>>> = Lazy::new(Default::default);
+
+//
+// A macro to generate the `Stats` enum and the `ConnRecvStats` and `PeerRecvStats` structs.
+// Also generates helper functions that map the Stats enum to the struct fields.
+//
+macro_rules! recv_stats {
+    (@IF_COMMON X, $block:tt) => {};
+    (@IF_COMMON $common_field:ident, $block:tt) => { $block };
+
+    ($([ $enum_field:ident, $common_field:ident, $struct_field:ident ],)*) => {
+        /// All the metrics that we maintain, per incoming feed.
+        #[derive(Debug)]
+        pub enum Stats {
+            $(
+                $enum_field,
+            )*
+        }
+        /// Metrics per connection, non persistent.
+        #[derive(Default, Debug)]
+        pub struct ConnRecvStats {
+            $(
+                $struct_field: u64,
+            )*
+        }
+        /// Metrics per peer (all connections), persistent.
+        #[derive(Default, Debug)]
+        pub struct PeerRecvStats {
+            $(
+                $struct_field: AtomicU64,
+            )*
+        }
+        /// Add a value to a metric.
+        fn stats_add(this: &mut SessionStats, metric: Stats, count: u64) {
+            match metric {
+                $(
+                    Stats::$enum_field => {
+                        this.conn_stats.$struct_field = this.conn_stats.$struct_field.wrapping_add(count);
+                        this.peer_stats.$struct_field.fetch_add(count, Ordering::AcqRel);
+                        recv_stats!(@IF_COMMON $common_field, {
+                            this.conn_stats.$common_field = this.conn_stats.$common_field.wrapping_add(count);
+                            this.peer_stats.$common_field.fetch_add(count, Ordering::AcqRel);
+                        });
+                    },
+                )*
+            }
+        }
+    }
 }
 
-#[rustfmt::skip]
+recv_stats! {
+    [   Offered,            X,          offered                     ], // offered (ihave/check)
+    [   Accepted,           X,          accepted                    ], // accepted
+    [   AcceptedBytes,      X,          accepted_bytes              ],
+    [   Received,           X,          received                    ], // received
+    [   ReceivedBytes,      X,          received_bytes              ],
+    [   Refused,            X,          refused                     ], // refused
+    [   RefHistory,         refused,    refused_history             ], // ref, in history
+    [   RefPreCommit,       refused,    refused_precommit           ], // ref, offered by another host
+    [   RefPostCommit,      refused,    refused_postcommit          ], // ref, in history cache
+    [   RefBadMsgId,        refused,    refused_bad_msgid           ], // ref, bad msgid
+    [   RefIfiltHash,       refused,    refused_ifilter_hash        ], // ref, by IFILTER hash
+    [   Ihave,              X,          ihave                       ], // ihave
+    [   Check,              X,          check                       ], // check
+    [   Takethis,           X,          takethis                    ], // takethis
+    [   Control,            X,          control                     ], // control message
+    [   Rejected,           X,          rejected                    ], // rejected
+    [   RejectedBytes,      X,          rejected_bytes              ],
+    [   RejFailsafe,        rejected,   rejected_failsafe           ], // rej, failsafe
+    [   RejMissHdrs,        rejected,   rejected_missing_headers    ], // rej, missing headers
+    [   RejTooOld,          rejected,   rejected_too_old            ], // rej, too old
+    [   RejGrpFilter,       rejected,   rejected_group_filter       ], // rej, incoming grp filter
+    [   RejIntSpamFilter,   rejected,   rejected_ispam              ], // rej, internal spam filter
+    [   RejExtSpamFilter,   rejected,   rejected_espam              ], // rej, external spam filter
+    [   RejIncFilter,       rejected,   rejected_ifilter            ], // rej, incoming filter
+    [   RejNoSpool,         rejected,   rejected_no_spool           ], // rej, no spool object
+    [   RejIOError,         rejected,   rejected_io_error           ], // rej, io error
+    [   RejNotInActv,       rejected,   rejected_not_in_active      ], // rej, not in active file
+    [   RejPathTab,         rejected,   rejected_tab_in_path        ], // rej, TAB in Path: header
+    [   RejNgTab,           rejected,   rejected_tab_in_newsgroups  ], // rej, TAB in Newsgroups: hdr
+    [   RejPosDup,          rejected,   rejected_post_dup           ], // rej, dup detected after receive
+    [   RejHdrError,        rejected,   rejected_bad_header         ], // rej, dup or missing headers
+    [   RejTooSmall,        rejected,   rejected_art_too_small      ], // rej, article too small
+    [   RejArtIncompl,      rejected,   rejected_art_incomplete     ], // rej, article incomplete
+    [   RejArtNul,          rejected,   rejected_art_has_nul        ], // rej, article has a nul
+    [   RejNoBytes,         rejected,   rejected_no_bytes_header    ], // rej, header only, no Bytes:
+    [   RejProtoErr,        rejected,   rejected_protocol_error     ], // rej, protocol error
+    [   RejMsgIdMis,        rejected,   rejected_msgid_mismatch     ], // rej, msgid mismatch
+    [   RejErr,             rejected,   rejected_error              ], // rej, unknown error
+    [   RejTooBig,          rejected,   rejected_art_too_big        ], // rej, too big
+    [   RejBigHeader,       rejected,   rejected_hdr_too_big        ], // header too big
+    [   RejNoHdrEnd,        rejected,   rejected_no_hdr_end         ], // header too big
+    [   RejBareCR,          rejected,   rejected_art_has_bare_cr    ], // article has a CR without LF
+}
+
 pub struct SessionStats {
     // identification.
-    pub hostname:   String,
-    pub ipaddr:     String,
-    pub label:      String,
-    pub fdno:       u32,
-    pub instant:     Instant,
+    hostname:   String,
+    ipaddr:     String,
+    label:      String,
+    fdno:       u32,
     // stats
-    pub stats:      [u64; Stats::NumSlots as usize],
+    instant:    Instant,
+    pub conn_stats: ConnRecvStats,
+    pub peer_stats: Arc<PeerRecvStats>,
 }
 
 impl Default for SessionStats {
@@ -79,34 +134,52 @@ impl Default for SessionStats {
             label:    String::new(),
             fdno:     0,
             instant:  Instant::now(),
-            stats:    [0u64; Stats::NumSlots as usize],
+            conn_stats: ConnRecvStats::default(),
+            peer_stats: Arc::new(PeerRecvStats::default()),
         }
     }
 }
 
 impl SessionStats {
+    pub fn new(ipaddr: std::net::SocketAddr, fdno: u32) -> SessionStats {
+        SessionStats {
+            hostname: ipaddr.to_string(),
+            ipaddr: ipaddr.to_string(),
+            label: "unknown".to_string(),
+            fdno: fdno,
+            ..SessionStats::default()
+        }
+    }
+
+    pub fn hostname(&self) -> &str {
+        self.hostname.as_str()
+    }
+    pub fn ipaddr(&self) -> &str {
+        self.ipaddr.as_str()
+    }
+    pub fn label(&self) -> &str {
+        self.label.as_str()
+    }
+    pub fn fdno(&self) -> u32 {
+        self.fdno
+    }
+
     pub fn add(&mut self, field: Stats, count: u64) {
-        let n = field as usize;
-        if n >= Stats::RefHistory as usize && n <= Stats::RefIfiltHash as usize {
-            self.stats[Stats::Refused as usize] += count;
-        }
-        if n >= Stats::RejFailsafe as usize {
-            self.stats[Stats::Rejected as usize] += count;
-        }
-        self.stats[n] += count;
-        if self.stats[Stats::Received as usize] >= 1024 {
+        stats_add(self, field, count);
+        if self.conn_stats.received >= 1024 {
             self.log_stats();
         }
     }
 
     pub fn inc(&mut self, field: Stats) {
-        self.add(field, 1);
-        if self.stats[Stats::Received as usize] >= 1024 {
+        stats_add(self, field, 1);
+        if self.conn_stats.received >= 1024 {
             self.log_stats();
         }
     }
 
     pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
+
         let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
         let host = match dns::RESOLVER.reverse_lookup(ipaddr).await {
             Ok(m) => {
@@ -121,8 +194,13 @@ impl SessionStats {
             },
             Err(_) => None,
         };
+        let peer_stats = {
+            let mut stats = PEER_RECV_STATS.lock();
+            stats.entry(label.clone()).or_insert_with(|| Arc::new(PeerRecvStats::default())).clone()
+        };
         self.hostname = host.unwrap_or(ipaddr_str);
         self.label = label;
+        self.peer_stats = peer_stats;
         log::info!(
             "Connection {} from {} {} [{}]",
             self.fdno,
@@ -146,23 +224,21 @@ impl SessionStats {
 
     pub fn log_stats(&mut self) {
         self.log_mainstats();
-        if self.stats[Stats::Rejected as usize] > 0 {
+        if self.conn_stats.rejected > 0 {
             self.log_rejstats();
         }
 
-        // reset stats.
+        // reset connection stats.
         self.instant = Instant::now();
-        for i in 0..Stats::NumSlots as usize {
-            self.stats[i] = 0;
-        }
+        self.conn_stats = ConnRecvStats::default();
     }
 
     pub fn log_mainstats(&self) {
         // This calculation comes straight from diablo, not sure
         // why it is done this way.
-        let mut nuse = self.stats[Stats::Check as usize] + self.stats[Stats::Ihave as usize];
-        if nuse < self.stats[Stats::Received as usize] {
-            nuse = self.stats[Stats::Received as usize];
+        let mut nuse = self.conn_stats.check + self.conn_stats.ihave;
+        if nuse < self.conn_stats.received {
+            nuse = self.conn_stats.received;
         }
 
         let elapsed = self.instant.elapsed().as_millis() as u64;
@@ -171,24 +247,24 @@ impl SessionStats {
         log::info!("Stats {} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({})",
             self.fdno,
             (elapsed as f64) / 1000f64,
-            self.stats[Stats::Ihave as usize],
-            self.stats[Stats::Check as usize],
-            self.stats[Stats::Takethis as usize],
-            self.stats[Stats::Received as usize],
-            self.stats[Stats::Accepted as usize],
-            self.stats[Stats::Refused as usize],
-            self.stats[Stats::RefPreCommit as usize],
-            self.stats[Stats::RefPostCommit as usize],
-            self.stats[Stats::RefHistory as usize],
-            self.stats[Stats::RefBadMsgId as usize],
-            self.stats[Stats::RefIfiltHash as usize],
-            self.stats[Stats::Rejected as usize],
-            self.stats[Stats::Control as usize],
-            self.stats[Stats::RejIntSpamFilter as usize] + self.stats[Stats::RejExtSpamFilter as usize],
-            self.stats[Stats::RejErr as usize],
-            self.stats[Stats::ReceivedBytes as usize],
-            self.stats[Stats::AcceptedBytes as usize],
-            self.stats[Stats::RejectedBytes as usize],
+            self.conn_stats.ihave,
+            self.conn_stats.check,
+            self.conn_stats.takethis,
+            self.conn_stats.received,
+            self.conn_stats.accepted,
+            self.conn_stats.refused,
+            self.conn_stats.refused_precommit,
+            self.conn_stats.refused_postcommit,
+            self.conn_stats.refused_history,
+            self.conn_stats.refused_bad_msgid,
+            self.conn_stats.refused_ifilter_hash,
+            self.conn_stats.rejected,
+            self.conn_stats.control,
+            self.conn_stats.rejected_ispam + self.conn_stats.rejected_espam,
+            self.conn_stats.rejected_error,
+            self.conn_stats.received_bytes,
+            self.conn_stats.accepted_bytes,
+            self.conn_stats.rejected_bytes,
             rate,
         );
     }
@@ -196,32 +272,32 @@ impl SessionStats {
     pub fn log_rejstats(&self) {
         log::info!("Stats {} rejstats rej={} failsafe={} misshdrs={} tooold={} grpfilt={} intspamfilt={} extspamfilt={} incfilter={} nospool={} ioerr={} notinactv={} pathtab={} ngtab={} posdup={} hdrerr={} toosmall={} incompl={} nul={} nobytes={} proto={} msgidmis={} nohdrend={} bighdr={} barecr={} err={} toobig={}",
             self.fdno,
-            self.stats[Stats::Rejected as usize],
-            self.stats[Stats::RejFailsafe as usize],
-            self.stats[Stats::RejMissHdrs as usize],
-            self.stats[Stats::RejTooOld as usize],
-            self.stats[Stats::RejGrpFilter as usize],
-            self.stats[Stats::RejIntSpamFilter as usize],
-            self.stats[Stats::RejExtSpamFilter as usize],
-            self.stats[Stats::RejIncFilter as usize],
-            self.stats[Stats::RejNoSpool as usize],
-            self.stats[Stats::RejIOError as usize],
-            self.stats[Stats::RejNotInActv as usize],
-            self.stats[Stats::RejPathTab as usize],
-            self.stats[Stats::RejNgTab as usize],
-            self.stats[Stats::RejPosDup as usize],
-            self.stats[Stats::RejHdrError as usize],
-            self.stats[Stats::RejTooSmall as usize],
-            self.stats[Stats::RejArtIncompl as usize],
-            self.stats[Stats::RejArtNul as usize],
-            self.stats[Stats::RejNoBytes as usize],
-            self.stats[Stats::RejProtoErr as usize],
-            self.stats[Stats::RejMsgIdMis as usize],
-            self.stats[Stats::RejNoHdrEnd as usize],
-            self.stats[Stats::RejBigHeader as usize],
-            self.stats[Stats::RejBareCR as usize],
-            self.stats[Stats::RejErr as usize],
-            self.stats[Stats::RejTooBig as usize],
+            self.conn_stats.rejected,
+            self.conn_stats.rejected_failsafe,
+            self.conn_stats.rejected_missing_headers,
+            self.conn_stats.rejected_too_old,
+            self.conn_stats.rejected_group_filter,
+            self.conn_stats.rejected_ispam,
+            self.conn_stats.rejected_espam,
+            self.conn_stats.rejected_ifilter,
+            self.conn_stats.rejected_no_spool,
+            self.conn_stats.rejected_io_error,
+            self.conn_stats.rejected_not_in_active,
+            self.conn_stats.rejected_tab_in_path,
+            self.conn_stats.rejected_tab_in_newsgroups,
+            self.conn_stats.rejected_post_dup,
+            self.conn_stats.rejected_bad_header,
+            self.conn_stats.rejected_art_too_small,
+            self.conn_stats.rejected_art_incomplete,
+            self.conn_stats.rejected_art_has_nul,
+            self.conn_stats.rejected_no_bytes_header,
+            self.conn_stats.rejected_protocol_error,
+            self.conn_stats.rejected_msgid_mismatch,
+            self.conn_stats.rejected_no_hdr_end,
+            self.conn_stats.rejected_hdr_too_big,
+            self.conn_stats.rejected_art_has_bare_cr,
+            self.conn_stats.rejected_error,
+            self.conn_stats.rejected_art_too_big,
         );
     }
 
@@ -276,32 +352,52 @@ impl SessionStats {
     }
 }
 
-#[repr(usize)]
-#[rustfmt::skip]
-pub enum TxStats {
-    Offered,            // offered (ihave/check)
-    Accepted,           // accepted
-    AcceptedBytes,
-    Rejected,
-    RejectedBytes,
-    Refused,
-    Deferred,
-    DeferredBytes,
-    DeferredFail,
-    NotFound,
-    NumSlots,
+#[derive(Debug, Default)]
+struct ConnSentStats {
+    offered: u64,
+    accepted: u64,
+    accepted_bytes: u64,
+    rejected: u64,
+    rejected_bytes: u64,
+    refused: u64,
+    deferred: u64,
+    deferred_bytes: u64,
+    deferred_fail: u64,
+    not_found: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct PeerSentStats {
+    offered: AtomicU64,
+    accepted: AtomicU64,
+    accepted_bytes: AtomicU64,
+    rejected: AtomicU64,
+    rejected_bytes: AtomicU64,
+    refused: AtomicU64,
+    deferred: AtomicU64,
+    deferred_bytes: AtomicU64,
+    deferred_fail: AtomicU64,
+    not_found: AtomicU64,
+}
+
+macro_rules! stats_add {
+    ($self:expr, $count:expr, $field:ident) => {
+        $self.delta_stats.$field = $self.conn_stats.$field.wrapping_add($count);
+        $self.peer_stats.$field.fetch_add($count, Ordering::AcqRel);
+    }
 }
 
 #[rustfmt::skip]
 pub struct TxSessionStats {
     // identification.
-    pub label:      String,
-    pub id:         u64,
-    pub start:      Instant,
-    pub mark:       Instant,
+    label:       String,
+    id:          u64,
+    start:       Instant,
+    mark:        Instant,
     // stats
-    pub stats:      [u64; TxStats::NumSlots as usize],
-    pub total:      [u64; TxStats::NumSlots as usize],
+    conn_stats:  ConnSentStats,
+    delta_stats: ConnSentStats,
+    peer_stats:  Arc<PeerSentStats>,
 }
 
 impl Default for TxSessionStats {
@@ -311,27 +407,24 @@ impl Default for TxSessionStats {
             id:    0,
             start: Instant::now(),
             mark:  Instant::now(),
-            stats: [0u64; TxStats::NumSlots as usize],
-            total: [0u64; TxStats::NumSlots as usize],
+            conn_stats: ConnSentStats::default(),
+            delta_stats: ConnSentStats::default(),
+            peer_stats: Arc::new(PeerSentStats::default()),
         }
     }
 }
 
 impl TxSessionStats {
-    pub fn add(&mut self, field: TxStats, count: u64) {
-        let n = field as usize;
-        self.stats[n] += count;
-    }
-
-    pub fn inc(&mut self, field: TxStats) {
-        self.add(field, 1);
-    }
-
     pub fn on_connect(&mut self, label: &str, id: u64, outhost: &str, ipaddr: IpAddr, line: &str) {
+        let peer_stats = {
+            let mut stats = PEER_SENT_STATS.lock();
+            stats.entry(label.to_string()).or_insert_with(|| Arc::new(PeerSentStats::default())).clone()
+        };
         self.label = label.to_string();
         self.id = id;
         self.start = Instant::now();
         self.mark = Instant::now();
+        self.peer_stats = peer_stats;
         log::info!("Feed {}:{} connect: {} ({}/{})", label, id, line, outhost, ipaddr);
     }
 
@@ -340,14 +433,14 @@ impl TxSessionStats {
             "Feed {}:{} mark {}",
             self.label,
             self.id,
-            self.log_stats(self.mark, &self.stats)
+            self.log_stats(self.mark, &self.delta_stats)
         );
-        if self.stats[TxStats::Deferred as usize] > 0 || self.stats[TxStats::DeferredFail as usize] > 0 {
+        if self.delta_stats.deferred > 0 || self.delta_stats.deferred_fail > 0 {
             log::info!(
                 "Feed {}:{} mark {}",
                 self.label,
                 self.id,
-                self.log_defer(self.mark, &self.stats)
+                self.log_defer(self.mark, &self.delta_stats)
             );
         }
         self.update_total();
@@ -359,104 +452,110 @@ impl TxSessionStats {
             "Feed {}:{} final {}",
             self.label,
             self.id,
-            self.log_stats(self.start, &self.total)
+            self.log_stats(self.start, &self.conn_stats)
         );
-        if self.total[TxStats::Deferred as usize] > 0 || self.total[TxStats::DeferredFail as usize] > 0 {
+        if self.conn_stats.deferred > 0 || self.conn_stats.deferred_fail > 0 {
             log::info!(
                 "Feed {}:{} final {}",
                 self.label,
                 self.id,
-                self.log_defer(self.start, &self.total)
+                self.log_defer(self.start, &self.conn_stats)
             );
         }
     }
 
     fn update_total(&mut self) {
         self.mark = Instant::now();
-        for i in 0..TxStats::NumSlots as usize {
-            self.total[i] += self.stats[i];
-            self.stats[i] = 0;
-        }
+        self.conn_stats.offered += self.delta_stats.offered;
+        self.conn_stats.accepted += self.delta_stats.accepted;
+        self.conn_stats.accepted_bytes += self.delta_stats.accepted_bytes;
+        self.conn_stats.rejected += self.delta_stats.rejected;
+        self.conn_stats.rejected_bytes += self.delta_stats.rejected_bytes;
+        self.conn_stats.refused += self.delta_stats.refused;
+        self.conn_stats.deferred += self.delta_stats.deferred;
+        self.conn_stats.deferred_bytes += self.delta_stats.deferred_bytes;
+        self.conn_stats.deferred_fail += self.delta_stats.deferred_fail;
+        self.conn_stats.not_found += self.delta_stats.not_found;
+        self.delta_stats = ConnSentStats::default();
     }
 
-    fn log_stats(&self, start: Instant, stats: &[u64]) -> String {
+    fn log_stats(&self, start: Instant, stats: &ConnSentStats) -> String {
         let elapsed_ms = std::cmp::max(1, Instant::now().saturating_duration_since(start).as_millis());
-        let rate = format_rate(elapsed_ms as u64, stats[TxStats::Offered as usize]);
+        let rate = format_rate(elapsed_ms as u64, stats.offered);
         format!(
             "secs={} acc={} dup={} rej={} tot={} bytes={} ({}) avpend={:.1}",
             format_secs(elapsed_ms as u64),
-            stats[TxStats::Accepted as usize],
-            stats[TxStats::Refused as usize],
-            stats[TxStats::Rejected as usize],
-            stats[TxStats::Offered as usize],
-            stats[TxStats::AcceptedBytes as usize],
+            stats.accepted,
+            stats.refused,
+            stats.rejected,
+            stats.offered,
+            stats.accepted_bytes,
             rate,
             1,
         )
     }
 
-    pub fn log_defer(&self, start: Instant, stats: &[u64]) -> String {
+    fn log_defer(&self, start: Instant, stats: &ConnSentStats) -> String {
         let elapsed_ms = std::cmp::max(1, Instant::now().saturating_duration_since(start).as_millis());
         format!(
             "secs={} defer={} deferfail={}",
             format_secs(elapsed_ms as u64),
-            stats[TxStats::Deferred as usize],
-            stats[TxStats::DeferredFail as usize],
+            stats.deferred,
+            stats.deferred_fail,
         )
     }
 
     // About to send TAKETHIS but article not present in spool anymore.
     pub fn art_notfound(&mut self) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::NotFound);
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, not_found);
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431)
     pub fn art_deferred(&mut self, size: Option<usize>) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::Deferred);
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, deferred);
         if let Some(size) = size {
-            self.add(TxStats::DeferredBytes, size as u64);
+            stats_add!(self, size as u64, deferred_bytes);
         }
         self.check_mark();
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431) where we failed to re-queue.
     pub fn art_deferred_fail(&mut self, size: Option<usize>) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::DeferredFail);
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, deferred_fail);
         if let Some(size) = size {
-            self.add(TxStats::DeferredBytes, size as u64);
+            stats_add!(self, size as u64, deferred_bytes);
         }
         self.check_mark();
     }
 
     // CHECK 438
     pub fn art_refused(&mut self) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::Refused);
-        self.check_mark();
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, refused);
     }
 
     // TAKETHIS 239
     pub fn art_accepted(&mut self, size: usize) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::Accepted);
-        self.add(TxStats::AcceptedBytes, size as u64);
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, accepted);
+        stats_add!(self, size as u64, accepted_bytes);
         self.check_mark();
     }
 
     // TAKETHIS 439
     pub fn art_rejected(&mut self, size: usize) {
-        self.inc(TxStats::Offered);
-        self.inc(TxStats::Rejected);
-        self.add(TxStats::RejectedBytes, size as u64);
+        stats_add!(self, 1, offered);
+        stats_add!(self, 1, rejected);
+        stats_add!(self, size as u64, rejected_bytes);
         self.check_mark();
     }
 
     #[inline]
     fn check_mark(&mut self) {
-        if self.stats[TxStats::Offered as usize] % MARK_AFTER_OFFERED_N == 0 {
+        if self.delta_stats.offered % MARK_AFTER_OFFERED_N == 0 {
             self.stats_update();
         }
     }
@@ -491,8 +590,4 @@ fn format_secs(ms: u64) -> String {
         format!("{}", ms / 1000)
     }
 }
-
-
-
-
 
