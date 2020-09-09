@@ -1,6 +1,13 @@
-use libc::{self, gethostname};
-use std::ffi::CStr;
+use std::convert::TryInto;
+use std::ffi::{CStr, CString};
 use std::fs;
+use std::io;
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
+
+use libc::{self, gethostname};
+
+use crate::util::UnixTime;
 
 /// Rust interface to the libc gethostname function.
 ///
@@ -88,3 +95,16 @@ pub use try_read_at::*;
 pub fn getpid() -> u32 {
     unsafe { libc::getpid() as u32 }
 }
+
+pub fn touch(path: impl Into<PathBuf>, time: UnixTime) -> io::Result<()> {
+    let path = CString::new(path.into().into_os_string().into_vec()).unwrap();
+    let time = time.as_secs().try_into().map_err(|_| ioerr!(InvalidData, "invalid time"))?;
+    let buf = libc::utimbuf{ actime: time, modtime: time };
+    unsafe {
+        if libc::utime(path.as_ptr() as *const libc::c_char, &buf as *const libc::utimbuf) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+

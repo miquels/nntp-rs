@@ -108,6 +108,10 @@ impl UnixTime {
         self.0 / 1000
     }
 
+    pub fn as_millis(&self) -> u64 {
+        self.0
+    }
+
     pub fn subsec_millis(&self) -> u32 {
         (self.0 % 1000) as u32
     }

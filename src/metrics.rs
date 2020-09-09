@@ -7,6 +7,7 @@ use std::io;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use crate::bus::{self, Notification};
 use crate::config;
 use crate::dns;
 use crate::errors::ArtError;
+use crate::util::{self, UnixTime};
 
 // After how many articles sent a stats update should be logged.
 const MARK_AFTER_OFFERED_N: u64 = 1000;
@@ -662,19 +664,33 @@ pub async fn load() -> io::Result<()> {
 /// considered not to have changed and consequently, not written.
 pub async fn save(hash: Option<u64>) -> io::Result<u64> {
     let config = config::get_config();
-    let filename = match config.logging.metrics.as_ref() {
-        Some(filename) => filename,
-        None => return Ok(0),
-    };
-    let mut path = PathBuf::from(&config.paths.db);
-    path.push(filename);
-    let text = serde_json::to_string(&*PEER_STATS.read()).unwrap();
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    let newhash = hasher.finish();
-    if hash != Some(newhash) {
+    let mut newhash = 0;
+    let mut changed = false;
+
+    if let Some(filename) = config.logging.metrics.as_ref() {
+        let path = config::expand_path(&config.paths, &filename);
+        let text = serde_json::to_string(&*PEER_STATS.read()).unwrap();
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        newhash = hasher.finish();
+        if hash != Some(newhash) {
+            changed = true;
+            tokio::fs::write(&path, text).await.map_err(|e| ioerr!(e.kind(), "metrics: {:?}: {}", path, e))?;
+        }
+    }
+
+    if let Some(filename) = config.logging.prometheus.as_ref() {
+        let path = config::expand_path(&config.paths, &filename);
+        if !changed {
+            // Just try to update the timestamp.
+            if util::touch(&path, UnixTime::now()).is_ok() {
+                return Ok(newhash);
+            }
+        }
+        let text = prometheus(&*PEER_STATS.read());
         tokio::fs::write(&path, text).await.map_err(|e| ioerr!(e.kind(), "metrics: {:?}: {}", path, e))?;
     }
+
     Ok(newhash)
 }
 
@@ -713,5 +729,141 @@ pub async fn metrics_task(mut bus_recv: bus::Receiver) {
             }
         }
     });
+}
+
+fn prometheus(stats: &PeerStats) -> String {
+    let mut text = String::with_capacity(4000);
+    prom_metrics_recv(stats, &mut text);
+    prom_metrics_sent(stats, &mut text);
+    text
+}
+
+// This macro defines the functions "prom_metrics_recv" and "prom_metric_sent".
+// Those functions generate the prometheus protocol data in text form.
+macro_rules! prom_metrics {
+    ($func:ident, $field:ident, $($metric:ident => [ $mfield:ident, $type:expr, $help: expr ],)*) => {
+        fn $func(peer_stats: &PeerStats, output: &mut String) {
+            let mut metrics = HashMap::new();
+
+            // Iterate over the 'recv' or the 'sent' HashMap by peer name.
+            for (peer, stats) in peer_stats.$field.iter() {
+
+                // Generate labels for this peer.
+                let mut labels = PromLabels::default();
+                labels.push("newspeer", peer);
+
+                // Then, for each metric, add the stats for this peer.
+                $(
+                    let metric = metrics.entry(stringify!($metric)).or_insert_with(|| {
+                        PromMetric::new(stringify!($metric).to_string(), $type, $help)
+                    });
+                    let value = stats.$mfield.load(Ordering::Acquire);
+                    metric.add_value(labels.clone(), value, None);
+                )*
+            }
+
+            // Finally put all the metrics in a string.
+            for metric in metrics.values() {
+                metric.to_string(output);
+            }
+        }
+    }
+}
+
+// This generates the prom_metrics_recv() function.
+prom_metrics! {
+    prom_metrics_recv, recv,
+    nntp_input_connection_count => [ connections, "gauge", "Number of incoming connections" ],
+    nntp_input_offered_count => [ offered, "counter", "Offered articles in (CHECK)" ],
+    nntp_input_refused_count => [ refused, "counter", "Refused articles in (CHECK)" ],
+    nntp_input_accepted_count => [ accepted, "counter", "Accepted articles in (CHECK)" ],
+    nntp_input_received_count => [ received, "counter", "Received articles in (TAKETHIS)" ],
+    nntp_input_rejected_count => [ rejected, "counter", "Rejected articles in (TAKETHIS)" ],
+    nntp_input_accepted_bytes => [ accepted_bytes, "counter", "Accepted bytes in (TAKETHIS)" ],
+    nntp_input_rejected_bytes => [ rejected_bytes, "counter", "Rejected bytes in (TAKETHIS)" ],
+    nntp_input_received_bytes => [ received_bytes, "counter", "Received bytes in" ],
+}
+
+// This generates the prom_metrics_sent() function.
+prom_metrics! {
+    prom_metrics_sent, sent,
+    nntp_output_connection_count => [ connections, "gauge", "Number of outgoing connections" ],
+    // nntp_output_queueage_secs => [ max_queue_age, "counter", "Age of oldest queued article" ],
+    nntp_output_offered_count => [ offered, "counter", "Offered articles out (CHECK)" ],
+    nntp_output_accepted_count => [ accepted, "counter", "Accepted articles out (TAKETHIS)" ],
+    nntp_output_refused_count => [ refused, "counter", "Refused articles out (CHECK)" ],
+    nntp_output_rejected_count => [ rejected, "counter", "Rejected articles out (TAKETHIS)" ],
+    nntp_output_deferfail_count => [ deferred_fail, "counter", "Defer fails (CHECK)" ],
+    nntp_output_rejected_bytes => [ rejected_bytes, "counter", "Rejected bytes out (TAKETHIS)" ],
+    nntp_output_accepted_bytes => [ accepted_bytes, "counter", "Accepted bytes out (TAKETHIS)" ],
+}
+
+#[derive(Default, Clone)]
+struct PromLabels {
+    labels: Rc<Vec<(String, String)>>,
+}
+
+impl PromLabels {
+    fn push(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        Rc::get_mut(&mut self.labels).unwrap().push((name.into(), value.into()));
+    }
+
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        for l in self.labels.iter() {
+            if s.len() > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("{}=\"{}\"", l.0, l.1));
+        }
+        s
+    }
+}
+
+struct PromMetric {
+    ptype:  String,
+    name:   &'static str,
+    help:   &'static str,
+    values: Vec<(u64, PromLabels, Option<UnixTime>)>,
+}
+
+impl PromMetric {
+    fn new(ptype: String, name: &'static str, help: &'static str) -> PromMetric {
+        PromMetric{ ptype, name, help, values: Vec::new() }
+    }
+
+    fn add_value(&mut self, labels: PromLabels, mut value: u64, timestamp: Option<UnixTime>) {
+
+        // we limit counters to 2**53 and then let them wrap around.
+        // this way, we keep the precision of an integer.
+        // (see also https://github.com/dirac-institute/zads-terraform/issues/32)
+        if self.ptype == "counter" {
+            value &= 0x1fffffffffffff;
+        }
+
+        self.values.push((value, labels, timestamp));
+    }
+
+    fn to_string(&self, s: &mut String) {
+        if self.values.is_empty() {
+            return;
+        }
+        s.push_str(&format!("# HELP {} {}\n", self.name, self.help));
+        s.push_str(&format!("# TYPE {} {}\n", self.name, self.ptype));
+        for value in &self.values {
+            s.push_str(&self.name);
+            let labs = value.1.to_string();
+            if labs.len() > 0 {
+                s.push_str(&format!("{{{}}}", labs));
+            }
+            s.push(' ');
+            s.push_str(&value.0.to_string());
+            if let Some(tm) = value.2 {
+                s.push(' ');
+                s.push_str(&tm.as_millis().to_string());
+            }
+            s.push('\n');
+        }
+    }
 }
 
