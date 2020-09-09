@@ -147,11 +147,14 @@ struct DArtLocation {
 
 fn to_location(loc: &ArtLoc) -> DArtLocation {
     let t = &loc.token;
+    // Diablo always rounds down the value used to generate
+    // the directory name to the nearest multiple of 10.
+    let gmt = u32_from_le_bytes(&t[10..14]);
     DArtLocation {
         file: u16_from_le_bytes(&t[0..2]),
         pos:  u32_from_le_bytes(&t[2..6]),
         size: u32_from_le_bytes(&t[6..10]),
-        dir:  u32_from_le_bytes(&t[10..14]),
+        dir:  (gmt / 10) * 10,
     }
 }
 
@@ -200,14 +203,14 @@ impl DSpool {
     /// Create a new diablo-type spool backend.
     pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<dyn SpoolBackend>> {
         let dir_reallocint = if ms.reallocint.as_secs() > 0 {
-            // cannot go lower than 300 secs (5 mins).
-            std::cmp::max(300, ms.reallocint.as_secs() as u32)
+            // cannot go lower than 600 secs (10 mins).
+            std::cmp::max(600, ms.reallocint.as_secs() as u32)
         } else {
             DFL_DIR_REALLOCINT
         };
 
-        // round down dir_reallocint to the nearest multiple of 60 (i.e. to the minute).
-        let dir_reallocint = (dir_reallocint / 60) * 60;
+        // round down dir_reallocint to the nearest multiple of 600 (i.e. 10 minutes).
+        let dir_reallocint = (dir_reallocint / 600) * 600;
 
         // Set file_reallocint to dir_reallocint / 100, so that we get 100
         // files per directory. However, it can not go lower than 1 per minute.
@@ -432,13 +435,16 @@ impl DSpool {
         let unix_now = UnixTime::now();
         self.auto_expire(unix_now);
 
+        // Calculate what directory we should be writing to. It's the current
+        // time, rounded down to the nearest multiple of dir_reallocint
+        // (which itself is always a multiple of 600), then divided by 60.
+        let now = unix_now.as_secs();
+        let cur_dir = ((now / self.dir_reallocint as u64) as u32 * self.dir_reallocint) / 60;
+
         // check if we had this file open for more than file_reallocint secs,
         // or if we need to move to a new directory.
-        let now = unix_now.as_secs();
         if writer.fh.is_some() {
-            let cur_dirslot = ((now / 60) as u32) / (self.dir_reallocint / 60);
-            let wri_dirslot = writer.dir / (self.dir_reallocint / 60);
-            if writer.tm + (self.file_reallocint as u64) < now || cur_dirslot != wri_dirslot {
+            if writer.tm + (self.file_reallocint as u64) < now || writer.dir != cur_dir {
                 writer.fh.take();
             }
         }
@@ -448,10 +454,8 @@ impl DSpool {
         if writer.fh.is_none() {
             // Create directory if needed.
             let mut path = self.path.clone();
-            let mut dir = (now / 60) as u32;
-            dir -= dir % (self.dir_reallocint / 60);
-            path.push(format!("D.{:08x}", dir));
-            if dir != writer.dir {
+            path.push(format!("D.{:08x}", cur_dir));
+            if writer.dir != cur_dir {
                 if let Err(e) = fs::create_dir(&path) {
                     if e.kind() != io::ErrorKind::AlreadyExists {
                         return Err(io::Error::new(e.kind(), format!("create {:?}: {}", path, e)));
@@ -474,7 +478,7 @@ impl DSpool {
                     // created new directory. start at B.0001.
                     writer.file = 1;
                 }
-                writer.dir = dir;
+                writer.dir = cur_dir;
             }
 
             for _ in 0..32768 {
