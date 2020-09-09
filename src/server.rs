@@ -15,7 +15,7 @@ use tokio::task;
 
 use crate::bus::{self, Notification};
 use crate::config::{self, MultiSingle};
-use crate::diag::SessionStats;
+use crate::metrics::RxSessionStats;
 use crate::dns::HostCache;
 use crate::history::History;
 use crate::logger;
@@ -276,7 +276,7 @@ impl Server {
                 .read_timeout(nntp_codec::READ_TIMEOUT)
                 .write_timeout(nntp_codec::WRITE_TIMEOUT)
                 .build();
-            let stats = SessionStats::new(peer, fdno);
+            let stats = RxSessionStats::new(peer, fdno);
 
             // build and run an nntp session.
             let session = NntpServer::new(peer, codec, self.clone(), stats);

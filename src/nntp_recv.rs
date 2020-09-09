@@ -9,7 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
-use crate::diag::Stats;
+use crate::metrics::Stats;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
 use crate::nntp_send::FeedArticle;

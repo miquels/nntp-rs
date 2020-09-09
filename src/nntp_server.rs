@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::bus::Notification;
 use crate::commands::{Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
-use crate::diag::SessionStats;
+use crate::metrics::RxSessionStats;
 use crate::history::HistStatus;
 use crate::logger;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
@@ -37,7 +37,7 @@ pub struct NntpServer {
     pub(crate) peer_idx:        usize,
     pub(crate) headfeed:        bool,
     pub(crate) active:          bool,
-    pub(crate) stats:           SessionStats,
+    pub(crate) stats:           RxSessionStats,
     pub(crate) quit:            bool,
 }
 
@@ -78,7 +78,7 @@ pub(crate) enum ArtAccept {
 }
 
 impl NntpServer {
-    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: SessionStats) -> NntpServer {
+    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: RxSessionStats) -> NntpServer {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();

@@ -25,7 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{delay_for, Instant};
 
 use crate::article::{HeaderName, HeadersParser};
-use crate::diag::TxSessionStats;
+use crate::metrics::TxSessionStats;
 use crate::nntp_client;
 use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::spool::{ArtPart, Spool, SpoolArt};

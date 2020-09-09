@@ -52,7 +52,7 @@ macro_rules! recv_stats {
             )*
         }
         /// Add a value to a metric.
-        fn stats_add(this: &mut SessionStats, metric: Stats, count: u64) {
+        fn stats_add(this: &mut RxSessionStats, metric: Stats, count: u64) {
             match metric {
                 $(
                     Stats::$enum_field => {
@@ -114,7 +114,7 @@ recv_stats! {
     [   RejBareCR,          rejected,   rejected_art_has_bare_cr    ], // article has a CR without LF
 }
 
-pub struct SessionStats {
+pub struct RxSessionStats {
     // identification.
     hostname:   String,
     ipaddr:     String,
@@ -126,9 +126,9 @@ pub struct SessionStats {
     pub peer_stats: Arc<PeerRecvStats>,
 }
 
-impl Default for SessionStats {
-    fn default() -> SessionStats {
-        SessionStats {
+impl Default for RxSessionStats {
+    fn default() -> RxSessionStats {
+        RxSessionStats {
             hostname: String::new(),
             ipaddr:   String::new(),
             label:    String::new(),
@@ -140,14 +140,14 @@ impl Default for SessionStats {
     }
 }
 
-impl SessionStats {
-    pub fn new(ipaddr: std::net::SocketAddr, fdno: u32) -> SessionStats {
-        SessionStats {
+impl RxSessionStats {
+    pub fn new(ipaddr: std::net::SocketAddr, fdno: u32) -> RxSessionStats {
+        RxSessionStats {
             hostname: ipaddr.to_string(),
             ipaddr: ipaddr.to_string(),
             label: "unknown".to_string(),
             fdno: fdno,
-            ..SessionStats::default()
+            ..RxSessionStats::default()
         }
     }
 
