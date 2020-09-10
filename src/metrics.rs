@@ -780,7 +780,7 @@ macro_rules! prom_metrics {
 
                 // Generate labels for this peer.
                 let mut labels = if let Some(pl) = labelmap.get(peer) {
-                    pl.clone()
+                    pl.deep_clone()
                 } else {
                     PromLabels::default()
                 };
@@ -840,6 +840,10 @@ struct PromLabels {
 impl PromLabels {
     fn push(&mut self, name: impl Into<String>, value: impl Into<String>) {
         Rc::get_mut(&mut self.labels).unwrap().push((name.into(), value.into()));
+    }
+
+    fn deep_clone(&self) -> PromLabels {
+        PromLabels{ labels: Rc::new((&*self.labels).clone()) }
     }
 
     fn to_string(&self) -> String {

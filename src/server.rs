@@ -95,7 +95,9 @@ impl Server {
             server.outfeed = tx;
             drop(rx);
 
-            server.wait(bus_sender, bus_recv).await;
+            if let Err(_) = server.wait(bus_sender, bus_recv).await {
+                std::process::exit(1);
+            }
             Ok(())
         })
     }
@@ -124,7 +126,7 @@ impl Server {
             thread::spawn(move || {
                 if let Some(id) = core_id {
                     // tie this thread to a specific core.
-                    log::info!(
+                    log::debug!(
                         "runtime: binding tokio basic runtime #{} to core id {:?}",
                         n,
                         core_id
@@ -201,7 +203,7 @@ impl Server {
     }
 
     // wait for all sessions to finish.
-    async fn wait(&self, mut bus_sender: bus::Sender, mut bus_recv: bus::Receiver) {
+    async fn wait(&self, mut bus_sender: bus::Sender, mut bus_recv: bus::Receiver) -> io::Result<()> {
         // wait for a shutdown notification
         let mut waited = 0u32;
         while let Some(notification) = bus_recv.recv().await {
@@ -217,6 +219,8 @@ impl Server {
                 _ => {},
             }
         }
+
+        let mut status = Ok(());
 
         // now busy-wait until all connections are closed.
         while TOT_SESSIONS.load(Ordering::SeqCst) > 0 {
@@ -237,15 +241,24 @@ impl Server {
                     "shutting down server: {} sessions stuck, exiting anyway",
                     TOT_SESSIONS.load(Ordering::SeqCst)
                 );
-                std::process::exit(1);
+                status = Err(ioerr!(Other, "forced exit"));
             }
         }
 
+        // final metrics write.
+        let _ = metrics::save(None).await;
+
+        // close incoming logger.
         let incoming_logger = logger::get_incoming_logger();
         incoming_logger.quit();
 
-        log::info!("exiting.");
+        if status.is_ok() {
+            log::info!("exiting.");
+        }
+
         logger::logger_flush();
+
+        status
     }
 
     // This is run for every TCP listener socket.
