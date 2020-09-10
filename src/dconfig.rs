@@ -161,6 +161,7 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .alias::<NewsPeer>("deldist", "distributions")
         .alias::<NewsPeer>("hostname", "outhost")
         .alias::<NewsPeer>("headfeed", "send-headfeed")
+        .alias::<NewsPeer>("precomreject", "dont-defer")
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")

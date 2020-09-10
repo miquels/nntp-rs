@@ -310,7 +310,7 @@ impl PeerFeed {
                 break;
             }
         }
-        if arts.len() > 0 {
+        if arts.len() > 0 && !self.newspeer.nobatch {
             let res = async {
                 self.send_queue_to_backlog(false).await?;
                 self.backlog_queue.write_arts(&self.spool, &arts).await?;
@@ -327,6 +327,20 @@ impl PeerFeed {
 
     // Write half or the entire current queue to the backlog.
     async fn send_queue_to_backlog(&mut self, entire_queue: bool) -> io::Result<()> {
+
+        // or, if 'nobatch' is set, just trim the in-memory queue and return.
+        if self.newspeer.nobatch {
+            if self.rx_queue.len() >= 200 {
+                let target_len = self.rx_queue.len() / 2;
+                while self.rx_queue.len() > target_len {
+                    if self.rx_queue.try_recv().is_err() {
+                        break;
+                    }
+                }
+            }
+            return Ok(())
+        }
+
         let target_len = if entire_queue { 0 } else { PEERFEED_QUEUE_SIZE / 2 };
         let mut arts = Vec::new();
         while self.rx_queue.len() > target_len {

@@ -34,8 +34,13 @@ impl NntpServer {
                 match status {
                     HistStatus::NotFound => format!("238 {}", msgid),
                     HistStatus::Tentative => {
-                        self.stats.inc(Stats::RefPreCommit);
-                        format!("431 {}", msgid)
+                        if self.thispeer().dont_defer {
+                            self.stats.inc(Stats::RefPreCommit);
+                            format!("438 {}", msgid)
+                        } else {
+                            self.stats.inc(Stats::RefPreCommit);
+                            format!("431 {}", msgid)
+                        }
                     },
                     _ => {
                         self.stats.inc(Stats::RefHistory);

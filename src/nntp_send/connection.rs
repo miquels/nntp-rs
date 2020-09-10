@@ -561,9 +561,11 @@ impl Connection {
                     },
                     431 => {
                         // remote deferred it (aka "try again a bit later")
-                        match self.deferred.push(ConnItem::Check(art)) {
-                            Ok(_) => self.stats.art_deferred(None),
-                            Err(_) => self.stats.art_deferred_fail(None),
+                        if !self.newspeer.drop_deferred {
+                            match self.deferred.push(ConnItem::Check(art)) {
+                                Ok(_) => self.stats.art_deferred(None),
+                                Err(_) => self.stats.art_deferred_fail(None),
+                            }
                         }
                     },
                     438 => {

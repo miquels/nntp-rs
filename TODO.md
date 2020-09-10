@@ -47,10 +47,7 @@ A list in no particular order.
 - refactor xclient support.
 
 ### Outgoing
-- implement nobatch
 - implement delayfeed
-- implement precomreject
-- implement nodefer
 - don't start outgoing feed (or queue!) until first article
 - close feed itself after idle?
 - keep "average pending" stats and log actual avpend instead of "1"
@@ -101,6 +98,9 @@ DONE:
 
 ### Outgoing
 - connections: close after timeout (1 mins)
+- implement nobatch
+- implement drop-deferred
+- implement precomreject (as dont-defer)
 
 ### Stats
 - keep global stats per peer

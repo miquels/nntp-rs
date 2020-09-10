@@ -168,7 +168,8 @@ pub struct NewsPeer {
     /// used when processing incoming articles
     pub filter:             WildMatList,
     pub nomismatch:         bool,
-    pub precomreject:       bool,
+    #[serde(rename = "dont-defer")]
+    pub dont_defer:         bool,
 
     /// used to select outgoing articles.
     pub maxcross:           u32,
@@ -194,6 +195,8 @@ pub struct NewsPeer {
     pub maxparallel:        u32,
     pub maxstream:          u32,
     pub nobatch:            bool,
+    #[serde(rename = "drop-deferred")]
+    pub drop_deferred:      bool,
     pub maxqueue:           u32,
     #[serde(rename = "send-headfeed")]
     pub send_headfeed:      bool,
