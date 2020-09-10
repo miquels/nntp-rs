@@ -202,7 +202,7 @@ impl NntpServer {
         }
 
         self.stats
-            .on_connect(remote.to_string(), peer.label.to_string())
+            .on_connect(peer.label.to_string(), remote)
             .await;
 
         let code = if peer.readonly {

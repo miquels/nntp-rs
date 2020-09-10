@@ -133,7 +133,7 @@ recv_stats! {
 pub struct RxSessionStats {
     // identification.
     hostname:   String,
-    ipaddr:     String,
+    ipaddr:     IpAddr,
     label:      String,
     fdno:       u32,
     connected:  bool,
@@ -153,10 +153,10 @@ impl Drop for RxSessionStats {
 
 
 impl RxSessionStats {
-    pub fn new(ipaddr: std::net::SocketAddr, fdno: u32) -> RxSessionStats {
+    pub fn new(ipaddr: IpAddr, fdno: u32) -> RxSessionStats {
         RxSessionStats {
             hostname: ipaddr.to_string(),
-            ipaddr: ipaddr.to_string(),
+            ipaddr,
             label: "unknown".to_string(),
             fdno: fdno,
             connected: false,
@@ -169,8 +169,8 @@ impl RxSessionStats {
     pub fn hostname(&self) -> &str {
         self.hostname.as_str()
     }
-    pub fn ipaddr(&self) -> &str {
-        self.ipaddr.as_str()
+    pub fn ipaddr(&self) -> IpAddr {
+        self.ipaddr
     }
     pub fn label(&self) -> &str {
         self.label.as_str()
@@ -193,10 +193,9 @@ impl RxSessionStats {
         }
     }
 
-    pub async fn on_connect(&mut self, ipaddr_str: String, label: String) {
-
-        let ipaddr: std::net::IpAddr = ipaddr_str.parse().unwrap();
-        let host = match dns::RESOLVER.reverse_lookup(ipaddr).await {
+    pub async fn on_connect(&mut self, label: String, ipaddr: IpAddr) {
+        self.ipaddr = ipaddr;
+        let host = match dns::RESOLVER.reverse_lookup(self.ipaddr).await {
             Ok(m) => {
                 let mut h = m.iter().next().map(|name| name.to_utf8());
                 if let Some(ref mut h) = h {
@@ -213,7 +212,7 @@ impl RxSessionStats {
             let mut stats = PEER_STATS.write();
             stats.recv.entry(label.clone()).or_insert_with(|| Arc::new(PeerRecvStats::default())).clone()
         };
-        self.hostname = host.unwrap_or(ipaddr_str);
+        self.hostname = host.unwrap_or(self.ipaddr.to_string());
         self.label = label;
         self.peer_stats = peer_stats;
         if !self.connected {
