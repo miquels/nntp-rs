@@ -203,6 +203,9 @@ pub struct NewsPeer {
     #[serde(rename = "queue-only")]
     pub queue_only:         bool,
 
+    /// metadata for non-feed related things.
+    pub meta:               HashMap<String, Vec<String>>,
+
     /// non-config items.
     #[serde(skip)]
     pub index:              usize,

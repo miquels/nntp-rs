@@ -6,7 +6,7 @@ use std::default::Default;
 use std::io;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -675,7 +675,7 @@ pub async fn save(hash: Option<u64>) -> io::Result<u64> {
         newhash = hasher.finish();
         if hash != Some(newhash) {
             changed = true;
-            tokio::fs::write(&path, text).await.map_err(|e| ioerr!(e.kind(), "metrics: {:?}: {}", path, e))?;
+            write_file(&path, text).await?;
         }
     }
 
@@ -688,10 +688,25 @@ pub async fn save(hash: Option<u64>) -> io::Result<u64> {
             }
         }
         let text = prometheus(&*PEER_STATS.read());
-        tokio::fs::write(&path, text).await.map_err(|e| ioerr!(e.kind(), "metrics: {:?}: {}", path, e))?;
+        write_file(&path, text).await?;
     }
 
     Ok(newhash)
+}
+
+// Write temporary file and rename into place.
+async fn write_file(path: impl AsRef<Path>, data: String) -> io::Result<()> {
+    let path = path.as_ref();
+    let tmp = path.with_extension("tmp");
+    if let Err(e) = tokio::fs::write(&tmp, data).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(ioerr!(e.kind(), "metrics: creating/writing temp file {:?}: {}", tmp, e));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(ioerr!(e.kind(), "metrics: replacing {:?}: {}", path, e));
+    }
+    Ok(())
 }
 
 /// Start a task to write the metrics to disk periodically (once every minute).
@@ -732,9 +747,24 @@ pub async fn metrics_task(mut bus_recv: bus::Receiver) {
 }
 
 fn prometheus(stats: &PeerStats) -> String {
+    // First, walk over all peers and get the meta prometheus data.
+    let nf = config::get_newsfeeds();
+    let mut hm = HashMap::new();
+    for peer in &nf.peers {
+        if let Some(meta) = peer.meta.get("prometheus-label") {
+            let mut labels = PromLabels::default();
+            for label in meta {
+                let a = label.splitn(2, '=').collect::<Vec<_>>();
+                if a.len() == 2 {
+                    labels.push(a[0], a[1]);
+                }
+            }
+            hm.insert(peer.label.to_string(), labels);
+        }
+    }
     let mut text = String::with_capacity(4000);
-    prom_metrics_recv(stats, &mut text);
-    prom_metrics_sent(stats, &mut text);
+    prom_metrics_recv(stats, &hm, &mut text);
+    prom_metrics_sent(stats, &hm, &mut text);
     text
 }
 
@@ -742,14 +772,18 @@ fn prometheus(stats: &PeerStats) -> String {
 // Those functions generate the prometheus protocol data in text form.
 macro_rules! prom_metrics {
     ($func:ident, $field:ident, $($metric:ident => [ $mfield:ident, $type:expr, $help: expr ],)*) => {
-        fn $func(peer_stats: &PeerStats, output: &mut String) {
+        fn $func(peer_stats: &PeerStats, labelmap: &HashMap<String, PromLabels>, output: &mut String) {
             let mut metrics = HashMap::new();
 
             // Iterate over the 'recv' or the 'sent' HashMap by peer name.
             for (peer, stats) in peer_stats.$field.iter() {
 
                 // Generate labels for this peer.
-                let mut labels = PromLabels::default();
+                let mut labels = if let Some(pl) = labelmap.get(peer) {
+                    pl.clone()
+                } else {
+                    PromLabels::default()
+                };
                 labels.push("newspeer", peer);
 
                 // Then, for each metric, add the stats for this peer.
