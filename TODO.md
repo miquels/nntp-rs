@@ -64,6 +64,10 @@ A list in no particular order.
 ### Logger
 - for syslog logging, do not re-initialize the syslogger every log line.
 
+### Newsfeeds file
+- add "$label" variable that can be used in hostname / inhost / etc
+- make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net
+- templates
 
 ### Other
 
