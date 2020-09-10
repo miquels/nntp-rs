@@ -432,8 +432,13 @@ impl DSpool {
         let mut writer = self.shared.writer.lock();
 
         // see if we need to kick off an expire thread.
+        // only if self.keeptime is set. otherwise we kick
         let unix_now = UnixTime::now();
-        self.auto_expire(unix_now);
+        if self.keeptime > 0 {
+            // if self.keeptime is set, check if we need to do an expire run.
+            // otherwise, we check just before opening a new spool file.
+            self.auto_expire(unix_now, false);
+        }
 
         // Calculate what directory we should be writing to. It's the current
         // time, rounded down to the nearest multiple of dir_reallocint
@@ -533,6 +538,9 @@ impl DSpool {
                     format!("{:?}: cannot create spool file", path),
                 ));
             }
+
+            // check if we need to run expire.
+            self.auto_expire(unix_now, true);
         }
 
         let hdr_len = headers.len();
@@ -585,15 +593,15 @@ impl DSpool {
         })
     }
 
-    fn auto_expire(&self, now: UnixTime) {
+    fn auto_expire(&self, now: UnixTime, force:  bool) {
         let last_expire: UnixTime = (&self.shared.last_expire).into();
-        if now - last_expire >= Duration::new(EXPIRE_CHECK as u64, 0) {
+        if now - last_expire >= Duration::new(EXPIRE_CHECK as u64, 0) || force {
             let this = self.clone();
             std::thread::spawn(move || {
                 let _guard = match this.shared.expire_lock.try_lock() {
                     Some(guard) => guard,
                     None => {
-                        log::info!("auto_expire: already running");
+                        log::debug!("auto_expire: already running");
                         return;
                     }
                 };
@@ -629,18 +637,29 @@ impl DSpool {
 
             // if there's not enough free space, find out how much we need to free.
             if self.minfree > 0 && sv.available_space() < self.minfree {
-                to_delete = self.minfree - sv.available_space();
+
+                // to calculate how much we have to delete, make minfree 10% bigger.
+                let minfree = self.minfree + self.minfree / 10;
+                to_delete = minfree - sv.available_space();
                 do_expire = true;
             }
 
             // if we have used too much space, find out how much we need to free.
             let used = sv.total_space() - sv.free_space();
-            if self.maxsize > 0 && self.maxsize > used {
-                to_delete = std::cmp::max(to_delete, self.maxsize - used);
+            if self.maxsize > 0 && used > self.maxsize {
+
+                // to calculate how much we have to delete, make maxsize 5% smaller.
+                // never more than 50GB smaller though.
+                let mut maxsize = self.maxsize - self.maxsize / 20;
+                if maxsize + 50_000_000_000 < self.maxsize {
+                    maxsize = self.maxsize - 50_000_000_000;
+                }
+                to_delete = std::cmp::max(to_delete, used - maxsize);
                 do_expire = true;
             }
         }
 
+        let mut keeptime = self.keeptime;
         if self.keeptime > 0 {
             if let Ok(Some(oldest)) = self.get_oldest() {
                 if oldest + Duration::new(self.keeptime, 0) < UnixTime::now() {
@@ -648,6 +667,12 @@ impl DSpool {
                 }
             } else {
                 do_expire = true;
+            }
+            // to calculate how much we have to delete, scale down
+            // keeptime by 10%, but not more than one hour.
+            keeptime -= keeptime / 10;
+            if keeptime + 3600 < self.keeptime {
+                keeptime = self.keeptime - 3600;
             }
         }
 
@@ -718,7 +743,7 @@ impl DSpool {
                 } = &files[0];
                 let age = now.duration_since(modified).map(|d| d.as_secs()).unwrap_or(0);
 
-                if (to_delete == 0 || deleted >= to_delete) && (self.keeptime == 0 || age <= self.keeptime) {
+                if (to_delete == 0 || deleted >= to_delete) && (keeptime == 0 || age <= keeptime) {
                     break;
                 }
 
@@ -735,8 +760,8 @@ impl DSpool {
                     })?;
                 }
                 removed += size;
-                files.pop_front();
                 deleted += size;
+                files.pop_front();
             }
 
             if removed > 0 {
