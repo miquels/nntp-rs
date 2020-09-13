@@ -22,7 +22,7 @@ use tokio::prelude::*;
 use tokio::stream::Stream;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{delay_for, Instant};
+use tokio::time::delay_for;
 
 use crate::article::{HeaderName, HeadersParser};
 use crate::metrics::TxSessionStats;
@@ -31,7 +31,7 @@ use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::spool::{ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
-use super::{Peer, PeerArticle, PeerFeedItem, QItems, Queue};
+use super::{delay_queue::DelayQueue, Peer, PeerArticle, PeerFeedItem, QItems, Queue};
 use super::mpmc;
 
 // Close idle connections after one minute.
@@ -231,7 +231,7 @@ impl Connection {
                 .drain(..)
                 .chain(self.recv_queue.drain(..))
                 .chain(self.dropped.drain(..))
-                .chain(self.deferred.drain(..))
+                .chain(self.deferred.drain())
             {
                 match item {
                     ConnItem::Check(art) | ConnItem::Takethis(art) => {
@@ -690,34 +690,19 @@ impl Connection {
     }
 }
 
-struct DeferredArticle {
-    art:  ConnItem,
-    when: Instant,
-}
-
-// Our own version of DeferredQueue.
-// Needed because the tokio version has no way to drain the
-// queue in one go, which we need when the connection is dropped.
-#[derive(Default)]
+// Queue for deferred articles.
 struct DeferredQueue {
-    queue: VecDeque<DeferredArticle>,
-    tick:  Option<tokio::time::Delay>,
+    queue: DelayQueue<ConnItem>,
 }
 
 impl DeferredQueue {
     fn new() -> DeferredQueue {
-        DeferredQueue::default()
-    }
-
-    fn len(&self) -> usize {
-        self.queue.len()
+        DeferredQueue{ queue: DelayQueue::with_capacity(DEFER_MAX_QUEUE) }
     }
 
     // Push an article onto the queue.
     //
-    // If the queue exceeds `maxlen` items, remove the oldest
-    // item and return it as an error. The caller can then
-    // decide what to do with it.
+    // If the queue is full, the article is returned as an error.
     fn push(&mut self, mut art: ConnItem) -> Result<(), ConnItem> {
         art.deferred_inc();
         if art.deferred() > DEFER_RETRIES {
@@ -729,59 +714,25 @@ impl DeferredQueue {
         } else {
             DEFER_DELAY_NEXT
         };
-        let when = Instant::now() + Duration::new(delay, 0);
-        if self.queue.is_empty() {
-            if let Some(ref mut tick) = self.tick {
-                tick.reset(when);
-            } else {
-                self.tick = Some(tokio::time::delay_until(when));
-            }
-        }
-        self.queue.push_back(DeferredArticle { art, when });
-        if self.queue.len() > DEFER_MAX_QUEUE {
-            Err(self.queue.pop_front().unwrap().art)
-        } else {
-            Ok(())
-        }
+        self.queue.push(art, Duration::new(delay, 0))
     }
 
     // Drain the queue.
-    fn drain<R>(&mut self, range: R) -> impl Iterator<Item=ConnItem> + '_
-    where
-        R: std::ops::RangeBounds<usize>,
-    {
-        self.queue.drain(range).map(|art| art.art)
+    fn drain(&mut self) -> impl Iterator<Item=ConnItem> + '_ {
+        self.queue.drain()
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
     }
 }
 
 impl Stream for DeferredQueue {
     type Item = ConnItem;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut this = self.as_mut();
-
-        // nothing to do?
-        if this.queue.is_empty() {
-            return Poll::Pending;
-        }
-
-        // See if an item at the front of the queue has expired.
-        // We allow a window of one second, to batch up items that
-        // expire at around the same time.
-        let now = Instant::now() - Duration::new(1, 0);
-        let when = this.queue[0].when;
-        if now > when {
-            let art = this.queue.pop_front().unwrap().art;
-            return Poll::Ready(Some(art));
-        }
-
-        // set the next tick.
-        if let Some(ref mut tick) = this.tick {
-            tick.reset(when);
-        } else {
-            this.tick = Some(tokio::time::delay_until(when));
-        }
-        Poll::Pending
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.queue).poll_next(cx)
     }
 }
 
