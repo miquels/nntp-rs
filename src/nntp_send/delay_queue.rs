@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use tokio::stream::Stream;
+use tokio::time::{Duration, Instant};
 use tokio::time::delay_for;
 
 // max 10 seconds, resolution 500ms.
@@ -23,7 +23,7 @@ impl<'a, T: Unpin> Iterator for Drain<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        if let Some(item) = self.queue.overflow.pop_front() {
+        if let Some(item) = self.queue.ready_items.pop_front() {
             return Some(item);
         }
         while self.pos < NUM_SLOTS {
@@ -47,7 +47,7 @@ impl<'a, T: Unpin> Iterator for Drain<'a, T> {
 /// and we won't fuss over accuracy.
 pub struct DelayQueue<T> {
     slots:    [VecDeque<T>; NUM_SLOTS],
-    overflow: VecDeque<T>,
+    ready_items: VecDeque<T>,
     head:     usize,
     size:     usize,
     cap:      usize,
@@ -59,7 +59,7 @@ impl<T: Unpin> DelayQueue<T> {
     pub fn with_capacity(cap: usize) -> DelayQueue<T> {
         DelayQueue {
             slots:  array_init::array_init(|_| VecDeque::<T>::new()),
-            overflow: VecDeque::<T>::new(),
+            ready_items: VecDeque::<T>::new(),
             head: 0,
             size: 0,
             cap,
@@ -67,10 +67,10 @@ impl<T: Unpin> DelayQueue<T> {
         }
     }
 
-    /// Push an article onto the queue.
+    /// Insert an article in the queue.
     ///
     /// If the queue is full, the item is  returned as an error.
-    pub fn push(&mut self, item: T, delay: Duration) -> Result<(), T> {
+    pub fn insert(&mut self, item: T, delay: Duration) -> Result<(), T> {
         if self.size == self.cap {
             return Err(item);
         }
@@ -96,10 +96,12 @@ impl<T: Unpin> DelayQueue<T> {
         Drain { queue: self, pos: 0 }
     }
 
-    // arm the timer. non-optimized version.
+    // arm or re-arm the timer.
     fn arm_timer(&mut self) {
-        if self.timer.is_none() {
-            let d = Duration::from_millis(1000 / TICKS_PER_SEC + 1);
+        let d = Duration::from_millis(1000 / TICKS_PER_SEC + 1);
+        if let Some(timer) = self.timer.as_mut() {
+            timer.reset(Instant::now() + d);
+        } else {
             self.timer = Some(delay_for(d));
         }
     }
@@ -111,6 +113,12 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = self.get_mut();
         let mut tick = false;
+
+        // return ready_items first.
+        if let Some(item) = this.ready_items.pop_front() {
+            this.size -= 1;
+            return Poll::Ready(Some(item));
+        }
 
         // poll timer.
         if let Some(timer) = this.timer.as_mut() {
@@ -126,16 +134,16 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
 
         // get next item, if any.
         let head = this.head;
-        let item = if this.overflow.is_empty() && this.slots[this.head].len() < 2 {
-            // no overflow, and current slot has 0 or 1 items.
+        let item = if this.slots[this.head].len() < 2 {
+            // current slot has 0 or 1 items.
             this.slots[head].pop_front()
         } else {
-            // add current slot items to the back of the overflow queue
+            // add current slot items to the back of the ready_items queue
             // and return the front item.
             while let Some(item) = this.slots[head].pop_front() {
-                this.overflow.push_back(item);
+                this.ready_items.push_back(item);
             }
-            this.overflow.pop_front()
+            this.ready_items.pop_front()
         };
 
         // if we got an item, adjust remaining size.
@@ -147,8 +155,13 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
         if tick {
             this.head = (this.head + 1) % NUM_SLOTS;
             // if there are more items queued, rearm the timer. otherwise drop it.
-            if this.size - this.overflow.len() > 0 {
+            if this.size - this.ready_items.len() > 0 {
                 this.arm_timer();
+                // The timer needs to be polled at least once. If we're going to
+                // return Poll::Pending, that will not happen, so do it now.
+                if item.is_none() {
+                    let _ = Pin::new(this.timer.as_mut().unwrap()).poll(cx);
+                }
             } else {
                 this.timer.take();
             }

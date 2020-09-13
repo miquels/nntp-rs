@@ -714,7 +714,7 @@ impl DeferredQueue {
         } else {
             DEFER_DELAY_NEXT
         };
-        self.queue.push(art, Duration::new(delay, 0))
+        self.queue.insert(art, Duration::new(delay, 0))
     }
 
     // Drain the queue.
