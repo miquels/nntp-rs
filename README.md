@@ -22,6 +22,8 @@ Status:
 - header only feeds
 - can write `prometheus` metrics files so you can build nice dashboards
 
+Example configuration files: [config.cfg](blob/master/config.cfg), [newsfeeds.cfg](blob/master/newsfeeds.cfg).
+
 # Runtimes.
 
 The part of the server that handles incoming feeds can use two different
