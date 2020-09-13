@@ -202,12 +202,17 @@ struct ExpFile {
 impl DSpool {
     /// Create a new diablo-type spool backend.
     pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<dyn SpoolBackend>> {
-        let dir_reallocint = if ms.reallocint.as_secs() > 0 {
-            // cannot go lower than 600 secs (10 mins).
-            std::cmp::max(600, ms.reallocint.as_secs() as u32)
+
+        // reallocation interval.
+        let dir_reallocint = if cfg.reallocint.as_secs() > 0 {
+            cfg.reallocint.as_secs() as u32
+        } else if ms.reallocint.as_secs() > 0 {
+            ms.reallocint.as_secs() as u32
         } else {
             DFL_DIR_REALLOCINT
         };
+        // cannot go lower than 600 secs (10 mins).
+        let dir_reallocint = std::cmp::max(600, dir_reallocint);
 
         // round down dir_reallocint to the nearest multiple of 600 (i.e. 10 minutes).
         let dir_reallocint = (dir_reallocint / 600) * 600;

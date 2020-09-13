@@ -272,6 +272,9 @@ pub struct SpoolDef {
     /// diablo: amount of time to keep articles (seconds, or suffix with s/m/h/d).
     #[serde(default, deserialize_with = "util::deserialize_duration")]
     pub keeptime:   Duration,
+    /// diablo: spool reallocation interval (default 10m).
+    #[serde(default,deserialize_with = "util::deserialize_duration")]
+    pub reallocint:     Duration,
 }
 
 /// Article storage (spool) functionality.
