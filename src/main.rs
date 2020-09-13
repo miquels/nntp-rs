@@ -81,7 +81,7 @@ pub struct ServeOpts {
     pub daemonize: bool,
     #[structopt(short, long)]
     /// listen address/port ([::]:1119)
-    pub listen: Option<Vec<String>>,
+    pub listen:    Option<Vec<String>>,
 }
 
 #[derive(StructOpt, Debug)]
@@ -103,7 +103,7 @@ pub struct HistExpireOpts {
 pub struct HistInitOpts {
     #[structopt(short, long)]
     /// history file.
-    pub file: Option<String>,
+    pub file:        Option<String>,
     #[structopt(short = "N", long = "num-buckets")]
     /// number of hash buckets (default 256K)
     pub num_buckets: Option<u32>,
@@ -585,4 +585,3 @@ fn dump_newsfeeds() -> Result<()> {
     println!("{:#?}", config::get_newsfeeds());
     Ok(())
 }
-

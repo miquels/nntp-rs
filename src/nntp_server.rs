@@ -15,9 +15,9 @@ use tokio::sync::mpsc;
 use crate::bus::Notification;
 use crate::commands::{Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
-use crate::metrics::RxSessionStats;
 use crate::history::HistStatus;
 use crate::logger;
+use crate::metrics::RxSessionStats;
 use crate::newsfeeds::{NewsFeeds, NewsPeer};
 use crate::nntp_codec::{NntpCodec, NntpLine};
 use crate::nntp_send::FeedArticle;
@@ -201,9 +201,7 @@ impl NntpServer {
             return Err(NntpResult::text(msg));
         }
 
-        self.stats
-            .on_connect(peer.label.to_string(), remote)
-            .await;
+        self.stats.on_connect(peer.label.to_string(), remote).await;
 
         let code = if peer.readonly {
             201

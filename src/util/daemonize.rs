@@ -1,16 +1,15 @@
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::io::{FromRawFd, AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 fn pipe() -> io::Result<(fs::File, fs::File)> {
     let mut fds: [libc::c_int; 2] = [0; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((
-            unsafe { fs::File::from_raw_fd(fds[0]) },
-            unsafe { fs::File::from_raw_fd(fds[1]) }
-    ))
+    Ok((unsafe { fs::File::from_raw_fd(fds[0]) }, unsafe {
+        fs::File::from_raw_fd(fds[1])
+    }))
 }
 
 enum Fork {
@@ -43,13 +42,14 @@ fn dup2(oldfd: RawFd, newfd: RawFd) -> io::Result<()> {
 }
 
 pub fn daemonize(pidfile: Option<&String>, std_close: bool) -> io::Result<()> {
-
     let dev_null = if std_close {
-        Some(fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/null")
-            .map_err(|e| ioerr!(e.kind(), "/dev/null: {}", e))?)
+        Some(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .map_err(|e| ioerr!(e.kind(), "/dev/null: {}", e))?,
+        )
     } else {
         None
     };
@@ -83,7 +83,8 @@ pub fn daemonize(pidfile: Option<&String>, std_close: bool) -> io::Result<()> {
         Ok(Fork::Parent(pid)) => {
             drop(wait_read);
             if let Some(pidfile) = pidfile {
-                let mut file = fs::File::create(&pidfile).map_err(|e| ioerr!(e.kind(), "{}: {}", pidfile, e))?;
+                let mut file =
+                    fs::File::create(&pidfile).map_err(|e| ioerr!(e.kind(), "{}: {}", pidfile, e))?;
                 writeln!(file, "{}", pid).map_err(|e| ioerr!(e.kind(), "{}: {}", pidfile, e))?;
             }
             let _ = write!(wait_write, "Ok");

@@ -21,9 +21,9 @@ use crate::config;
 use crate::server;
 use crate::spool::Spool;
 
+use super::delay_queue::DelayQueue;
 use super::mpmc;
 use super::queue::Queue;
-use super::delay_queue::DelayQueue;
 use super::{Connection, Peer, PeerArticle, PeerFeedItem};
 
 // Size of the command channel for the peerfeed.
@@ -77,7 +77,7 @@ pub(super) struct PeerFeed {
     tx_queue: mpmc::Sender<PeerArticle>,
 
     // Delay queue for if we delay articles.
-    delay_queue: DelayQueue::<PeerFeedItem>,
+    delay_queue: DelayQueue<PeerFeedItem>,
 
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
@@ -358,7 +358,6 @@ impl PeerFeed {
 
     // Write half or the entire current queue to the backlog.
     async fn send_queue_to_backlog(&mut self, entire_queue: bool) -> io::Result<()> {
-
         // or, if 'no_backlog' is set, just trim the in-memory queue and return.
         if self.newspeer.no_backlog {
             if self.rx_queue.len() >= 200 {
@@ -369,7 +368,7 @@ impl PeerFeed {
                     }
                 }
             }
-            return Ok(())
+            return Ok(());
         }
 
         let target_len = if entire_queue { 0 } else { PEERFEED_QUEUE_SIZE / 2 };
@@ -401,7 +400,6 @@ impl PeerFeed {
 
     // Write some of the current delay queue to the backlog.
     async fn send_delay_queue_to_backlog(&mut self) -> io::Result<()> {
-
         // or, if 'no_backlog' is set, don't bother.
         if self.newspeer.no_backlog {
             return Ok(());

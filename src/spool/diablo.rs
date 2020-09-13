@@ -24,8 +24,8 @@ use std::io::Error as IoError;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use once_cell::sync::Lazy;
@@ -60,10 +60,10 @@ pub struct DSpool {
 }
 
 struct DSpoolShared {
-    expire_lock:        Mutex<bool>,
-    writer:             Mutex<Writer>,
-    oldest:             AtomicU64,
-    last_expire:        AtomicU64,
+    expire_lock: Mutex<bool>,
+    writer:      Mutex<Writer>,
+    oldest:      AtomicU64,
+    last_expire: AtomicU64,
 }
 
 // The file we have open for writing.
@@ -243,20 +243,20 @@ impl DSpool {
 
         // Return DSpool.
         let ds = DSpool {
-            path:            PathBuf::from(&cfg.path),
-            rel_path:        cfg.rel_path.clone(),
-            spool_no:        cfg.spool_no,
+            path: PathBuf::from(&cfg.path),
+            rel_path: cfg.rel_path.clone(),
+            spool_no: cfg.spool_no,
             file_reallocint: file_reallocint,
-            dir_reallocint:  dir_reallocint,
-            keeptime:        cfg.keeptime.as_secs(),
-            minfree:         minfree,
-            maxsize:         cfg.maxsize,
+            dir_reallocint: dir_reallocint,
+            keeptime: cfg.keeptime.as_secs(),
+            minfree: minfree,
+            maxsize: cfg.maxsize,
             weight,
             shared: Arc::new(DSpoolShared {
-                oldest:          AtomicU64::new(0),
-                last_expire:     AtomicU64::new(0),
-                expire_lock:     Mutex::new(true),
-                writer:          Mutex::new(Writer::default()),
+                oldest:      AtomicU64::new(0),
+                last_expire: AtomicU64::new(0),
+                expire_lock: Mutex::new(true),
+                writer:      Mutex::new(Writer::default()),
             }),
         };
 
@@ -593,7 +593,7 @@ impl DSpool {
         })
     }
 
-    fn auto_expire(&self, now: UnixTime, force:  bool) {
+    fn auto_expire(&self, now: UnixTime, force: bool) {
         let last_expire: UnixTime = (&self.shared.last_expire).into();
         if now - last_expire >= Duration::new(EXPIRE_CHECK as u64, 0) || force {
             let this = self.clone();
@@ -603,7 +603,7 @@ impl DSpool {
                     None => {
                         log::debug!("auto_expire: already running");
                         return;
-                    }
+                    },
                 };
                 now.to_atomic(&this.shared.last_expire);
                 if let Err(e) = this.do_expire(false, false) {
@@ -626,7 +626,6 @@ impl DSpool {
     // If `dry_run` is true, go through the motions, but don't actually remove articles.
     //
     fn do_expire(&self, stat_only: bool, dry_run: bool) -> io::Result<u64> {
-
         let mut to_delete = 0;
         let mut do_expire = false;
 
@@ -637,7 +636,6 @@ impl DSpool {
 
             // if there's not enough free space, find out how much we need to free.
             if self.minfree > 0 && sv.available_space() < self.minfree {
-
                 // to calculate how much we have to delete, make minfree 10% bigger.
                 let minfree = self.minfree + self.minfree / 10;
                 to_delete = minfree - sv.available_space();
@@ -647,7 +645,6 @@ impl DSpool {
             // if we have used too much space, find out how much we need to free.
             let used = sv.total_space() - sv.free_space();
             if self.maxsize > 0 && used > self.maxsize {
-
                 // to calculate how much we have to delete, make maxsize 5% smaller.
                 // never more than 50GB smaller though.
                 let mut maxsize = self.maxsize - self.maxsize / 20;
@@ -677,7 +674,7 @@ impl DSpool {
         }
 
         if !do_expire && !stat_only && !dry_run {
-            return Ok(0)
+            return Ok(0);
         }
 
         let mut deleted = 0;

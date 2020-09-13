@@ -1,4 +1,3 @@
-
 pub enum TrySendError<T> {
     Full(T),
     Closed(T),
@@ -74,4 +73,3 @@ mod mpmc_internal {
 }
 
 pub use self::mpmc_internal::*;
-

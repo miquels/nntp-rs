@@ -192,7 +192,10 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
 
     // metrics must be set if prometheus is set.
     if cfg.logging.prometheus.is_some() && cfg.logging.metrics.is_none() {
-        return Err(ioerr!(InvalidData, "log: metrics cannot be empty if prometheus is set"));
+        return Err(ioerr!(
+            InvalidData,
+            "log: metrics cannot be empty if prometheus is set"
+        ));
     }
 
     // If user or group was set

@@ -223,7 +223,7 @@ impl QWriter {
                     return Ok(());
                 }
                 return Err(e);
-            }
+            },
         };
         match file.metadata().await {
             Ok(m) if m.len() > 0 => self.is_empty = false,

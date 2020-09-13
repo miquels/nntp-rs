@@ -98,8 +98,14 @@ pub fn getpid() -> u32 {
 
 pub fn touch(path: impl Into<PathBuf>, time: UnixTime) -> io::Result<()> {
     let path = CString::new(path.into().into_os_string().into_vec()).unwrap();
-    let time = time.as_secs().try_into().map_err(|_| ioerr!(InvalidData, "invalid time"))?;
-    let buf = libc::utimbuf{ actime: time, modtime: time };
+    let time = time
+        .as_secs()
+        .try_into()
+        .map_err(|_| ioerr!(InvalidData, "invalid time"))?;
+    let buf = libc::utimbuf {
+        actime:  time,
+        modtime: time,
+    };
     unsafe {
         if libc::utime(path.as_ptr() as *const libc::c_char, &buf as *const libc::utimbuf) < 0 {
             return Err(io::Error::last_os_error());
@@ -107,4 +113,3 @@ pub fn touch(path: impl Into<PathBuf>, time: UnixTime) -> io::Result<()> {
     }
     Ok(())
 }
-

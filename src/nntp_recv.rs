@@ -9,9 +9,9 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::article::{Article, HeaderName, Headers, HeadersParser};
 use crate::commands;
-use crate::metrics::Stats;
 use crate::errors::*;
 use crate::history::{HistEnt, HistError, HistStatus};
+use crate::metrics::Stats;
 use crate::nntp_send::FeedArticle;
 use crate::nntp_server::{ArtAccept, NntpResult, NntpServer};
 use crate::spool::{SPOOL_DONTSTORE, SPOOL_REJECTARTS};
@@ -121,7 +121,7 @@ impl NntpServer {
             Err(msg) => {
                 self.quit = true;
                 msg
-            }
+            },
         };
         Ok(reply)
     }
@@ -442,7 +442,7 @@ impl NntpServer {
         if !thispeer.nomismatch && !thispeer.pathalias.contains(art.pathhost.as_ref().unwrap()) {
             use std::sync::atomic::AtomicU64;
             static LAST_MSG: AtomicU64 = AtomicU64::new(0);
-            let last_msg: UnixTime =  (&LAST_MSG).into();
+            let last_msg: UnixTime = (&LAST_MSG).into();
             if last_msg.seconds_elapsed() >= 10 {
                 // Ratelimited message, max 1 per 10 secs.
                 UnixTime::now().to_atomic(&LAST_MSG);

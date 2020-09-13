@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio::stream::Stream;
-use tokio::time::{Duration, Instant};
 use tokio::time::delay_for;
+use tokio::time::{Duration, Instant};
 
 // max 10 seconds, resolution 500ms.
 const NUM_SLOTS: usize = 20;
@@ -15,11 +15,11 @@ const TICKS_PER_SEC: u64 = 2;
 
 /// Iterator returned by DelayQueue::drain()
 pub struct Drain<'a, T> {
-    queue:  &'a mut DelayQueue<T>,
-    pos:    usize,
+    queue: &'a mut DelayQueue<T>,
+    pos:   usize,
 }
 
-impl<'a, T: Unpin> Drain <'a, T> {
+impl<'a, T: Unpin> Drain<'a, T> {
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -54,19 +54,19 @@ impl<'a, T: Unpin> Iterator for Drain<'a, T> {
 /// But that's OK, we just want "delay this a bit" in general
 /// and we won't fuss over accuracy.
 pub struct DelayQueue<T> {
-    slots:    [VecDeque<T>; NUM_SLOTS],
+    slots:       [VecDeque<T>; NUM_SLOTS],
     ready_items: VecDeque<T>,
-    head:     usize,
-    size:     usize,
-    cap:      usize,
-    timer:     Option<tokio::time::Delay>,
+    head:        usize,
+    size:        usize,
+    cap:         usize,
+    timer:       Option<tokio::time::Delay>,
 }
 
 impl<T: Unpin> DelayQueue<T> {
     /// Create a new bounded queue.
     pub fn with_capacity(cap: usize) -> DelayQueue<T> {
         DelayQueue {
-            slots:  array_init::array_init(|_| VecDeque::<T>::new()),
+            slots: array_init::array_init(|_| VecDeque::<T>::new()),
             ready_items: VecDeque::<T>::new(),
             head: 0,
             size: 0,
@@ -101,7 +101,10 @@ impl<T: Unpin> DelayQueue<T> {
 
     /// Drain the queue.
     pub fn drain(&mut self) -> Drain<'_, T> {
-        Drain { queue: self, pos: 0 }
+        Drain {
+            queue: self,
+            pos:   0,
+        }
     }
 
     // arm or re-arm the timer.
@@ -115,7 +118,9 @@ impl<T: Unpin> DelayQueue<T> {
     }
 }
 
-impl<T> Stream for DelayQueue<T> where T: Unpin {
+impl<T> Stream for DelayQueue<T>
+where T: Unpin
+{
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -180,4 +185,3 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
         }
     }
 }
-

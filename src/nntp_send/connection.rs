@@ -31,8 +31,8 @@ use crate::nntp_codec::{NntpCodec, NntpResponse};
 use crate::spool::{ArtPart, Spool, SpoolArt};
 use crate::util::Buffer;
 
-use super::{delay_queue::DelayQueue, Peer, PeerArticle, PeerFeedItem, QItems, Queue};
 use super::mpmc;
+use super::{delay_queue::DelayQueue, Peer, PeerArticle, PeerFeedItem, QItems, Queue};
 
 // Close idle connections after one minute.
 const CONNECTION_MAX_IDLE: u32 = 60;
@@ -66,37 +66,37 @@ const DEFER_MAX_QUEUE: usize = 1000;
 //
 pub(super) struct Connection {
     // Unique identifier.
-    id:         u64,
+    id:           u64,
     // IP address we're connected to.
-    ipaddr:     IpAddr,
+    ipaddr:       IpAddr,
     // Peer info.
-    newspeer:   Arc<Peer>,
+    newspeer:     Arc<Peer>,
     // reader / writer.
-    reader:     NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
-    writer:     NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
+    reader:       NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
+    writer:       NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
     // Local items waiting to be sent (check -> takethis transition)
-    send_queue: VecDeque<ConnItem>,
+    send_queue:   VecDeque<ConnItem>,
     // Sent items, waiting for a reply.
-    recv_queue: VecDeque<ConnItem>,
+    recv_queue:   VecDeque<ConnItem>,
     // Dropped items to be pushed onto the backlog.
-    dropped:    Vec<ConnItem>,
+    dropped:      Vec<ConnItem>,
     // Stats
-    stats:      TxSessionStats,
+    stats:        TxSessionStats,
     // Spool.
-    spool:      Spool,
+    spool:        Spool,
     // channel to send information to the PeerFeed.
-    tx_chan:    mpsc::Sender<PeerFeedItem>,
+    tx_chan:      mpsc::Sender<PeerFeedItem>,
     // article queue.
-    rx_queue:   mpmc::Receiver<PeerArticle>,
+    rx_queue:     mpmc::Receiver<PeerArticle>,
     // deferred article queue.
-    deferred:   DeferredQueue,
+    deferred:     DeferredQueue,
     // broadcast channel to receive notifications from the PeerFeed.
-    broadcast:  broadcast::Receiver<PeerFeedItem>,
+    broadcast:    broadcast::Receiver<PeerFeedItem>,
     // do we need to rewrite the headers?
-    rewrite:    bool,
+    rewrite:      bool,
     // Backlog.
-    queue:      Queue,
-    qitems:     Option<QItems>,
+    queue:        Queue,
+    qitems:       Option<QItems>,
     // Idle counter, incremented every 10 secs.
     idle_counter: u32,
 }
@@ -697,7 +697,9 @@ struct DeferredQueue {
 
 impl DeferredQueue {
     fn new() -> DeferredQueue {
-        DeferredQueue{ queue: DelayQueue::with_capacity(DEFER_MAX_QUEUE) }
+        DeferredQueue {
+            queue: DelayQueue::with_capacity(DEFER_MAX_QUEUE),
+        }
     }
 
     // Push an article onto the queue.
@@ -718,7 +720,7 @@ impl DeferredQueue {
     }
 
     // Drain the queue.
-    fn drain(&mut self) -> impl Iterator<Item=ConnItem> + '_ {
+    fn drain(&mut self) -> impl Iterator<Item = ConnItem> + '_ {
         self.queue.drain()
     }
 
@@ -792,4 +794,3 @@ fn delay_increase(fail_delay: &mut f64, max: u64) {
         *fail_delay = max as f64;
     }
 }
-

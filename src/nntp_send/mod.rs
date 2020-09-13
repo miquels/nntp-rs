@@ -8,12 +8,16 @@ use crate::newsfeeds::NewsPeer;
 use crate::spool::ArtLoc;
 
 macro_rules! conditional_fut {
-    ($cond:expr, $fut:expr) => {
+    ($cond:expr, $fut:expr) => {{
+        use futures::future::{pending, Either, FutureExt};
         {
-            use futures::future::{Either, FutureExt, pending};
-            { if $cond { Either::Left($fut.fuse()) } else { Either::Right(pending()) } }
+            if $cond {
+                Either::Left($fut.fuse())
+            } else {
+                Either::Right(pending())
+            }
         }
-    }
+    }};
 }
 
 mod connection;

@@ -1,10 +1,10 @@
 //! Diagnostics, statistics and telemetry.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::default::Default;
-use std::io;
 use std::hash::{Hash, Hasher};
+use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::time::delay_for;
 
 use crate::article::Article;
@@ -132,13 +132,13 @@ recv_stats! {
 
 pub struct RxSessionStats {
     // identification.
-    hostname:   String,
-    ipaddr:     IpAddr,
-    label:      String,
-    fdno:       u32,
-    connected:  bool,
+    hostname:       String,
+    ipaddr:         IpAddr,
+    label:          String,
+    fdno:           u32,
+    connected:      bool,
     // stats
-    instant:    Instant,
+    instant:        Instant,
     pub conn_stats: ConnRecvStats,
     pub peer_stats: Arc<PeerRecvStats>,
 }
@@ -160,7 +160,7 @@ impl RxSessionStats {
             label: "unknown".to_string(),
             fdno: fdno,
             connected: false,
-            instant:  Instant::now(),
+            instant: Instant::now(),
             conn_stats: ConnRecvStats::default(),
             peer_stats: Arc::new(PeerRecvStats::default()),
         }
@@ -210,7 +210,11 @@ impl RxSessionStats {
         };
         let peer_stats = {
             let mut stats = PEER_STATS.write();
-            stats.recv.entry(label.clone()).or_insert_with(|| Arc::new(PeerRecvStats::default())).clone()
+            stats
+                .recv
+                .entry(label.clone())
+                .or_insert_with(|| Arc::new(PeerRecvStats::default()))
+                .clone()
         };
         self.hostname = host.unwrap_or(self.ipaddr.to_string());
         self.label = label;
@@ -373,31 +377,31 @@ impl RxSessionStats {
 
 #[derive(Debug, Default)]
 struct ConnSentStats {
-    offered: u64,
-    accepted: u64,
+    offered:        u64,
+    accepted:       u64,
     accepted_bytes: u64,
-    rejected: u64,
+    rejected:       u64,
     rejected_bytes: u64,
-    refused: u64,
-    deferred: u64,
+    refused:        u64,
+    deferred:       u64,
     deferred_bytes: u64,
-    deferred_fail: u64,
-    not_found: u64,
+    deferred_fail:  u64,
+    not_found:      u64,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeerSentStats {
-    offered: AtomicU64,
-    accepted: AtomicU64,
+    offered:        AtomicU64,
+    accepted:       AtomicU64,
     accepted_bytes: AtomicU64,
-    rejected: AtomicU64,
+    rejected:       AtomicU64,
     rejected_bytes: AtomicU64,
-    refused: AtomicU64,
-    deferred: AtomicU64,
+    refused:        AtomicU64,
+    deferred:       AtomicU64,
     deferred_bytes: AtomicU64,
-    deferred_fail: AtomicU64,
-    not_found: AtomicU64,
+    deferred_fail:  AtomicU64,
+    not_found:      AtomicU64,
     connections:    AtomicU64,
 }
 
@@ -405,7 +409,7 @@ macro_rules! stats_add {
     ($self:expr, $count:expr, $field:ident) => {
         $self.delta_stats.$field = $self.conn_stats.$field.wrapping_add($count);
         $self.peer_stats.$field.fetch_add($count, Ordering::AcqRel);
-    }
+    };
 }
 
 #[rustfmt::skip]
@@ -425,14 +429,14 @@ pub struct TxSessionStats {
 impl Default for TxSessionStats {
     fn default() -> TxSessionStats {
         TxSessionStats {
-            label: String::new(),
-            id:    0,
-            start: Instant::now(),
-            mark:  Instant::now(),
-            connected: false,
-            conn_stats: ConnSentStats::default(),
+            label:       String::new(),
+            id:          0,
+            start:       Instant::now(),
+            mark:        Instant::now(),
+            connected:   false,
+            conn_stats:  ConnSentStats::default(),
             delta_stats: ConnSentStats::default(),
-            peer_stats: Arc::new(PeerSentStats::default()),
+            peer_stats:  Arc::new(PeerSentStats::default()),
         }
     }
 }
@@ -449,7 +453,11 @@ impl TxSessionStats {
     pub fn on_connect(&mut self, label: &str, id: u64, outhost: &str, ipaddr: IpAddr, line: &str) {
         let peer_stats = {
             let mut stats = PEER_STATS.write();
-            stats.sent.entry(label.to_string()).or_insert_with(|| Arc::new(PeerSentStats::default())).clone()
+            stats
+                .sent
+                .entry(label.to_string())
+                .or_insert_with(|| Arc::new(PeerSentStats::default()))
+                .clone()
         };
         self.label = label.to_string();
         self.id = id;
@@ -625,7 +633,6 @@ fn format_secs(ms: u64) -> String {
 }
 
 pub async fn load() -> io::Result<()> {
-
     // load file data.
     let config = config::get_config();
     let filename = match config.logging.metrics.as_ref() {
@@ -647,7 +654,12 @@ pub async fn load() -> io::Result<()> {
 
     // deserialize json.
     let data: PeerStats = serde_json::from_str(&json).map_err(|e| {
-        ioerr!(InvalidData, "metrics: {:?}: could not deserialize JSON data: {}", path, e)
+        ioerr!(
+            InvalidData,
+            "metrics: {:?}: could not deserialize JSON data: {}",
+            path,
+            e
+        )
     })?;
 
     // save into global.
@@ -699,7 +711,12 @@ async fn write_file(path: impl AsRef<Path>, data: String) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
     if let Err(e) = tokio::fs::write(&tmp, data).await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(ioerr!(e.kind(), "metrics: creating/writing temp file {:?}: {}", tmp, e));
+        return Err(ioerr!(
+            e.kind(),
+            "metrics: creating/writing temp file {:?}: {}",
+            tmp,
+            e
+        ));
     }
     if let Err(e) = tokio::fs::rename(&tmp, &path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -838,11 +855,15 @@ struct PromLabels {
 
 impl PromLabels {
     fn push(&mut self, name: impl Into<String>, value: impl Into<String>) {
-        Rc::get_mut(&mut self.labels).unwrap().push((name.into(), value.into()));
+        Rc::get_mut(&mut self.labels)
+            .unwrap()
+            .push((name.into(), value.into()));
     }
 
     fn deep_clone(&self) -> PromLabels {
-        PromLabels{ labels: Rc::new((&*self.labels).clone()) }
+        PromLabels {
+            labels: Rc::new((&*self.labels).clone()),
+        }
     }
 
     fn to_string(&self) -> String {
@@ -866,11 +887,15 @@ struct PromMetric {
 
 impl PromMetric {
     fn new(name: &'static str, help: &'static str, ptype: &'static str) -> PromMetric {
-        PromMetric{ name, help, ptype, values: Vec::new() }
+        PromMetric {
+            name,
+            help,
+            ptype,
+            values: Vec::new(),
+        }
     }
 
     fn add_value(&mut self, labels: PromLabels, mut value: u64, timestamp: Option<UnixTime>) {
-
         // we limit counters to 2**53 and then let them wrap around.
         // this way, we keep the precision of an integer.
         // (see also https://github.com/dirac-institute/zads-terraform/issues/32)
@@ -903,4 +928,3 @@ impl PromMetric {
         }
     }
 }
-
