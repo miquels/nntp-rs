@@ -1,6 +1,6 @@
 //! Buffer implementation like Bytes / BytesMut.
 //!
-//! It is way simpler and contains way, way less unsafe code.
+//! It is simpler and contains less unsafe code.
 //
 // The unsafe code is needed for efficiency reasons. You do not
 // want to zero-initialize buffers every time you use them.
@@ -137,10 +137,12 @@ impl Buffer {
     pub fn read_exact(&mut self, mut reader: impl Read, len: usize) -> io::Result<()> {
         self.data.reserve(len);
         let prev_len = self.data.len();
+        // this is safe as long as `reader` behaves itself properly.
         unsafe { self.data.set_len(prev_len + len) };
         match reader.read_exact(&mut self.data[prev_len..]) {
             Ok(_) => Ok(()),
             Err(e) => {
+                // this is safe, it sets it back to what it was.
                 unsafe { self.data.set_len(prev_len) };
                 Err(e)
             },
@@ -155,16 +157,19 @@ impl Buffer {
         let mut end_data = self.data.len();
         loop {
             self.data.reserve(4096);
+            // this is safe as long as `reader` behaves itself properly.
             unsafe { self.data.set_len(self.data.capacity()) };
             match reader.read(&mut self.data[end_data..]) {
                 Ok(n) => {
                     if n == 0 {
+                        // safe: cap len to the length of the data that was actually read.
                         unsafe { self.data.set_len(end_data) };
                         break;
                     }
                     end_data += n;
                 },
                 Err(e) => {
+                    // safe: cap len to the length of the data that was actually read.
                     unsafe { self.data.set_len(end_data) };
                     return Err(e);
                 },
@@ -210,6 +215,7 @@ impl Buffer {
 }
 
 impl BufMut for Buffer {
+    // this is safe if the caller is safe, but that is the contract of this API.
     unsafe fn advance_mut(&mut self, cnt: usize) {
         if self.data.len() + cnt > self.data.capacity() {
             panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
@@ -220,6 +226,7 @@ impl BufMut for Buffer {
     fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
         let len = self.data.len();
         let mut_len = self.data.capacity() - len;
+        // this is safe if the caller is safe, but that is the contract of this API.
         unsafe {
             self.data.set_len(self.data.capacity());
             let mut_data = &mut self.data[len..];

@@ -59,6 +59,7 @@ pub fn gettime(clk_id: ClockId) -> Timespec {
         tv_sec:  0,
         tv_nsec: 0,
     };
+    // this is safe, `ts` has been initialized.
     unsafe {
         libc::clock_gettime(clk_id as clockid_t, &mut ts);
     }
@@ -75,6 +76,7 @@ pub fn unixtime() -> u64 {
         tv_sec:  0,
         tv_nsec: 0,
     };
+    // this is safe, `ts` has been initialized.
     unsafe {
         libc::clock_gettime(ClockId::RealtimeCoarse as clockid_t, &mut ts);
     }
@@ -88,6 +90,7 @@ pub fn unixtime_ms() -> u64 {
         tv_sec:  0,
         tv_nsec: 0,
     };
+    // this is safe, `ts` has been initialized.
     unsafe {
         libc::clock_gettime(ClockId::RealtimeCoarse as clockid_t, &mut ts);
     }
@@ -101,6 +104,7 @@ pub fn monotime() -> u64 {
         tv_sec:  0,
         tv_nsec: 0,
     };
+    // this is safe, `ts` has been initialized.
     unsafe {
         libc::clock_gettime(ClockId::MonotonicCoarse as clockid_t, &mut ts);
     }
@@ -113,6 +117,7 @@ pub fn monotime_ms() -> u64 {
         tv_sec:  0,
         tv_nsec: 0,
     };
+    // this is safe, `ts` has been initialized.
     unsafe {
         libc::clock_gettime(ClockId::MonotonicCoarse as clockid_t, &mut ts);
     }

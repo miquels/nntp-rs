@@ -978,8 +978,10 @@ impl DHistEnt {
     }
 
     fn to_bytes(self) -> [u8; DHISTENT_SIZE] {
-        // https://github.com/jswrenn/typic/issues/11
-        // self.transmute_into()
+        // The unsafe transmute below is safe, and since we use typic we should be
+        // able to write it as self.transmute_into() . This unfortunately hits a bug
+        // in typic, https://github.com/jswrenn/typic/issues/11 .
+        // So until that is fixed, use raw transmute.
         unsafe { std::mem::transmute(self) }
     }
 }

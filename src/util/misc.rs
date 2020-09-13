@@ -15,13 +15,18 @@ use crate::util::UnixTime;
 /// If unset, returns "unconfigured.local".
 pub fn hostname() -> String {
     let len = 255;
-    let mut buf = Vec::<u8>::with_capacity(len);
+    let mut buf = Vec::<u8>::new();
+    buf.resize(len + 1, 0);
     let ptr = buf.as_mut_ptr() as *mut libc::c_char;
 
     unsafe {
+        // this is safe, `ptr` points to buf which has been initialized.
         if gethostname(ptr, len as libc::size_t) != 0 {
             return String::from("unconfigured.local");
         }
+        // this is also safe. since `buf` was initialized with zeroes and
+        // is actually one byte longer than what we told `gethostname`,
+        // it's guaranteed to be zero-terminated.
         let mut h = CStr::from_ptr(ptr).to_string_lossy().into_owned();
         if !h.contains(".") {
             h += ".local";
@@ -33,6 +38,7 @@ pub fn hostname() -> String {
 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
 #[inline]
 pub fn read_ahead(file: &fs::File, pos: u64, size: u64) {
+    // this is safe, just a systemcall wrapper, no pointers.
     unsafe {
         use std::os::unix::io::AsRawFd;
         libc::posix_fadvise(
@@ -48,6 +54,11 @@ pub fn read_ahead(file: &fs::File, pos: u64, size: u64) {
 #[inline]
 pub fn read_ahead(_file: &fs::File, _pos: u64, _size: u64) {}
 
+// This is a wrapper for the linux systemcall `preadv2`. We use it to
+// be able to specify the `RWF_NOWAIT` flag. It means 'return whatever
+// is present in the pagecache right now, and do not block'. Useful
+// if you're pretty sure the data is in the pagecache so you don't
+// have to delegate the read() to a threadpool.
 #[cfg(target_os = "linux")]
 mod try_read_at {
     use std::fs::File;
@@ -72,6 +83,7 @@ mod try_read_at {
         };
         let fd = file.as_raw_fd();
         let iovptr = &iov as *const libc::iovec;
+        // this is safe: no uninitialized memory is being passed in, no pointers are manipulated.
         let res = unsafe { preadv2(fd, iovptr, 1, offset as libc::off_t, RWF_NOWAIT) };
         if res < 0 {
             Err(io::Error::last_os_error())
@@ -93,6 +105,7 @@ mod try_read_at {
 pub use try_read_at::*;
 
 pub fn getpid() -> u32 {
+    // safe: systemcall wrapper, no pointers.
     unsafe { libc::getpid() as u32 }
 }
 
@@ -107,6 +120,7 @@ pub fn touch(path: impl Into<PathBuf>, time: UnixTime) -> io::Result<()> {
         modtime: time,
     };
     unsafe {
+        // safe: all data has been initialized.
         if libc::utime(path.as_ptr() as *const libc::c_char, &buf as *const libc::utimbuf) < 0 {
             return Err(io::Error::last_os_error());
         }

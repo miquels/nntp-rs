@@ -16,6 +16,7 @@ pub struct MmapAtomicU32 {
     data: *const AtomicU32,
 }
 
+// The data in MmapAtomicU32 is atomic, so is Send + Sync.
 unsafe impl Sync for MmapAtomicU32 {}
 unsafe impl Send for MmapAtomicU32 {}
 
@@ -29,6 +30,7 @@ impl MmapAtomicU32 {
     pub fn new(file: &fs::File, rw: bool, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
         let mut opts = MmapOptions::new();
         Ok(if rw {
+            // safe, as long as nothing "outside" changes the mmap'ed file.
             let mmap: MmapMut = unsafe { opts.offset(offset).len(num_elems * 4).map_mut(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
             MmapAtomicU32 {
@@ -36,6 +38,7 @@ impl MmapAtomicU32 {
                 data,
             }
         } else {
+            // safe, as long as nothing "outside" changes the mmap'ed file.
             let mmap: Mmap = unsafe { opts.offset(offset).len(num_elems * 4).map(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
             MmapAtomicU32 {
@@ -46,11 +49,13 @@ impl MmapAtomicU32 {
     }
 
     pub fn load(&self, index: usize) -> u32 {
+        // safe, as long as nothing "outside" changes the mmap'ed file.
         let elem = unsafe { self.data.offset(index as isize).as_ref().unwrap() };
         elem.load(Ordering::SeqCst)
     }
 
     pub fn store(&self, index: usize, val: u32) {
+        // safe: a store does not import any state.
         let elem = unsafe { self.data.offset(index as isize).as_ref().unwrap() };
         elem.store(val, Ordering::SeqCst);
     }
