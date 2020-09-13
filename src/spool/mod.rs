@@ -275,6 +275,9 @@ pub struct SpoolDef {
     /// diablo: spool reallocation interval (default 10m).
     #[serde(default,deserialize_with = "util::deserialize_duration")]
     pub reallocint:     Duration,
+    /// diablo: maximum size of spoolfile.
+    #[serde(default, deserialize_with = "util::deserialize_size")]
+    pub max_file_size:  u64,
 }
 
 /// Article storage (spool) functionality.

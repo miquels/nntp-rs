@@ -54,6 +54,7 @@ pub struct DSpool {
     dir_reallocint:     u32,
     minfree:            u64,
     maxsize:            u64,
+    max_file_size:      u64,
     weight:             u32,
     keeptime:           u64,
     shared:             Arc<DSpoolShared>,
@@ -246,6 +247,15 @@ impl DSpool {
             weight = 1;
         }
 
+        // Maximum spoolfile size.
+        let max_file_size = if cfg.max_file_size == 0 {
+            MAX_SPOOLFILE_SIZE
+        } else if cfg.max_file_size > 4_000_000_000 {
+            4_000_000_000
+        } else {
+            cfg.max_file_size
+        };
+
         // Return DSpool.
         let ds = DSpool {
             path: PathBuf::from(&cfg.path),
@@ -256,6 +266,7 @@ impl DSpool {
             keeptime: cfg.keeptime.as_secs(),
             minfree: minfree,
             maxsize: cfg.maxsize,
+            max_file_size,
             weight,
             shared: Arc::new(DSpoolShared {
                 oldest:      AtomicU64::new(0),
@@ -413,7 +424,7 @@ impl DSpool {
         let res = match files.into_iter().last() {
             None => None,
             Some((len, _name, iter, _tm)) => {
-                if len < MAX_SPOOLFILE_SIZE {
+                if len < self.max_file_size {
                     Some(iter)
                 } else {
                     None
@@ -577,7 +588,7 @@ impl DSpool {
             .map_err(|e| IoError::new(e.kind(), format!("writing to {}: {}", writer.name, e)))?;
 
         // store filehandle, unless we went over 1GB size.
-        if pos + (store_len as u64) < MAX_SPOOLFILE_SIZE {
+        if pos + (store_len as u64) < self.max_file_size {
             writer.fh.get_or_insert(fh);
         }
 
