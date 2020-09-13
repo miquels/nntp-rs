@@ -19,16 +19,24 @@ pub struct Drain<'a, T> {
     pos:    usize,
 }
 
+impl<'a, T: Unpin> Drain <'a, T> {
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+}
+
 impl<'a, T: Unpin> Iterator for Drain<'a, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
         if let Some(item) = self.queue.ready_items.pop_front() {
+            self.queue.size -= 1;
             return Some(item);
         }
         while self.pos < NUM_SLOTS {
             let slot = (self.queue.head + self.pos) % NUM_SLOTS;
             if let Some(item) = self.queue.slots[slot].pop_front() {
+                self.queue.size -= 1;
                 return Some(item);
             }
             self.pos += 1;
@@ -134,7 +142,7 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
 
         // get next item, if any.
         let head = this.head;
-        let item = if this.slots[this.head].len() < 2 {
+        let item = if this.slots[head].len() < 2 {
             // current slot has 0 or 1 items.
             this.slots[head].pop_front()
         } else {
@@ -145,8 +153,6 @@ impl<T> Stream for DelayQueue<T> where T: Unpin {
             }
             this.ready_items.pop_front()
         };
-
-        // if we got an item, adjust remaining size.
         if item.is_some() {
             this.size -= 1;
         }

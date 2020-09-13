@@ -2,6 +2,7 @@
 //!
 use smartstring::alias::String as SmartString;
 use std::net::IpAddr;
+use std::time::Duration;
 
 use crate::newsfeeds::NewsPeer;
 use crate::spool::ArtLoc;
@@ -77,7 +78,8 @@ struct Peer {
     port:          u16,
     maxparallel:   u32,
     maxstream:     u32,
-    nobatch:       bool,
+    delay_feed:    Duration,
+    no_backlog:    bool,
     drop_deferred: bool,
     maxqueue:      u32,
     headfeed:      bool,
@@ -93,7 +95,8 @@ impl Peer {
             bindaddress:   nfpeer.bindaddress.clone(),
             port:          nfpeer.port,
             maxparallel:   nfpeer.maxparallel,
-            nobatch:       nfpeer.nobatch,
+            delay_feed:    nfpeer.delay_feed,
+            no_backlog:    nfpeer.no_backlog,
             drop_deferred: nfpeer.drop_deferred,
             maxqueue:      nfpeer.maxqueue,
             maxstream:     nfpeer.maxstream,

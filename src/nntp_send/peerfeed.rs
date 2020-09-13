@@ -23,6 +23,7 @@ use crate::spool::Spool;
 
 use super::mpmc;
 use super::queue::Queue;
+use super::delay_queue::DelayQueue;
 use super::{Connection, Peer, PeerArticle, PeerFeedItem};
 
 // Size of the command channel for the peerfeed.
@@ -46,6 +47,9 @@ const MOVE_TO_BACKLOG_AFTER_SECS: u64 = 10;
 // is in queue-only mode, or if no articles have been taken from it by
 // a Connection after START_SPOOLING_AFTER_SECS.
 const MOVE_TO_BACKLOG_EVERY_SECS: u64 = 5;
+
+// Maximum size of the delay queue.
+const DELAY_QUEUE_MAX_SIZE: usize = 5000;
 
 // A peerfeed contains an in memory queue, an on-disk backlog queue,
 // and zero or more active NNTP connections to remote peers.
@@ -71,6 +75,9 @@ pub(super) struct PeerFeed {
     // MPSC channel that is the article queue for the Connections.
     rx_queue: mpmc::Receiver<PeerArticle>,
     tx_queue: mpmc::Sender<PeerArticle>,
+
+    // Delay queue for if we delay articles.
+    delay_queue: DelayQueue::<PeerFeedItem>,
 
     // broadcast channel to all Connections.
     broadcast: broadcast::Sender<PeerFeedItem>,
@@ -98,6 +105,7 @@ impl PeerFeed {
         let (tx_chan, rx_chan) = mpsc::channel::<PeerFeedItem>(PEERFEED_COMMAND_CHANNEL_SIZE);
         let (broadcast, _) = broadcast::channel(CONNECTION_BCAST_CHANNEL_SIZE);
         let (tx_queue, rx_queue) = mpmc::bounded(PEERFEED_QUEUE_SIZE);
+        let delay_queue = DelayQueue::with_capacity(DELAY_QUEUE_MAX_SIZE);
         let config = config::get_config();
         let queue_dir = &config.paths.queue;
 
@@ -110,6 +118,7 @@ impl PeerFeed {
             tx_chan,
             rx_queue,
             tx_queue,
+            delay_queue,
             broadcast,
             num_conns: 0,
             spool: spool.clone(),
@@ -140,17 +149,39 @@ impl PeerFeed {
                 break;
             }
 
-            let item;
-            futures::select_biased! {
+            let item = futures::select_biased! {
                 res = self.rx_chan.recv().fuse() => {
                     // we got an item from the masterfeed.
                     match res {
-                        Some(an_item) => item = Some(an_item),
+                        Some(art @ PeerFeedItem::Article(_)) if self.newspeer.delay_feed.as_secs() > 0 && !queue_only => {
+                            //
+                            // Got an article, and `delay` is set. Insert the article into the DelayQueue.
+                            // If that queue is full, send part of it to the backlog, or just drop it
+                            // if dont-queue is set.
+                            //
+                            if let Err(art) = self.delay_queue.insert(art, self.newspeer.delay_feed) {
+                                // overflow.
+                                if let Err(_e) = self.send_delay_queue_to_backlog().await {
+                                    // FIXME: backlog fails. now what.
+                                }
+                                // there should be room now.
+                                let _ = self.delay_queue.insert(art, self.newspeer.delay_feed);
+                            }
+                            continue;
+                        },
+                        item @ Some(_) => {
+                            // Got an article and we don't have to delay it, so use this value.
+                            item
+                        },
                         None => {
                             // unreachable!(), but let's be careful.
                             break;
-                        },
+                        }
                     }
+                }
+                res = self.delay_queue.next().fuse() => {
+                    // Delayed article. A DelayQueue always returns Some(item).
+                    res
                 }
                 _ = interval.next().fuse() => {
 
@@ -185,7 +216,7 @@ impl PeerFeed {
                     }
                     continue;
                 }
-            }
+            };
             let item = item.unwrap();
             log::trace!("PeerFeed::run: {}: recv {:?}", self.label, item);
 
@@ -310,7 +341,7 @@ impl PeerFeed {
                 break;
             }
         }
-        if arts.len() > 0 && !self.newspeer.nobatch {
+        if arts.len() > 0 && !self.newspeer.no_backlog {
             let res = async {
                 self.send_queue_to_backlog(false).await?;
                 self.backlog_queue.write_arts(&self.spool, &arts).await?;
@@ -328,8 +359,8 @@ impl PeerFeed {
     // Write half or the entire current queue to the backlog.
     async fn send_queue_to_backlog(&mut self, entire_queue: bool) -> io::Result<()> {
 
-        // or, if 'nobatch' is set, just trim the in-memory queue and return.
-        if self.newspeer.nobatch {
+        // or, if 'no_backlog' is set, just trim the in-memory queue and return.
+        if self.newspeer.no_backlog {
             if self.rx_queue.len() >= 200 {
                 let target_len = self.rx_queue.len() / 2;
                 while self.rx_queue.len() > target_len {
@@ -347,6 +378,43 @@ impl PeerFeed {
             match self.rx_queue.try_recv() {
                 Ok(art) => arts.push(art),
                 Err(_) => break,
+            }
+        }
+
+        if entire_queue {
+            // backlog queue (if any) as well.
+            let mut drain = self.delay_queue.drain();
+            while let Some(item) = drain.next() {
+                match item {
+                    PeerFeedItem::Article(art) => arts.push(art),
+                    _ => {},
+                }
+            }
+        }
+
+        if let Err(e) = self.backlog_queue.write_arts(&self.spool, &arts).await {
+            self.queue_error(&e).await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    // Write some of the current delay queue to the backlog.
+    async fn send_delay_queue_to_backlog(&mut self) -> io::Result<()> {
+
+        // or, if 'no_backlog' is set, don't bother.
+        if self.newspeer.no_backlog {
+            return Ok(());
+        }
+
+        let target_len = DELAY_QUEUE_MAX_SIZE / 4;
+        let mut arts = Vec::new();
+        let mut drain = self.delay_queue.drain();
+        while drain.len() > target_len {
+            match drain.next() {
+                Some(PeerFeedItem::Article(art)) => arts.push(art),
+                Some(_) => {},
+                None => break,
             }
         }
 

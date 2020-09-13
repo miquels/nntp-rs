@@ -19,6 +19,7 @@ use std::default::Default;
 use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::Deserialize;
 use smartstring::alias::String as SmartString;
@@ -194,7 +195,10 @@ pub struct NewsPeer {
     pub port:               u16,
     pub maxparallel:        u32,
     pub maxstream:          u32,
-    pub nobatch:            bool,
+    #[serde(rename = "delay-feed", deserialize_with = "util::deserialize_duration")]
+    pub delay_feed:         Duration,
+    #[serde(rename = "no-backlog")]
+    pub no_backlog:         bool,
     #[serde(rename = "drop-deferred")]
     pub drop_deferred:      bool,
     pub maxqueue:           u32,

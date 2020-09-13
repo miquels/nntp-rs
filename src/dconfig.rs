@@ -162,6 +162,8 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .alias::<NewsPeer>("hostname", "outhost")
         .alias::<NewsPeer>("headfeed", "send-headfeed")
         .alias::<NewsPeer>("precomreject", "dont-defer")
+        .alias::<NewsPeer>("nobatch", "no-backlog")
+        .alias::<NewsPeer>("delayfeed", "delay-feed")
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")
@@ -191,7 +193,6 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .ignore::<NewsPeer>("logarts")
         .ignore::<NewsPeer>("hours")
         .ignore::<NewsPeer>("queueskip")
-        .ignore::<NewsPeer>("delayfeed")
         .ignore::<NewsPeer>("delayinfeed")
         .ignore::<NewsPeer>("genlines")
         .ignore::<NewsPeer>("setqos")
@@ -501,7 +502,6 @@ fn check_newspeer_item(words: &[&str]) -> io::Result<()> {
         "logarts"|
         "hours"|
         "queueskip"|
-        "delayfeed"|
         "delayinfeed"|
         "genlines"|
         "setqos"|
