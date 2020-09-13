@@ -47,7 +47,6 @@ A list in no particular order.
 - refactor xclient support.
 
 ### Outgoing
-- implement delayfeed
 - don't start outgoing feed (or queue!) until first article
 - close feed itself after idle?
 - keep "average pending" stats and log actual avpend instead of "1"
@@ -101,6 +100,7 @@ DONE:
 - implement nobatch
 - implement drop-deferred
 - implement precomreject (as dont-defer)
+- implement delayfeed
 
 ### Stats
 - keep global stats per peer
