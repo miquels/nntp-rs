@@ -425,6 +425,10 @@ impl NntpServer {
         let peers = &self.newsfeeds.peers;
         let mut v = Vec::with_capacity(peers.len());
         for idx in 0..peers.len() {
+            if idx == self.peer_idx {
+                // don't send it back where it came from.
+                continue;
+            }
             let peer = &peers[idx];
             if peer.wants(
                 art,
