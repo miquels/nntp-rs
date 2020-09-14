@@ -341,6 +341,9 @@ impl<'de> Deserialize<'de> for WildMatList {
                         "groupref" => value.insert_str(0, "="),
                         // filter / nofilter
                         "nofilter" => value.insert_str(0, "!"),
+                        // adddist / deldist
+                        "deldist" => value.insert_str(0, "!"),
+                        "deldistany" => value.insert_str(0, "@"),
                         _ => {},
                     }
                     if patterns.len() == 0 && value.starts_with("!") {

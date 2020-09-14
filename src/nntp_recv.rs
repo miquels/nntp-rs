@@ -439,7 +439,9 @@ impl NntpServer {
         }
 
         // should match one of the pathaliases.
-        if !thispeer.nomismatch && !thispeer.pathalias.contains(art.pathhost.as_ref().unwrap()) {
+        if !thispeer.nomismatch &&
+            thispeer.pathalias.matches(art.pathhost.as_ref().unwrap()) != MatchResult::Match
+        {
             use std::sync::atomic::AtomicU64;
             static LAST_MSG: AtomicU64 = AtomicU64::new(0);
             let last_msg: UnixTime = (&LAST_MSG).into();

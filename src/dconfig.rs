@@ -18,11 +18,11 @@ use std::io::{self, BufReader};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{de::Deserializer, de::MapAccess, de::SeqAccess, de::Visitor, Deserialize};
+use serde::{de::Deserializer, de::MapAccess, de::Visitor, Deserialize};
 
 use crate::newsfeeds::*;
 use crate::spool::{GroupMap, GroupMapEntry, MetaSpool, SpoolCfg, SpoolDef};
-use crate::util::WildMatList;
+use crate::util::{MatchResult, WildMatList};
 
 // A type where a "dnewsfeeds" file can deserialize into.
 #[derive(Default, Debug, Deserialize)]
@@ -49,7 +49,7 @@ impl From<DNewsFeeds> for NewsFeeds {
                 if peer.outhost == "" {
                     peer.outhost = peer.host.clone();
                 }
-                if !peer.pathalias.contains(&peer.host) {
+                if peer.pathalias.matches(&peer.host) != MatchResult::Match {
                     let h = peer.host.clone();
                     peer.pathalias.push(h);
                 }
@@ -263,43 +263,6 @@ impl<'de> Deserialize<'de> for GroupMap {
 
         deserializer.deserialize_map(GroupMapVisitor)
     }
-}
-
-// deserializer for `distributions: Vec<String>` so that 'addist' and 'deldist' work.
-pub(crate) fn deserialize_distributions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where D: Deserializer<'de> {
-    use curlyconf::ParserAccess;
-
-    struct DistVisitor {
-        parser: curlyconf::Parser,
-    }
-
-    impl<'de> Visitor<'de> for DistVisitor {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("distributions")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where A: SeqAccess<'de> {
-            let mut dists = Vec::new();
-
-            while let Some(mut value) = seq.next_element::<String>()? {
-                match self.parser.value_name().as_str() {
-                    // addist / deldist
-                    "deldist" => value.insert_str(0, "!"),
-                    _ => {},
-                }
-                dists.push(value);
-            }
-
-            Ok(dists)
-        }
-    }
-
-    let parser = deserializer.parser();
-    deserializer.deserialize_seq(DistVisitor { parser })
 }
 
 /// Reads a "diablo.hosts" file. To be called after the "dnewsfeeds" file

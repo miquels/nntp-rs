@@ -27,7 +27,6 @@ use smartstring::alias::String as SmartString;
 use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::config;
-use crate::dconfig;
 use crate::dns::HostCache;
 use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
 
@@ -82,7 +81,7 @@ impl NewsFeeds {
     pub fn check_self(&mut self, cfg: &config::Config) {
         for e in self.peers.iter_mut() {
             for pathhost in &cfg.server.pathhost {
-                if e.pathalias.contains(pathhost) {
+                if e.pathalias.matches(pathhost) == MatchResult::Match {
                     e.is_self = true;
                     break;
                 }
@@ -154,7 +153,7 @@ pub struct NewsPeer {
     pub label:              SmartString,
 
     /// used both to filter incoming and outgoing articles.
-    pub pathalias:          Vec<String>,
+    pub pathalias:          WildMatList,
 
     // if set, sets inhost, outhost, and pathalias in dnewsfeeds.
     pub(crate) host:        String,
@@ -185,8 +184,7 @@ pub struct NewsPeer {
     pub groups:             WildMatList,
     pub requiregroups:      WildMatList,
     // "deserialize_with" is for dnewsfeeds compatibility (adddist / deldist).
-    #[serde(default,deserialize_with = "dconfig::deserialize_distributions")]
-    pub distributions:      Vec<String>,
+    pub distributions:      WildMatList,
     pub hashfeed:           HashFeed,
 
     /// used with the outgoing feed.
@@ -268,31 +266,14 @@ impl NewsPeer {
         }
 
         // check path.
-        for a in &self.pathalias {
-            for p in path {
-                if util::wildmat(p, a) {
-                    return false;
-                }
-            }
+        if self.pathalias.matchlist(path) == MatchResult::Match {
+            return false;
         }
 
         // check distribution header
         if let Some(dist) = dist {
-            if self.distributions.len() > 0 {
-                let mut matches = false;
-                for artdist in dist {
-                    for d in &self.distributions {
-                        if d.starts_with("!") && &d[1..] == *artdist {
-                            return false;
-                        }
-                        if d == artdist {
-                            matches = true;
-                        }
-                    }
-                }
-                if !matches {
-                    return false;
-                }
+            if self.distributions.matchlist(dist) != MatchResult::Match {
+                return false;
             }
         }
 
