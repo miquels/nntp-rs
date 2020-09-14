@@ -272,7 +272,7 @@ impl NewsPeer {
 
         // check distribution header
         if let Some(dist) = dist {
-            if self.distributions.matchlist(dist) != MatchResult::Match {
+            if !self.distributions.is_empty() && self.distributions.matchlist(dist) != MatchResult::Match {
                 return false;
             }
         }
@@ -294,7 +294,7 @@ impl NewsPeer {
         }
 
         // requiregroups matching.
-        if self.requiregroups.patterns.len() > 0 &&
+        if !self.requiregroups.is_empty() &&
             self.requiregroups.matchlistx(newsgroups) != MatchResult::Match
         {
             return false;

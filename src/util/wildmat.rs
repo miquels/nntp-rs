@@ -40,10 +40,14 @@ impl Default for WildPat {
 impl FromStr for WildPat {
     type Err = ();
     fn from_str(pat: &str) -> Result<WildPat, ()> {
+
         if let Some(pos) = pat.find(|c| c == '?' || c == '*' || c == '[' || c == '\\') {
 
             if pat.as_bytes()[pos] == b'*' {
-                let has_special = |s: &str| s.find(|c| c == '?' || c == '*' || c == '[' || c == '\\').is_none();
+                let has_special = |s: &str| s.find(|c| c == '?' || c == '*' || c == '[' || c == '\\').is_some();
+
+                // Note that we do not translate a "*" alone to a prefix/suffix match,
+                // it must be either something* or *something.
 
                 // wildcard suffix, and the only special char? Just do prefix matching.
                 if pos > 0 && pos == pat.len() - 1 {
@@ -51,13 +55,13 @@ impl FromStr for WildPat {
                 }
 
                 // wildcard prefix, and the only special char? Just do suffix matching.
-                if pos == 0 && !has_special(&pat[1..]) {
+                if pos == 0 && pat.len() > 1 && !has_special(&pat[1..]) {
                     return Ok(WildPat::Suffix(pat[1..].to_string()))
                 }
 
                 // same, but starts with [!@=] ?
                 let first = pat.chars().nth(0).unwrap();
-                if "!@=".contains(first) && pos == 1 && !has_special(&pat[2..]) {
+                if "!@=".contains(first) && pos == 1 && pat.len() > 2 && !has_special(&pat[2..]) {
                     let p = pat[0..1].to_string() + &pat[2..];
                     return Ok(WildPat::Suffix(p));
                 }
@@ -72,6 +76,9 @@ impl FromStr for WildPat {
 
 #[inline]
 fn wtype(s: &str) -> (&str, MatchResult) {
+    if s.len() == 0 {
+       return  (s, MatchResult::Match);
+    }
     match s.as_bytes()[0] {
         // this is a non-resolved reference that never matches. hacky.
         b'=' => (".", MatchResult::NoMatch),
@@ -121,14 +128,6 @@ impl WildPat {
             WildPat::Reference(_) => None,
         }
     }
-
-    /// Is this an empty pattern?
-    pub fn is_empty(&self) -> bool {
-        match *self {
-            WildPat::Text(ref p) | WildPat::Prefix(ref p) | WildPat::Suffix(ref p) | WildPat::Pattern(ref p) => p.is_empty(),
-            _ => false,
-        }
-    }
 }
 
 fn new_id() -> u32 {
@@ -174,9 +173,17 @@ impl WildMatList {
         }
     }
 
+    /// Empty list?
+    pub fn is_empty(&self) -> bool {
+        self.patterns.len() == 0
+    }
+
     /// Add a pattern.
     pub fn push(&mut self, pattern: impl AsRef<str>) {
         let pat = pattern.as_ref();
+        if pat == "" {
+            return;
+        }
         if self.patterns.len() == 0 && pat.starts_with("!") {
             self.initial = MatchResult::Match;
         }
@@ -406,5 +413,8 @@ mod tests {
         assert!(w.matches("prefixandmore") == MatchResult::Match);
         let w = WildMatList::new("name", "hallo");
         assert!(w.matches("hallo") == MatchResult::Match);
+        assert!(w.matches("hallo2") != MatchResult::Match);
+        let w = WildMatList::new("name", "");
+        assert!(w.matches("hallo") != MatchResult::Match);
     }
 }
