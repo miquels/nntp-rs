@@ -488,7 +488,12 @@ impl TxSessionStats {
     }
 
     pub fn stats_final(&mut self) {
-        self.update_total();
+        if self.delta_stats.offered % MARK_AFTER_OFFERED_N != 0 {
+            // log final "mark" log line.
+            self.stats_update();
+        } else {
+            self.update_total();
+        }
         log::info!(
             "Feed {}:{} final {}",
             self.label,
@@ -559,6 +564,7 @@ impl TxSessionStats {
     pub fn art_notfound(&mut self) {
         stats_add!(self, 1, offered);
         stats_add!(self, 1, not_found);
+        self.check_mark();
     }
 
     // CHECK 431 (and incorrectly, TAKETHIS 431)
@@ -585,6 +591,7 @@ impl TxSessionStats {
     pub fn art_refused(&mut self) {
         stats_add!(self, 1, offered);
         stats_add!(self, 1, refused);
+        self.check_mark();
     }
 
     // TAKETHIS 239
