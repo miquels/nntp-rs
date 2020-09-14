@@ -203,7 +203,6 @@ struct ExpFile {
 impl DSpool {
     /// Create a new diablo-type spool backend.
     pub fn new(cfg: &SpoolDef, ms: &MetaSpool) -> io::Result<Box<dyn SpoolBackend>> {
-
         // reallocation interval.
         let dir_reallocint = if cfg.reallocint.as_secs() > 0 {
             cfg.reallocint.as_secs() as u32

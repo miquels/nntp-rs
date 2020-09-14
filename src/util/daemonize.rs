@@ -54,7 +54,6 @@ fn dup2(oldfd: RawFd, newfd: RawFd) -> io::Result<()> {
 
 /// Daemonize: fork child, exit parent.
 pub fn daemonize(pidfile: Option<&String>, std_close: bool) -> io::Result<()> {
-
     // if std_close is set filedescriptors 0, 1, 2 are set to /dev/null
     let dev_null = if std_close {
         Some(

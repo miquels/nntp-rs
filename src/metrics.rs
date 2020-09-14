@@ -407,7 +407,7 @@ pub struct PeerSentStats {
 
 macro_rules! stats_add {
     ($self:expr, $count:expr, $field:ident) => {
-        $self.delta_stats.$field = $self.conn_stats.$field.wrapping_add($count);
+        $self.delta_stats.$field = $self.delta_stats.$field.wrapping_add($count);
         $self.peer_stats.$field.fetch_add($count, Ordering::AcqRel);
     };
 }
@@ -509,12 +509,21 @@ impl TxSessionStats {
         self.mark = Instant::now();
         self.conn_stats.offered += self.delta_stats.offered;
         self.conn_stats.accepted += self.delta_stats.accepted;
-        self.conn_stats.accepted_bytes += self.delta_stats.accepted_bytes;
+        self.conn_stats.accepted_bytes = self
+            .conn_stats
+            .accepted_bytes
+            .wrapping_add(self.delta_stats.accepted_bytes);
         self.conn_stats.rejected += self.delta_stats.rejected;
-        self.conn_stats.rejected_bytes += self.delta_stats.rejected_bytes;
+        self.conn_stats.rejected_bytes = self
+            .conn_stats
+            .rejected_bytes
+            .wrapping_add(self.delta_stats.rejected_bytes);
         self.conn_stats.refused += self.delta_stats.refused;
         self.conn_stats.deferred += self.delta_stats.deferred;
-        self.conn_stats.deferred_bytes += self.delta_stats.deferred_bytes;
+        self.conn_stats.deferred_bytes = self
+            .conn_stats
+            .deferred_bytes
+            .wrapping_add(self.delta_stats.deferred_bytes);
         self.conn_stats.deferred_fail += self.delta_stats.deferred_fail;
         self.conn_stats.not_found += self.delta_stats.not_found;
         self.delta_stats = ConnSentStats::default();
