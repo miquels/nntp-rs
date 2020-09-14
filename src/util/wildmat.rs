@@ -27,6 +27,7 @@ pub enum WildPat {
     Text(String),
     Pattern(String),
     Prefix(String),
+    Suffix(String),
     Reference(usize),
 }
 
@@ -39,16 +40,33 @@ impl Default for WildPat {
 impl FromStr for WildPat {
     type Err = ();
     fn from_str(pat: &str) -> Result<WildPat, ()> {
-        let r = if let Some(pos) = pat.find(|c| c == '?' || c == '*' || c == '[' || c == '\\') {
-            if pos > 0 && pos == pat.len() - 1 && pat.as_bytes()[pos] == b'*' {
-                WildPat::Prefix(pat[..pat.len() - 1].to_string())
-            } else {
-                WildPat::Pattern(pat.to_string())
+        if let Some(pos) = pat.find(|c| c == '?' || c == '*' || c == '[' || c == '\\') {
+
+            if pat.as_bytes()[pos] == b'*' {
+                let has_special = |s: &str| s.find(|c| c == '?' || c == '*' || c == '[' || c == '\\').is_none();
+
+                // wildcard suffix, and the only special char? Just do prefix matching.
+                if pos > 0 && pos == pat.len() - 1 {
+                    return Ok(WildPat::Prefix(pat[..pat.len() - 1].to_string()))
+                }
+
+                // wildcard prefix, and the only special char? Just do suffix matching.
+                if pos == 0 && !has_special(&pat[1..]) {
+                    return Ok(WildPat::Suffix(pat[1..].to_string()))
+                }
+
+                // same, but starts with [!@=] ?
+                let first = pat.chars().nth(0).unwrap();
+                if "!@=".contains(first) && pos == 1 && !has_special(&pat[2..]) {
+                    let p = pat[0..1].to_string() + &pat[2..];
+                    return Ok(WildPat::Suffix(p));
+                }
             }
-        } else {
-            WildPat::Text(pat.to_string())
-        };
-        Ok(r)
+
+            return Ok(WildPat::Pattern(pat.to_string()));
+        }
+
+        Ok(WildPat::Text(pat.to_string()))
     }
 }
 
@@ -84,6 +102,14 @@ impl WildPat {
                     None
                 }
             },
+            WildPat::Suffix(ref p) => {
+                let (p, t) = wtype(p);
+                if text.ends_with(p) {
+                    Some(t)
+                } else {
+                    None
+                }
+            },
             WildPat::Pattern(ref p) => {
                 let (p, t) = wtype(p);
                 if wildmat(text, p) {
@@ -99,7 +125,7 @@ impl WildPat {
     /// Is this an empty pattern?
     pub fn is_empty(&self) -> bool {
         match *self {
-            WildPat::Text(ref p) | WildPat::Prefix(ref p) | WildPat::Pattern(ref p) => p.is_empty(),
+            WildPat::Text(ref p) | WildPat::Prefix(ref p) | WildPat::Suffix(ref p) | WildPat::Pattern(ref p) => p.is_empty(),
             _ => false,
         }
     }
@@ -373,6 +399,12 @@ mod tests {
     #[test]
     fn test_wildmat() {
         let w = WildMatList::new("name", "hal*[o]");
+        assert!(w.matches("hallo") == MatchResult::Match);
+        let w = WildMatList::new("name", "*suffix");
+        assert!(w.matches("somesuffix") == MatchResult::Match);
+        let w = WildMatList::new("name", "prefix*");
+        assert!(w.matches("prefixandmore") == MatchResult::Match);
+        let w = WildMatList::new("name", "hallo");
         assert!(w.matches("hallo") == MatchResult::Match);
     }
 }
