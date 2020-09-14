@@ -113,7 +113,7 @@ impl QWriter {
 
         let seq = self.next_seq - (not_next as u64);
         let mut rot_path = PathBuf::from(&self.dir);
-        let name = format!("{}.S{:04}", self.label, seq);
+        let name = format!("{}.S{:05}", self.label, seq);
         rot_path.push(&name);
 
         match fs::rename(&cur_path, &rot_path).await {
