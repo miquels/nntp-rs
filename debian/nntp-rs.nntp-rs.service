@@ -1,10 +1,10 @@
 [Unit]
 Description=NNTP Server
 After=network.target
-ConditionPathExists=/etc/nntp-rs/config.cfg
+ConditionPathExists=/etc/news/config.cfg
 
 [Service]
-ExecStart=/usr/sbin/nntp-rs-server -c /etc/nntp-rs/config.cfg
+ExecStart=/usr/sbin/nntp-rs-server -c /etc/news/config.cfg serve
 KillMode=process
 
 [Install]

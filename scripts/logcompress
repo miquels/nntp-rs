@@ -6,16 +6,11 @@
 
 DIR=/var/log/news
 KEEPDAYS=3
-
-if -x /usr/bin/xz
-then
-	COMPRESS=/usr/bin/xz
-else
-	COMPRESS=/bin/gzip
-fi
+COMPRESS="/bin/gzip -f"
 
 set -e
 cd $DIR
+umask 022
 find . -name 'incoming.log.????????.*' -mmin +$((1440*$KEEPDAYS)) -delete
 
 DATE=$(date +%Y%m%d)

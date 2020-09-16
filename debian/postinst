@@ -12,3 +12,8 @@ install -d -o news -g news -m 755 /var/lib/news
 # make sure we can write to he log dir.
 chown news:news /var/log/news
 
+if systemctl -q is-active nntp-rs
+then
+	systemctl restart nntp-rs
+fi
+
