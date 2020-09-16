@@ -32,12 +32,12 @@ runtimes, based on the Tokio `basic` and `threaded` runtimes.
 - **threaded**: the default, and good for most use-cases.
   It's based on the Tokio `threaded` runtime. All of the servers `tasks`
   (each task handles one connection, incoming or outgoing) are M:N scheduled
-  over a bunch of threads. This is fine for most use-cases.
+  over a bunch of threads.
 
 - **multisingle**: for feeders / peering servers that handle multiple incoming full feeds.
-  I'ts a mix of multiple Tokio `basic` runtimes and one `threaded`
-  runtime. You can configure N incoming threads. Each thread runs one instance
-  of the `basic` scheduler, and can be pinned to one specific CPU core.
+  It's a mix of multiple Tokio `basic` runtimes and one `threaded`
+  runtime. You configure N incoming threads. Each thread runs one instance
+  of the `basic` (single-threaded) scheduler, and can be pinned to one specific CPU core.
   Incoming connections are loadbalanced over the incoming threads (using `SO_REUSE_PORT`).
   This combined with ethernet NICs that support multiple IRQs/channels in hardware
   makes the server scale quite nicely. The rest of the server (house-keeping,

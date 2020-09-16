@@ -41,6 +41,8 @@
     - if the global error state is "ENOSPC" and all filesystems have
       enough space again (define "enough?"), clear the error (cmpxchg)
 
+- build in "inpaths" support.
+
 ### Spool
 - spool read article: headers and body seperate. headers in r/w buffer,
   body is immutable and can thus optionally be mmmap'ed.
