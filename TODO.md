@@ -1,23 +1,27 @@
 
-## TODO
+# TODO
 
-A list in no particular order.
-
-### Spool
-
-- spool read article: headers and body seperate. headers in r/w buffer,
-  body is immutable and can thus optionally be mmmap'ed.
-- diablo spool: open files in LRU list
-- implement cyclic
+## Important
 
 ### History
-
-- new history file format, larger hash, larger offsets, multiple files.
 - keep history file in memory option (mmap) (options: index only, all)
 
 ### General
 - add periodic timer infra for hist expire etc
 - detect changed config and reload
+
+### Newsfeeds file
+- add "$label" variable that can be used in hostname / inhost / etc
+- make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net
+- templates
+
+### Active file
+- keep active file
+- xref generation on/off
+
+## Other in no particular order
+
+### General
 
 - do something on disk I/O errors (writing to spool or queue files)
   + spool/hist/log write error on incoming feed:
@@ -37,6 +41,15 @@ A list in no particular order.
     - if the global error state is "ENOSPC" and all filesystems have
       enough space again (define "enough?"), clear the error (cmpxchg)
 
+### Spool
+- spool read article: headers and body seperate. headers in r/w buffer,
+  body is immutable and can thus optionally be mmmap'ed.
+- diablo spool: open files in LRU list
+- implement cyclic
+
+### History
+- new history file format, larger hash, larger offsets, multiple files.
+
 ### Feed
 - welcome message
 
@@ -54,21 +67,11 @@ A list in no particular order.
 ### Stats
 - http access ?
 
-### Feed
-- welcome message
-
 ### Logger
 - for syslog logging, do not re-initialize the syslogger every log line.
 
-### Newsfeeds file
-- add "$label" variable that can be used in hostname / inhost / etc
-- make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net
-- templates
-
 ### Other
 
-- keep active file
-- xref generation on/off
 - global atomic with an Instant, updated every X seconds, so we have a cheap time source.
 
 ### article.rs
