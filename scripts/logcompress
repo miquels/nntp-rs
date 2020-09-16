@@ -1,0 +1,33 @@
+#! /bin/sh
+#
+# logcompress	Compresses the incoming.log.$DATE files, except the
+#		current one, and removes old files.
+#
+
+DIR=/var/log/news
+KEEPDAYS=3
+
+if -x /usr/bin/xz
+then
+	COMPRESS=/usr/bin/xz
+else
+	COMPRESS=/bin/gzip
+fi
+
+set -e
+cd $DIR
+find . -name 'incoming.log.????????.*' -mmin +$((1440*$KEEPDAYS)) -delete
+
+DATE=$(date +%Y%m%d)
+find . -name 'incoming.log.????????' |
+while read LOG
+do
+	case $LOG in
+		*.$DATE) ;;
+		*.gz|*.bz2|*.xz) ;;
+		*)
+			$COMPRESS $LOG
+			;;
+	esac
+done
+

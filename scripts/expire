@@ -1,0 +1,8 @@
+#! /bin/sh
+#
+# expire	Send SIGUSR1 to nntp-rs-server
+#
+
+PID=$(pgrep nntp-rs-server) || exit 0
+kill -USR1 $PID
+

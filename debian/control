@@ -1,0 +1,12 @@
+Source: nntp-rs
+Section: net
+Priority: extra
+Maintainer: Miquel van Smoorenburg <mike@langeraar.net>
+Uploaders: XS4ALL Unixbeheer <unixbeheer@xs4all.net>, Miquel van Smoorenburg (XS4ALL) <mikevs@xs4all.net>
+Build-Depends: debhelper (>= 12)
+Standards-Version: 3.9.1
+
+Package: nntp-rs
+Architecture: any
+Depends: ${shlibs:Depends}, systemd
+Description: NNTP server

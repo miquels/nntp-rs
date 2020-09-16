@@ -1,0 +1,14 @@
+#!/bin/sh
+
+#DEBHELPER#
+
+set -e
+
+# Create manually, so we can set ownership to news, and so
+# that the files do not get removed at package removal time.
+install -d -o news -g news -m 755 /var/spool/news
+install -d -o news -g news -m 755 /var/lib/news
+
+# make sure we can write to he log dir.
+chown news:news /var/log/news
+

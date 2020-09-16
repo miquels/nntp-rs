@@ -1,0 +1,12 @@
+[Unit]
+Description=NNTP Server
+After=network.target
+ConditionPathExists=/etc/nntp-rs/config.cfg
+
+[Service]
+ExecStart=/usr/sbin/nntp-rs-server -c /etc/nntp-rs/config.cfg
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+

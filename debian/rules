@@ -1,0 +1,22 @@
+#! /usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	@if ! command -v cargo >/dev/null; then \
+		echo "Rust is not installed ("cargo" command not found)" >&2; \
+		exit 1; fi
+	if ! ( set - $$(cargo -V); dpkg --compare-versions $$2 ge 1.45 ); then \
+		echo "Need at least rust version 1.45" >&2; \
+		exit 1; fi
+	cargo build --release
+
+override_dh_auto_clean:
+
+override_dh_installsystemd:
+
+override_dh_installinit:
+	dh_installinit --name nntp-rs
+	dh_installsystemd --name nntp-rs
+

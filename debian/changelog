@@ -1,0 +1,6 @@
+nntp-rs (0.1) buster; urgency=low
+
+  * initial release
+
+ -- Miquel van Smoorenburg <miquels@debian.org>  Wed, 16 Sep 2020 18:35:31 +0200
+

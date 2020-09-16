@@ -1,0 +1,3 @@
+target/release/nntp-rs-server	usr/sbin
+scripts/expire usr/lib/nntp-rs
+scripts/logcompress usr/lib/nntp-rs

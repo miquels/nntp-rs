@@ -1,0 +1,3 @@
+/etc/news
+/var/log/news
+/usr/lib/nntp-rs
