@@ -1,4 +1,10 @@
-
 **/target
 **/*.rs.bk
 Cargo.lock
+debian/.debhelper
+debian/debhelper*
+debian/files
+debian/*.log
+debian/*.debhelper
+debian/*substvars
+debian/nntp-rs
