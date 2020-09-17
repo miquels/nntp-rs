@@ -165,9 +165,21 @@ fn lcmatch(b: &[u8], s: &str) -> bool {
     if s.len() > b.len() {
         return false;
     }
-    let mut tmpbuf = [0u8; 64];
-    let lc = super::article::lowercase(b, &mut tmpbuf[..]);
-    &lc[..s.len()] == s.as_bytes()
+    b[..s.len()].eq_ignore_ascii_case(s.as_bytes())
+}
+
+fn contains_str(b: &[u8], s: &str) -> bool {
+    let s = s.as_bytes();
+    let size = s.len();
+    if size > b.len() {
+        return false;
+    }
+    for i in 0..=b.len() - size {
+        if &b[i..i + size] == s {
+            return true;
+        }
+    }
+    false
 }
 
 /// Arttype scanner.
@@ -205,7 +217,7 @@ impl ArtTypeScanner {
 
     /// Return the article type(s) we found.
     pub fn art_type(&self) -> ArtType {
-        let at = if self.bodysize < 8192 {
+        let at = if self.bodysize < 8192 && (self.arttype.arttype & ArtType::YENC) == 0 {
             self.arttype.arttype & !ArtType::BINARY
         } else {
             self.arttype.arttype
@@ -298,11 +310,15 @@ impl ArtTypeScanner {
             self.binhex = 1;
         }
 
-        if first == b'=' && lcmatch(line, "=ybegin part=") {
-            self.arttype.arttype |= ArtType::BINARY | ArtType::PARTIAL | ArtType::YENC;
-        }
-        if first == b'=' && lcmatch(line, "=ybegin line=") {
+        if first == b'=' &&
+            line.starts_with(&b"=ybegin "[..]) &&
+            contains_str(line, " line=") &&
+            contains_str(line, " size=")
+        {
             self.arttype.arttype |= ArtType::BINARY | ArtType::YENC;
+            if contains_str(line, " part=") && !contains_str(line, " total=1 ") {
+                self.arttype.arttype |= ArtType::PARTIAL;
+            }
         }
 
         if self.inheader {
@@ -364,7 +380,11 @@ impl ArtTypeScanner {
                     return;
                 }
             } else {
-                if line[0] == b'-' && line.starts_with(&b"-----BEGIN PGP MESSAGE-----"[..]) {
+                if line[0] == b'-' &&
+                    line.starts_with(&b"-----BEGIN "[..]) &&
+                    (line[11..].starts_with(&b"PGP MESSAGE-----"[..]) ||
+                        line[11..].starts_with(&b"PGP SIGNED MESSAGE-----"[..]))
+                {
                     self.arttype.arttype |= ArtType::PGPMESSAGE;
                     self.uuencode = 0;
                     self.base64 = 0;
