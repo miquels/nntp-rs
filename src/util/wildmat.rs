@@ -40,23 +40,24 @@ impl Default for WildPat {
 impl FromStr for WildPat {
     type Err = ();
     fn from_str(pat: &str) -> Result<WildPat, ()> {
-
         if let Some(pos) = pat.find(|c| c == '?' || c == '*' || c == '[' || c == '\\') {
-
             if pat.as_bytes()[pos] == b'*' {
-                let has_special = |s: &str| s.find(|c| c == '?' || c == '*' || c == '[' || c == '\\').is_some();
+                let has_special = |s: &str| {
+                    s.find(|c| c == '?' || c == '*' || c == '[' || c == '\\')
+                        .is_some()
+                };
 
                 // Note that we do not translate a "*" alone to a prefix/suffix match,
                 // it must be either something* or *something.
 
                 // wildcard suffix, and the only special char? Just do prefix matching.
                 if pos > 0 && pos == pat.len() - 1 {
-                    return Ok(WildPat::Prefix(pat[..pat.len() - 1].to_string()))
+                    return Ok(WildPat::Prefix(pat[..pat.len() - 1].to_string()));
                 }
 
                 // wildcard prefix, and the only special char? Just do suffix matching.
                 if pos == 0 && pat.len() > 1 && !has_special(&pat[1..]) {
-                    return Ok(WildPat::Suffix(pat[1..].to_string()))
+                    return Ok(WildPat::Suffix(pat[1..].to_string()));
                 }
 
                 // same, but starts with [!@=] ?
@@ -77,7 +78,7 @@ impl FromStr for WildPat {
 #[inline]
 fn wtype(s: &str) -> (&str, MatchResult) {
     if s.len() == 0 {
-       return  (s, MatchResult::Match);
+        return (s, MatchResult::Match);
     }
     match s.as_bytes()[0] {
         // this is a non-resolved reference that never matches. hacky.

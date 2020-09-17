@@ -294,9 +294,7 @@ impl NewsPeer {
         }
 
         // requiregroups matching.
-        if !self.requiregroups.is_empty() &&
-            self.requiregroups.matchlistx(newsgroups) != MatchResult::Match
-        {
+        if !self.requiregroups.is_empty() && self.requiregroups.matchlistx(newsgroups) != MatchResult::Match {
             return false;
         }
 
