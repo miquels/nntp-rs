@@ -8,12 +8,7 @@
 
 ### General
 - add periodic timer infra for hist expire etc
-- detect changed config and reload
-
-### Newsfeeds file
-- add "$label" variable that can be used in hostname / inhost / etc
-- make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net
-- templates
+- detect changed config and reload (note: included files as well)
 
 ### Active file
 - keep active file
@@ -113,3 +108,9 @@ DONE:
 ### Stats
 - keep global stats per peer
 - maybe prometheus format as well
+
+### Newsfeeds file
+- add "$label" variable that can be used in hostname / inhost / etc
+- make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net? (no)
+- templates
+
