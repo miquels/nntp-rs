@@ -167,6 +167,19 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
         _ => {},
     }
 
+    // in hostname-related setting, replace ${hostname} with the
+    // system hostname. really only useful for situations like
+    // `path_identity sharedname!${hostname};`.
+    let hostname = util::hostname();
+    cfg.server.hostname = cfg.server.hostname.replace("${hostname}", &hostname);
+    for path_identity in cfg.server.path_identity.iter_mut() {
+        *path_identity = path_identity.replace("${hostname}", &hostname);
+    }
+    cfg.server.xrefhost = cfg.server.xrefhost.replace("${hostname}", &hostname);
+    for commonpath in cfg.server.commonpath.iter_mut() {
+        *commonpath = commonpath.replace("${hostname}", &hostname);
+    }
+
     // Set some values to default if not set.
     if cfg.server.path_identity.is_empty() {
         cfg.server.path_identity.push(cfg.server.hostname.clone());

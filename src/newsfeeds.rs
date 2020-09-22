@@ -141,6 +141,7 @@ impl NewsFeeds {
     /// for outhost, path_identity and accept_from.
     pub fn set_hostname_default(&mut self) {
         for peer in self.peers.iter_mut() {
+            peer.hostname = peer.hostname.replace("${label}", peer.label.as_str());
             if peer.hostname != "" {
                 if peer.outhost == "" {
                     peer.outhost = peer.hostname.clone();
