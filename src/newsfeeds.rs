@@ -1,4 +1,4 @@
-//! NewsFeeds contains a list of all NNTP peers.
+//! The newfeeds{ .. } section contains a list of all NNTP peers.
 //!
 //! It is used for a couple of things:
 //!
@@ -6,7 +6,7 @@
 //!   by IP address. If it's not listed, access is denied.
 //!
 //! - When the peer sends an article. If it is allowed to send articles,
-//!   the article is checked against "pathalias" and "filter" to see
+//!   the article is checked against "filter-groups" to see
 //!   if we want it. If not, it is rejected. Otherwise it is sent to
 //!   the `spool` code to be stored somewhere.
 //!
@@ -33,46 +33,63 @@ use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList}
 use ipnet::IpNet;
 
 /// A complete newsfeeds file.
-#[derive(Debug)]
 #[rustfmt::skip]
+#[derive(Debug, Deserialize)]
+#[serde(default)]
 pub struct NewsFeeds {
-    /// The IFILTER label
-    pub infilter:       Option<NewsPeer>,
-    /// All peers we have.
-    //#[serde(rename = "peer")]
-    pub peers:          Vec<NewsPeer>,
-    pub peer_map:       HashMap<SmartString, usize>,
-    /// And the groupdefs that can be referenced by the peers.
-    pub groupdefs:      Vec<WildMatList>,
-    /// timestamp of file when we loaded this data
-    pub timestamp:      UnixTime,
-    hcache:             HostCache,
+    /// Full templates to be referenced as defaults in peers.
+    #[serde(rename = "template")]
+    pub templates:          Vec<NewsPeer>,
+    /// Group definition the can referenced in a "groups" entry in a peer.
+    #[serde(rename = "groupdef")]
+    pub groupdefs:          Vec<WildMatList>,
+    /// Peer definitions.
+    #[serde(rename = "peer")]
+    pub peers:              Vec<NewsPeer>,
+
+    // The below are all non-configfile items.
+
+    // Mapping from peername to index in the peer vec.
+    #[serde(skip)]
+    pub(crate) peer_map:    HashMap<SmartString, usize>,
+    // timestamp of file when we loaded this data
+    #[serde(skip)]
+    pub(crate) timestamp:   UnixTime,
+    // The IFILTER label from a dnewsfeeds file.
+    #[serde(skip)]
+    pub(crate) infilter:    Option<NewsPeer>,
+    // HostCache for all hostname entries.
+    #[serde(skip)]
+    hcache:                 HostCache,
+}
+
+impl Default for NewsFeeds {
+    fn default() -> NewsFeeds {
+        NewsFeeds {
+            templates: Vec::new(),
+            groupdefs: Vec::new(),
+            peers:     Vec::new(),
+            peer_map:  HashMap::new(),
+            timestamp: UnixTime::now(),
+            infilter:  None,
+            hcache:    HostCache::get(),
+        }
+    }
 }
 
 impl NewsFeeds {
-    /// Intialize a new "newsfeeds".
-    pub fn new() -> NewsFeeds {
-        NewsFeeds {
-            infilter:  None,
-            peers:     Vec::new(),
-            peer_map:  HashMap::new(),
-            groupdefs: Vec::new(),
-            hcache:    HostCache::get(),
-            timestamp: UnixTime::now(),
-        }
-    }
 
     /// Initialize the host cache.
     pub fn init_hostcache(&mut self) {
         for e in self.peers.iter_mut() {
             let mut hosts = Vec::new();
-            for h in &e.inhost {
+            for h in &e.accept_from {
                 match IpNet::from_str(h) {
                     Ok(net) => e.innet.push(net),
                     Err(_) => hosts.push(h.clone()),
                 }
             }
-            e.inhost = hosts;
+            e.accept_from = hosts;
         }
         self.hcache.update(&self);
     }
@@ -80,8 +97,8 @@ impl NewsFeeds {
     /// Check all peers to see if one of them is actually ourself.
     pub fn check_self(&mut self, cfg: &config::Config) {
         for e in self.peers.iter_mut() {
-            for pathhost in &cfg.server.pathhost {
-                if e.pathalias.matches(pathhost) == MatchResult::Match {
+            for pathident in &cfg.server.path_identity {
+                if e.path_identity.matches(pathident) == MatchResult::Match {
                     e.is_self = true;
                     break;
                 }
@@ -120,6 +137,26 @@ impl NewsFeeds {
         }
     }
 
+    /// If the "hostname" field was set, use it to set defaults
+    /// for outhost, path_identity and accept_from.
+    pub fn set_hostname_default(&mut self) {
+        for peer in self.peers.iter_mut() {
+            if peer.hostname != "" {
+                if peer.outhost == "" {
+                    peer.outhost = peer.hostname.clone();
+                }
+                if peer.path_identity.matches(&peer.hostname) != MatchResult::Match {
+                    let h = peer.hostname.clone();
+                    peer.path_identity.push(h);
+                }
+                if !peer.accept_from.contains(&peer.hostname) {
+                    let h = peer.hostname.clone();
+                    peer.accept_from.push(h);
+                }
+            }
+        }
+    }
+
     /// Look up a peer by IP address.
     ///
     /// Returns a tuple consisting of the index into the peers vector
@@ -146,52 +183,72 @@ impl NewsFeeds {
 /// Definition of a newspeer.
 #[rustfmt::skip]
 #[derive(Default,Debug,Clone,Deserialize)]
-#[serde(default = "get_default_newspeer")]
+#[serde(default)]
 pub struct NewsPeer {
     /// Name of this feed.
     #[serde(rename = "__label__")]
     pub label:              SmartString,
 
-    /// used both to filter incoming and outgoing articles.
-    pub pathalias:          WildMatList,
+    /// Default template to use.
+    pub template:           String,
 
-    // if set, sets inhost, outhost, and pathalias in dnewsfeeds.
-    pub(crate) host:        String,
+    // if set, sets accept_from, outhost, and path-identity in dnewsfeeds.
+    pub(crate) hostname:     String,
+
+    /// used both to filter incoming and outgoing articles.
+    #[serde(rename = "path-identity")]
+    pub path_identity:      WildMatList,
 
     /// used on connects from remote host
-    pub inhost:             Vec<String>,
+    #[serde(rename = "accept-from")]
+    pub accept_from:        Vec<String>,
     pub innet:              Vec<IpNet>,
+    #[serde(rename = "max-connections-in")]
     pub maxconnect:         u32,
+    #[serde(rename = "accept-headfeed")]
+    pub accept_headfeed:    bool,
     pub readonly:           bool,
     pub xclient:            bool,
 
     /// used when processing incoming articles
-    pub filter:             WildMatList,
-    pub nomismatch:         bool,
+    #[serde(rename = "filter-groups")]
+    pub filter_groups:      WildMatList,
+    #[serde(rename = "ignore-path-mismatch")]
+    pub ignore_path_mismatch:         bool,
     #[serde(rename = "dont-defer")]
     pub dont_defer:         bool,
 
     /// used to select outgoing articles.
-    pub maxcross:           u32,
-    pub maxpath:            u32,
-    #[serde(default,deserialize_with = "util::deserialize_size")]
-    pub maxsize:            u64,
-    #[serde(default,deserialize_with = "util::deserialize_size")]
-    pub minsize:            u64,
-    pub mincross:           u32,
-    pub minpath:            u32,
-    pub arttypes:           Vec<ArtType>,
     pub groups:             WildMatList,
+    #[serde(rename = "groups-required")]
     pub requiregroups:      WildMatList,
-    // "deserialize_with" is for dnewsfeeds compatibility (adddist / deldist).
     pub distributions:      WildMatList,
     pub hashfeed:           HashFeed,
 
     /// used with the outgoing feed.
+    #[serde(rename = "send-to")]
     pub outhost:            String,
+    #[serde(rename = "bind-address")]
     pub bindaddress:        Option<IpAddr>,
     pub port:               u16,
+
+    #[serde(rename = "min-crosspost")]
+    pub mincross:           u32,
+    #[serde(rename = "max-crosspost")]
+    pub maxcross:           u32,
+    #[serde(rename = "max-path-length")]
+    pub maxpath:            u32,
+    #[serde(rename = "min-path-length")]
+    pub minpath:            u32,
+    #[serde(rename = "max-article-size",deserialize_with = "util::deserialize_size")]
+    pub maxsize:            u64,
+    #[serde(rename = "min-article-size",deserialize_with = "util::deserialize_size")]
+    pub minsize:            u64,
+    #[serde(rename = "article-types")]
+    pub arttypes:           Vec<ArtType>,
+    #[serde(rename = "max-connections-out")]
     pub maxparallel:        u32,
+    #[serde(rename = "max-streaming-queue-size")]
     pub maxstream:          u32,
     #[serde(rename = "delay-feed", deserialize_with = "util::deserialize_duration")]
     pub delay_feed:         Duration,
@@ -199,11 +256,11 @@ pub struct NewsPeer {
     pub no_backlog:         bool,
     #[serde(rename = "drop-deferred")]
     pub drop_deferred:      bool,
+    #[serde(rename = "max-backlog-queue")]
     pub maxqueue:           u32,
     #[serde(rename = "send-headfeed")]
     pub send_headfeed:      bool,
-    #[serde(rename = "accept-headfeed")]
-    pub accept_headfeed:    bool,
+    #[serde(rename = "preserve-bytes")]
     pub preservebytes:      bool,
     #[serde(rename = "queue-only")]
     pub queue_only:         bool,
@@ -229,6 +286,118 @@ impl NewsPeer {
         }
     }
 
+    /// Merge in a template.
+    pub fn merge_template(&mut self, tmpl: &NewsPeer) {
+        // hostname. only if it contains a variable.
+        if self.hostname == "" && tmpl.hostname.contains("${") {
+            self.hostname = tmpl.hostname.clone();
+        }
+
+        // max-connections-in.
+        if self.maxconnect == 0 {
+            self.maxconnect = tmpl.maxconnect;
+        }
+
+        // accept-headfeed.
+        if tmpl.accept_headfeed {
+            self.accept_headfeed = tmpl.accept_headfeed;
+        }
+
+        // readonly.
+        if tmpl.readonly {
+            self.readonly = true;
+        }
+
+        // filter-groups.
+        self.filter_groups.prepend(&tmpl.filter_groups);
+
+        // groups.
+        self.groups.prepend(&tmpl.groups);
+
+        // groups-required.
+        self.requiregroups.prepend(&tmpl.requiregroups);
+
+        // distributions.
+        self.distributions.prepend(&tmpl.distributions);
+
+        // crosspost.
+        if self.mincross == 0 {
+            self.mincross = tmpl.mincross;
+        }
+        if self.maxcross == 0 {
+            self.maxcross = tmpl.maxcross;
+        }
+
+        // path-length.
+        if self.minpath == 0 {
+            self.minpath = tmpl.minpath;
+        }
+        if self.maxpath == 0 {
+            self.maxpath = tmpl.maxpath;
+        }
+
+        // size.
+        if self.minsize == 0 {
+            self.minsize = tmpl.minsize;
+        }
+        if self.maxsize == 0 {
+            self.maxsize = tmpl.maxsize;
+        }
+
+        // article-types.
+        if tmpl.arttypes.len() > 0 {
+            let mut v = tmpl.arttypes.clone();
+            v.extend(self.arttypes.drain(..));
+            self.arttypes = v;
+        }
+
+        // max-connections-out.
+        if self.maxparallel == 0 {
+            self.maxparallel = tmpl.maxparallel;
+        }
+
+        // max-streaming-queue-size.
+        if self.maxstream == 0 {
+            self.maxstream = tmpl.maxstream;
+        }
+
+        // delay-feed.
+        if self.delay_feed.as_secs() == 0 {
+            self.delay_feed = tmpl.delay_feed.clone();
+        }
+
+        // no-backlog.
+        if tmpl.no_backlog {
+            self.no_backlog = tmpl.no_backlog;
+        }
+
+        // drop-deferred.
+        if tmpl.drop_deferred {
+            self.drop_deferred = tmpl.drop_deferred;
+        }
+
+        // max-backlog-queue.
+        if self.maxqueue == 0 {
+            self.maxqueue = tmpl.maxqueue;
+        }
+
+        // send-headfeed.
+        if tmpl.send_headfeed {
+            self.send_headfeed = tmpl.send_headfeed;
+        }
+
+        // preserve-bytes.
+        if tmpl.preservebytes {
+            self.preservebytes = tmpl.preservebytes;
+        }
+
+        // queue-only.
+        if tmpl.queue_only {
+            self.queue_only = tmpl.queue_only;
+        }
+    }
+
+    ///
     /// Check if this peer wants to have this article.
     pub fn wants(
         &self,
@@ -245,7 +414,7 @@ impl NewsPeer {
             return false;
         }
 
-        // If one of the pathaliases contains our pathalias, skip.
+        // If one of the path-identities contains our path-identity, skip.
         if self.is_self {
             return false;
         }
@@ -266,7 +435,7 @@ impl NewsPeer {
         }
 
         // check path.
-        if self.pathalias.matchlist(path) == MatchResult::Match {
+        if self.path_identity.matchlist(path) == MatchResult::Match {
             return false;
         }
 
@@ -302,16 +471,3 @@ impl NewsPeer {
     }
 }
 
-use arc_swap::ArcSwap;
-use once_cell::sync::Lazy;
-use std::sync::Arc;
-
-static GLOBAL: Lazy<ArcSwap<NewsPeer>> = Lazy::new(|| ArcSwap::from(Arc::new(NewsPeer::new())));
-
-pub(crate) fn get_default_newspeer() -> NewsPeer {
-    GLOBAL.load().as_ref().clone()
-}
-
-pub(crate) fn set_default_newspeer(peer: NewsPeer) {
-    GLOBAL.store(Arc::new(peer));
-}

@@ -39,7 +39,7 @@ core_affinity = "0.5.10"
 crossbeam-channel = "0.4.2"
 crossbeam-queue = "0.2.3"
 crossfire = { version = "0.1.4", optional = true }
-curlyconf = { version = "0.1.0-alpha.3" }
+curlyconf = { version = "0.1.0-alpha.4" }
 futures = "0.3.5"
 fs2 = "0.4.3"
 jemallocator = "0.3.2"

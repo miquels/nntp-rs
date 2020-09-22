@@ -385,8 +385,8 @@ async fn history_expire(config: &config::Config, opts: HistExpireOpts) -> Result
 // For now, diablo specific. fix later
 async fn diablo_history_init(config: &config::Config, opts: HistInitOpts) -> Result<()> {
     let num_buckets = opts.num_buckets.unwrap_or(256 * 1024 * 1024);
-    let cfg_hfile = &config.history.file;
-    let hfile = opts.file.as_ref().unwrap_or(cfg_hfile);
+    let hpath = config::expand_path(&config.paths, &config.history.file);
+    let hfile = opts.file.as_ref().unwrap_or(&hpath);
     nntp_rs::history::diablo::DHistory::create(std::path::Path::new(hfile), num_buckets)?;
     Ok(())
 }

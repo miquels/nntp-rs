@@ -65,6 +65,9 @@
 - don't start outgoing feed (or queue!) until first article
 - close feed itself after idle?
 - keep "average pending" stats and log actual avpend instead of "1"
+- "drop-deferred-large", "no-backlog-large", "feed-delay-large" settings
+  that only trigger for articles > N KB (100 KB?)
+- finer feed-delay granularity for < 1s ?
 
 ### Stats
 - http access ?

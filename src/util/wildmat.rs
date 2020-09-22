@@ -191,6 +191,28 @@ impl WildMatList {
         self.patterns.push(pat.parse().unwrap());
     }
 
+    /// Prepend another list.
+    pub fn prepend(&mut self, other: &WildMatList) {
+        // early return if there's nothing to do.
+        if other.patterns.len() == 0 {
+            return;
+        }
+
+        // If this pattern starts with "@*", no use to prepend anything.
+        if self.patterns.len() > 0 {
+            if let WildPat::Pattern(ref pat) = self.patterns[0] {
+                if pat.as_str() == "@*" {
+                    return;
+                }
+            }
+        }
+
+        let mut pats = other.patterns.clone();
+        std::mem::swap(&mut self.patterns, &mut pats);
+        self.patterns.extend(pats);
+        self.initial = other.initial;
+    }
+
     /// Set the name.
     pub fn set_name(&mut self, name: &str) {
         self.name = name.to_string();

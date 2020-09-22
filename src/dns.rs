@@ -110,7 +110,7 @@ impl HostCache {
         let iter = feeds
             .peers
             .iter()
-            .map(|p| p.inhost.iter().map(move |h| (h, &p.label)))
+            .map(|p| p.accept_from.iter().map(move |h| (h, &p.label)))
             .flatten();
         for (host, label) in iter {
             match hm.remove(host) {

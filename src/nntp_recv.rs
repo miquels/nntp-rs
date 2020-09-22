@@ -402,7 +402,7 @@ impl NntpServer {
 
         // see if any of the groups in the NewsGroups: header
         // matched a "filter" statement in this peer's config.
-        if thispeer.filter.matchlist(&newsgroups) == MatchResult::Match {
+        if thispeer.filter_groups.matchlist(&newsgroups) == MatchResult::Match {
             return Err(ArtError::GroupFilter);
         }
 
@@ -443,8 +443,8 @@ impl NntpServer {
         }
 
         // should match one of the pathaliases.
-        if !thispeer.nomismatch &&
-            thispeer.pathalias.matches(art.pathhost.as_ref().unwrap()) != MatchResult::Match
+        if !thispeer.ignore_path_mismatch &&
+            thispeer.path_identity.matches(art.pathhost.as_ref().unwrap()) != MatchResult::Match
         {
             use std::sync::atomic::AtomicU64;
             static LAST_MSG: AtomicU64 = AtomicU64::new(0);
@@ -470,7 +470,7 @@ impl NntpServer {
                 pathelems.insert(0, commonpath);
             }
         }
-        for pathhost in self.config.server.pathhost.iter().map(|p| p.as_str()) {
+        for pathhost in self.config.server.path_identity.iter().map(|p| p.as_str()) {
             pathelems.insert(0, pathhost);
         }
         new_path = pathelems.join("!");

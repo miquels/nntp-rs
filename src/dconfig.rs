@@ -18,11 +18,11 @@ use std::io::{self, BufReader};
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{de::Deserializer, de::MapAccess, de::Visitor, Deserialize};
+use serde::{de, de::Deserializer, de::MapAccess, de::Visitor, Deserialize};
 
 use crate::newsfeeds::*;
 use crate::spool::{GroupMap, GroupMapEntry, MetaSpool, SpoolCfg, SpoolDef};
-use crate::util::{MatchResult, WildMatList};
+use crate::util::WildMatList;
 
 // A type where a "dnewsfeeds" file can deserialize into.
 #[derive(Default, Debug, Deserialize)]
@@ -31,40 +31,23 @@ struct DNewsFeeds {
     #[serde(rename = "label")]
     pub labels:   Labels,
     pub groupdef: Vec<GroupDef>,
+    pub global: Option<NewsPeer>,
 }
 
-// Convert the DnewsFeeds we just read into a NewsFeeds.
-impl From<DNewsFeeds> for NewsFeeds {
-    fn from(dnf: DNewsFeeds) -> NewsFeeds {
-        let mut nf = NewsFeeds::new();
-        nf.infilter = dnf.labels.ifilter;
-        nf.peers = dnf.labels.peers;
-        for idx in 0..nf.peers.len() {
-            nf.peer_map.insert(nf.peers[idx].label.as_str().into(), idx);
-
-            let peer = &mut nf.peers[idx];
-            peer.index = idx;
-            peer.accept_headfeed = true;
-            if peer.host != "" {
-                if peer.outhost == "" {
-                    peer.outhost = peer.host.clone();
-                }
-                if peer.pathalias.matches(&peer.host) != MatchResult::Match {
-                    let h = peer.host.clone();
-                    peer.pathalias.push(h);
-                }
-                if !peer.inhost.contains(&peer.host) {
-                    let h = peer.host.clone();
-                    peer.inhost.push(h);
-                }
-            }
-        }
-        for gd in dnf.groupdef.into_iter() {
-            let mut groups = gd.groups;
-            groups.name = gd.label;
-            nf.groupdefs.push(groups);
-        }
-        nf
+// Append all the DNewsfeeds data to the main NewsFeeds.
+fn dnewsfeeds_to_newsfeeds(mut dnf: DNewsFeeds, nf: &mut NewsFeeds) {
+    nf.infilter = dnf.labels.ifilter;
+    for mut peer in dnf.labels.peers.drain(..) {
+        peer.accept_headfeed = true;
+        nf.peers.push(peer);
+    }
+    for gd in dnf.groupdef.into_iter() {
+        let mut groups = gd.groups;
+        groups.name = gd.label;
+        nf.groupdefs.push(groups);
+    }
+    if let Some(global) = dnf.global.take() {
+        nf.templates.push(global);
     }
 }
 
@@ -113,14 +96,10 @@ impl<'de> Deserialize<'de> for Labels {
                     let peer = map.next_value()?;
                     match label.as_str() {
                         "GLOBAL" => {
-                            use serde::de::Error;
-                            if this.peers.len() > 0 {
-                                return Err(Error::custom("GLOBAL must come before peer labels"));
+                            if this.global.is_some() {
+                                return Err(de::Error::custom("GLOBAL already set"));
                             }
-                            if get_default_newspeer().label.as_str() != "" {
-                                return Err(Error::custom("GLOBAL already set"));
-                            }
-                            set_default_newspeer(peer);
+                            this.global = Some(peer);
                         },
                         // filters
                         "IFILTER" => this.ifilter = Some(peer),
@@ -144,30 +123,54 @@ impl<'de> Deserialize<'de> for Labels {
 }
 
 /// Read a NewsFeeds from a "dnewsfeeds" file.
-pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
+pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
     // First, do a compat check.
     check_dnewsfeeds(name)?;
 
     // Now build the config reader configuration.
     let dnf: DNewsFeeds = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
-        .alias::<NewsPeer>("nofilter", "filter")
+
+        .alias::<NewsPeer>("host", "hostname")
+        .alias::<NewsPeer>("alias", "path-identity")
+        .alias::<NewsPeer>("inhost", "accept-from")
+        .alias::<NewsPeer>("maxconnect", "max-connections-in")
+        .alias::<NewsPeer>("filter", "filter-groups")
+        .alias::<NewsPeer>("nofilter", "filter-groups")
+        .alias::<NewsPeer>("nomismatch", "ignore-path-mismatch")
+        .alias::<NewsPeer>("precomreject", "dont-defer")
+
+        .alias::<NewsPeer>("maxcross", "max-crosspost")
+        .alias::<NewsPeer>("mincross", "min-crosspost")
+        .alias::<NewsPeer>("maxpath", "max-path-length")
+        .alias::<NewsPeer>("minpath", "min-path-length")
+        .alias::<NewsPeer>("maxsize", "max-article-size")
+        .alias::<NewsPeer>("minsize", "min-article-size")
+        .alias::<NewsPeer>("arttypes", "article-types")
+
         .alias::<NewsPeer>("addgroup", "groups")
         .alias::<NewsPeer>("delgroup", "groups")
         .alias::<NewsPeer>("delgroupany", "groups")
         .alias::<NewsPeer>("groupref", "groups")
-        .alias::<NewsPeer>("alias", "pathalias")
+        .alias::<NewsPeer>("requiregroup", "groups-required")
         .alias::<NewsPeer>("adddist", "distributions")
         .alias::<NewsPeer>("deldist", "distributions")
-        .alias::<NewsPeer>("hostname", "outhost")
-        .alias::<NewsPeer>("headfeed", "send-headfeed")
-        .alias::<NewsPeer>("precomreject", "dont-defer")
-        .alias::<NewsPeer>("nobatch", "no-backlog")
+
+        .alias::<NewsPeer>("hostname", "send-to")
+        .alias::<NewsPeer>("bindaddress", "bind-address")
+        .alias::<NewsPeer>("maxparallel", "max-connections-out")
+        .alias::<NewsPeer>("maxstream", "max-streaming-queue-size")
         .alias::<NewsPeer>("delayfeed", "delay-feed")
+        .alias::<NewsPeer>("nobatch", "no-backlog")
+        .alias::<NewsPeer>("maxqueue", "max-backlog-queue")
+        .alias::<NewsPeer>("headfeed", "send-headfeed")
+        .alias::<NewsPeer>("preservebyts", "preserve-bytes")
+
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")
         .alias::<GroupDef>("groupref", "groups")
+
         .ignore::<NewsPeer>("transmitbuf")
         .ignore::<NewsPeer>("receivebuf")
         .ignore::<NewsPeer>("realtime")
@@ -199,11 +202,10 @@ pub fn read_dnewsfeeds(name: &str) -> io::Result<NewsFeeds> {
         .ignore::<NewsPeer>("settos")
         .from_file(name)?;
 
-    // And build a 'NewsFeeds' struct.
-    let mut nf: NewsFeeds = dnf.into();
-    nf.resolve_references();
+    // And add it to the 'newsfeeds' struct.
+    dnewsfeeds_to_newsfeeds(dnf, nf);
 
-    Ok(nf)
+    Ok(())
 }
 
 /// Read SpoolCfg from a "dspool.ctl" file.
@@ -307,7 +309,7 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
         match nf.peer_map.get(words[1]) {
             None => log::warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
             Some(idx) => {
-                nf.peers[*idx].inhost.push(words[0].to_string());
+                nf.peers[*idx].accept_from.push(words[0].to_string());
             },
         }
     }

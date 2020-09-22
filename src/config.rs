@@ -1,7 +1,6 @@
 ///
 /// Configuration file reader and checker.
 ///
-use std::collections::HashMap;
 use std::io;
 use std::net::{AddrParseError, SocketAddr};
 use std::ops::Range;
@@ -19,7 +18,7 @@ use users::{get_effective_gid, get_effective_uid, get_group_by_name, get_user_by
 
 use crate::dconfig::*;
 use crate::newsfeeds::NewsFeeds;
-use crate::spool::{MetaSpool, SpoolCfg, SpoolDef};
+use crate::spool::SpoolCfg;
 use crate::util;
 use crate::util::BlockingType;
 
@@ -33,22 +32,16 @@ pub struct Config {
     pub server:     Server,
     pub history:    HistFile,
     pub paths:      Paths,
-    pub config:     CfgFiles,
+    #[serde(default)]
+    pub newsfeeds:  Arc<NewsFeeds>,
+    #[serde(default)]
+    pub compat:     Compat,
     #[serde(default, rename = "log")]
     pub logging:    Logging,
-    // Map of spools. Index is a number 0..99.
-    #[serde(rename = "spool", default)]
-    spooldef:       Option<HashMap<u8, SpoolDef>>,
-    // List of spool groups (metaspool in diablo).
     #[serde(default)]
-    spoolgroup:     Option<Vec<MetaSpool>>,
+    pub spool:      SpoolCfg,
     #[serde(skip)]
     pub timestamp:  u64,
-    #[serde(skip)]
-    newsfeeds:      Option<NewsFeeds>,
-    /// Flattened SpoolCfg (spool / spoolgroup).
-    #[serde(skip)]
-    pub spool:      SpoolCfg,
 }
 
 #[derive(Deserialize, Debug)]
@@ -72,11 +65,12 @@ pub struct Server {
     pub hostname:       String,
     #[serde(default)]
     pub xrefhost:       String,
-    #[serde(default)]
-    pub pathhost:       Vec<String>,
+    #[serde(rename = "path-identity", default)]
+    pub path_identity:  Vec<String>,
     #[serde(default)]
     pub commonpath:     Vec<String>,
     pub listen:         Option<Vec<String>>,
+    #[serde(default)]
     pub runtime:        Runtime,
     pub user:           Option<String>,
     pub group:          Option<String>,
@@ -86,7 +80,7 @@ pub struct Server {
     pub pidfile:        Option<String>,
     #[serde(default)]
     pub log_panics:     bool,
-    #[serde(default,deserialize_with = "util::option_deserialize_size")]
+    #[serde(default,rename = "max-article-size", deserialize_with = "util::option_deserialize_size")]
     pub maxartsize:     Option<u64>,
 }
 
@@ -104,11 +98,10 @@ pub struct Paths {
 
 /// Config files.
 #[derive(Deserialize, Debug, Default)]
+#[serde(default)]
 #[rustfmt::skip]
-pub struct CfgFiles {
-    #[serde(rename = "newsfeeds")]
-    pub dnewsfeeds:     String,
-    #[serde(rename = "spool")]
+pub struct Compat {
+    pub dnewsfeeds:     Option<String>,
     pub dspool_ctl:     Option<String>,
     pub diablo_hosts:   Option<String>,
 }
@@ -168,10 +161,6 @@ impl std::fmt::Debug for MultiSingle {
 pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     let mut cfg: Config = curlyconf::from_file(name)?;
 
-    // Because #[serde(flatten)] does not work in structs, do it manually.
-    cfg.spool.spool = cfg.spooldef.take().unwrap_or(Default::default());
-    cfg.spool.spoolgroup = cfg.spoolgroup.take().unwrap_or(Default::default());
-
     match cfg.server.maxartsize {
         None => cfg.server.maxartsize = Some(10_000_000),
         Some(0) => cfg.server.maxartsize = None,
@@ -179,15 +168,15 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     // Set some values to default if not set.
-    if cfg.server.pathhost.len() == 0 {
-        cfg.server.pathhost.push(cfg.server.hostname.clone());
+    if cfg.server.path_identity.is_empty() {
+        cfg.server.path_identity.push(cfg.server.hostname.clone());
     }
     if cfg.server.xrefhost == "" {
         cfg.server.xrefhost = cfg.server.hostname.clone();
     }
 
     // Fix up pathhost and commonpath.
-    pathhosts_fixup(&mut cfg.server.pathhost);
+    pathhosts_fixup(&mut cfg.server.path_identity);
     pathhosts_fixup(&mut cfg.server.commonpath);
 
     // metrics must be set if prometheus is set.
@@ -207,14 +196,16 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     if load_newsfeeds {
-        let mut feeds = read_dnewsfeeds(&expand_path(&cfg.paths, &cfg.config.dnewsfeeds))?;
-        if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.config.diablo_hosts) {
-            read_diablo_hosts(&mut feeds, dhosts)?;
+        if let Some(dnewsfeeds) = cfg.compat.dnewsfeeds.as_ref() {
+            let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
+            read_dnewsfeeds(&expand_path(&cfg.paths, dnewsfeeds), newsfeeds)?;
+            if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.compat.diablo_hosts) {
+                read_diablo_hosts(newsfeeds, dhosts)?;
+            }
         }
-        cfg.newsfeeds = Some(feeds);
     }
 
-    if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.config.dspool_ctl) {
+    if let Some(ref dspoolctl) = expand_path_opt(&cfg.paths, &cfg.compat.dspool_ctl) {
         read_dspool_ctl(dspoolctl, &mut cfg.spool)?;
     }
 
@@ -222,13 +213,20 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
 }
 
 pub fn set_config(mut cfg: Config) -> Arc<Config> {
-    if let Some(mut feeds) = cfg.newsfeeds.take() {
-        // replace the NEWSFEEDS config.
-        feeds.init_hostcache();
-        feeds.check_self(&cfg);
-        feeds.setup_xclient();
-        *NEWSFEEDS.write() = Some(Arc::new(feeds));
-    }
+
+    // initialize the new newsfeeds config.
+    let newsfeeds =  Arc::get_mut(&mut cfg.newsfeeds).unwrap();
+    let mut nf = std::mem::replace(newsfeeds, NewsFeeds::default());
+    nf.set_hostname_default();
+    nf.init_hostcache();
+    nf.resolve_references();
+    nf.setup_xclient();
+    nf.check_self(&cfg);
+    let newsfeeds =  Arc::get_mut(&mut cfg.newsfeeds).unwrap();
+    std::mem::swap(&mut nf, newsfeeds);
+
+    // Set the global NEWSFEEDS.
+    *NEWSFEEDS.write() = Some(Arc::clone(&cfg.newsfeeds));
 
     // replace the CONFIG config.
     *CONFIG.write() = Some(Arc::new(cfg));
