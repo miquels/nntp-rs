@@ -96,8 +96,9 @@ mod try_read_at {
 #[cfg(not(target_os = "linux"))]
 mod try_read_at {
     use std::io;
+    use std::fs::File;
 
-    pub fn try_read_at(_file: &File, _buf: &mut [u8], _offset: u64) -> Result<usize> {
+    pub fn try_read_at(_file: &File, _buf: &mut [u8], _offset: u64) -> io::Result<usize> {
         Err(io::ErrorKind::InvalidInput)?
     }
 }
