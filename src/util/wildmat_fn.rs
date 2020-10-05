@@ -70,13 +70,38 @@
 //  on.
 //
 
+#[derive(Clone)]
+struct BytesIter<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> BytesIter<'a> {
+    fn new(bytes: &'a [u8]) -> BytesIter<'a> {
+        BytesIter { bytes }
+    }
+}
+
+impl<'a> Iterator for BytesIter<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        if !self.bytes.is_empty() {
+            let b = self.bytes[0];
+            self.bytes = &self.bytes[1..];
+            Some(b as char)
+        } else {
+            None
+        }
+    }
+}
+
 // Match 'text' and 'pat'. Returns Some(true), Some(false), or None.
 // None is what in the original code is called ABORT.
-fn do_match(text: &str, pat: &str) -> Option<bool> {
+fn do_match<T>(mut text_iter: T, mut pat_iter: T) -> Option<bool>
+where
+    T: Iterator<Item = char> + Clone,
+{
     //println!("do_match({:?}, {:?}", text, pat);
-
-    let mut text_iter = text.chars();
-    let mut pat_iter = pat.chars();
 
     loop {
         let p = match pat_iter.next() {
@@ -89,32 +114,32 @@ fn do_match(text: &str, pat: &str) -> Option<bool> {
                 // Match anything.
                 text_iter.next()?;
                 continue;
-            },
+            }
             '*' => {
                 // Check for consecutive stars.
-                let mut pat = pat_iter.as_str();
+                let mut pat_clone = pat_iter.clone();
                 loop {
                     match pat_iter.next() {
                         None => {
                             // Trailing star matches everything.
                             return Some(true);
-                        },
-                        Some('*') => pat = pat_iter.as_str(),
+                        }
+                        Some('*') => pat_clone = pat_iter.clone(),
                         _ => break,
                     }
                 }
                 // Try all possibilities.
                 loop {
                     //println!("recurse");
-                    match do_match(text_iter.as_str(), pat) {
-                        Some(false) => {},
+                    match do_match(text_iter.clone(), pat_clone.clone()) {
+                        Some(false) => {}
                         p => return p,
                     }
                     if text_iter.next().is_none() {
                         return None;
                     }
                 }
-            },
+            }
             '[' => {
                 // Inverted character set?
                 let (p, fail) = match pat_iter.next()? {
@@ -132,7 +157,7 @@ fn do_match(text: &str, pat: &str) -> Option<bool> {
                             matched = true;
                         }
                         pat_iter.next()?
-                    },
+                    }
                     p => p,
                 };
 
@@ -155,7 +180,7 @@ fn do_match(text: &str, pat: &str) -> Option<bool> {
                                 matched = true;
                             }
                         } else {
-                            if begin >= c && c <= p {
+                            if c >= begin && c <= p {
                                 matched = true;
                             }
                             p = pat_iter.next()?;
@@ -165,7 +190,7 @@ fn do_match(text: &str, pat: &str) -> Option<bool> {
                 if matched == fail {
                     return Some(false);
                 }
-            },
+            }
             a => {
                 let c = match text_iter.next()? {
                     '\\' => text_iter.next()?,
@@ -174,19 +199,34 @@ fn do_match(text: &str, pat: &str) -> Option<bool> {
                 if a != c {
                     return Some(false);
                 }
-            },
+            }
         }
     }
     Some(text_iter.next().is_none())
 }
 
 /// Do shell-style pattern matching for ?, \, [], and * characters.
-/// It is UTF8-clean, but it won't match combining characters in ranges.
-pub fn wildmat(text: &str, pat: &str) -> bool {
+/// It is UTF8-clean, but it won't match combining characters in '?' or ranges.
+pub fn wildmat(text: impl AsRef<str>, pat: impl AsRef<str>) -> bool {
+    let pat = pat.as_ref();
     if pat == "*" {
         return true;
     }
-    match do_match(text, pat) {
+    match do_match(text.as_ref().chars(), pat.chars()) {
+        Some(true) => true,
+        _ => false,
+    }
+}
+
+/// Do shell-style pattern matching for ?, \, [], and * characters.
+/// It is UTF8-clean, but it won't match non-ascii characters in '?' or ranges.
+#[allow(dead_code)]
+pub fn wildmat_bytes(text: impl AsRef<[u8]>, pat: impl AsRef<[u8]>) -> bool {
+    let pat = pat.as_ref();
+    if pat == &b"*"[..] {
+        return true;
+    }
+    match do_match(BytesIter::new(text.as_ref()), BytesIter::new(pat)) {
         Some(true) => true,
         _ => false,
     }
@@ -208,6 +248,7 @@ mod tests {
         assert!(wildmat("hallo", "h[abc]llo"));
         assert!(wildmat("hallo", "h[^cba]llo") == false);
         assert!(wildmat("hallo", "h*[o") == false);
-        assert!(wildmat("vier € is 3 $", "* [xy€z] is 3 $"));
+        assert!(wildmat("ba.announce", "[a-z]*") == true);
+        //assert!(wildmat("vier € is 3 $", "* [xy€z] is 3 $"));
     }
 }

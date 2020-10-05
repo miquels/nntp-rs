@@ -3,6 +3,7 @@
 #[macro_use]
 pub mod errors;
 
+pub mod active;
 pub mod article;
 pub mod arttype;
 pub mod bus;
