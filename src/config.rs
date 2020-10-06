@@ -34,13 +34,15 @@ pub struct Config {
     pub history:    HistFile,
     pub paths:      Paths,
     #[serde(default)]
-    pub newsfeeds:  Arc<NewsFeeds>,
-    #[serde(default)]
     pub compat:     Compat,
     #[serde(default, rename = "log")]
     pub logging:    Logging,
     #[serde(default)]
+    pub active:     Option<Active>,
+    #[serde(default)]
     pub spool:      SpoolCfg,
+    #[serde(default)]
+    pub newsfeeds:  Arc<NewsFeeds>,
     #[serde(skip)]
     pub timestamp:  u64,
 }
@@ -64,8 +66,6 @@ impl Default for Runtime {
 pub struct Server {
     #[serde(default = "util::hostname")]
     pub hostname:       String,
-    #[serde(default)]
-    pub xrefhost:       String,
     #[serde(rename = "path-identity", default)]
     pub path_identity:  Vec<String>,
     #[serde(default)]
@@ -117,8 +117,8 @@ pub struct Logging {
     pub prometheus:     Option<String>,
 }
 
-/// Histfile config table in Toml config file.
-#[derive(Default,Deserialize, Debug)]
+/// Histfile config section.
+#[derive(Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct HistFile {
     pub file:       String,
@@ -130,6 +130,63 @@ pub struct HistFile {
     #[serde(default,deserialize_with = "util::deserialize_duration")]
     pub remember:   Duration,
 }
+
+/// Active config section.
+#[derive(Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct Active {
+    pub backend:    ActiveBackend,
+    #[serde(default)]
+    pub xref:       Option<XrefConfig>,
+    #[serde(default)]
+    pub sync:       Option<ActiveSync>,
+}
+
+/// Backend selection in the active section.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+#[rustfmt::skip]
+pub enum ActiveBackend {
+    Diablo(DActive),
+}
+
+/// Settings for the diablo active file backend.
+#[derive(Default,Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct DActive {
+    pub file:       String,
+}
+
+/// Article numbering configuration.
+#[derive(Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct XrefConfig {
+    mode:       XrefMode,
+    #[serde(default)]
+    hostname:   String,
+}
+
+/// Article numbering mode (primary/replica).
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+#[rustfmt::skip]
+pub enum XrefMode {
+    Primary,
+    Replica,
+}
+
+/// Active file synchronisation with a remote server.
+#[derive(Default,Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct ActiveSync {
+    pub server:         String,
+    pub groups:         String,
+    #[serde(default)]
+    pub remove:         bool,
+    #[serde(default)]
+    pub descriptions:   bool,
+}
+
 
 /// Multiple single-threaded executors.
 #[derive(Default,Deserialize)]
@@ -176,20 +233,24 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     // `path_identity sharedname!${hostname};`.
     let hostname = util::hostname();
     cfg.server.hostname = cfg.server.hostname.replace("${hostname}", &hostname);
+
+    if let Some(xref) = cfg.active.as_mut().and_then(|a| a.xref.as_mut()) {
+        if xref.hostname != "" {
+            xref.hostname = xref.hostname.replace("${hostname}", &hostname);
+        } else {
+            xref.hostname = cfg.server.hostname.clone();
+        }
+    }
+
     for path_identity in cfg.server.path_identity.iter_mut() {
         *path_identity = path_identity.replace("${hostname}", &hostname);
     }
-    cfg.server.xrefhost = cfg.server.xrefhost.replace("${hostname}", &hostname);
-    for commonpath in cfg.server.commonpath.iter_mut() {
-        *commonpath = commonpath.replace("${hostname}", &hostname);
-    }
-
-    // Set some values to default if not set.
     if cfg.server.path_identity.is_empty() {
         cfg.server.path_identity.push(cfg.server.hostname.clone());
     }
-    if cfg.server.xrefhost == "" {
-        cfg.server.xrefhost = cfg.server.hostname.clone();
+
+    for commonpath in cfg.server.commonpath.iter_mut() {
+        *commonpath = commonpath.replace("${hostname}", &hostname);
     }
 
     // Fix up pathhost and commonpath.
