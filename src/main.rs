@@ -8,7 +8,7 @@ use structopt::StructOpt;
 
 use nntp_rs::config;
 use nntp_rs::dns;
-use nntp_rs::history::{self, History};
+use nntp_rs::history::{self, History, MLockMode};
 use nntp_rs::ioerr;
 use nntp_rs::logger::{self, LogTarget};
 use nntp_rs::nntp_client;
@@ -272,6 +272,7 @@ fn main() -> Result<()> {
         &config.history.backend,
         hpath.clone(),
         true,
+        config.history.mlock,
         config.history.threads,
         bt.clone(),
     )
@@ -356,6 +357,7 @@ fn history_common(
         &config.history.backend,
         hpath.clone(),
         false,
+        MLockMode::None,
         None,
         BlockingType::Blocking,
     )

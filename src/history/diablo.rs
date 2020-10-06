@@ -16,7 +16,7 @@ use fs2::FileExt as _;
 use parking_lot::Mutex;
 use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 
-use crate::history::{HistBackend, HistEnt, HistStatus};
+use crate::history::{HistBackend, HistEnt, HistStatus, MLockMode};
 use crate::spool;
 use crate::util::byteorder::*;
 use crate::util::{self, DHash, MmapAtomicU32, UnixTime};
@@ -42,6 +42,7 @@ struct DHistoryInner {
     hash_size:    u32,
     hash_mask:    u32,
     data_offset:  u64,
+    lock_mode:    MLockMode,
 }
 
 // Internal file writer status.
@@ -88,8 +89,8 @@ impl DHistHead {
 impl DHistory {
     /// open existing history database
     /// Note: blocking.
-    pub fn open(path: &Path, rw: bool, threads: Option<usize>, bt: BlockingType) -> io::Result<DHistory> {
-        let inner = DHistoryInner::open(path, rw)?;
+    pub fn open(path: &Path, rw: bool, lock_mode: MLockMode, threads: Option<usize>, bt: BlockingType) -> io::Result<DHistory> {
+        let inner = DHistoryInner::open(path, rw, lock_mode)?;
         Ok(DHistory {
             inner:         ArcSwap::from(Arc::new(inner)),
             blocking_type: bt.clone(),
@@ -302,7 +303,7 @@ impl HistBackend for DHistory {
 
 impl DHistoryInner {
     /// open existing history database
-    fn open(path: &Path, rw: bool) -> io::Result<DHistoryInner> {
+    fn open(path: &Path, rw: bool, lock_mode: MLockMode) -> io::Result<DHistoryInner> {
         // open file, lock it, get the meta info, and clone a write handle.
         let f = if rw {
             let f = fs::OpenOptions::new().read(true).write(true).open(path)?;
@@ -346,7 +347,8 @@ impl DHistoryInner {
         }
 
         // mmap the hash table index.
-        let buckets = MmapAtomicU32::new(&f, rw, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
+        let do_mlock = lock_mode != MLockMode::None;
+        let buckets = MmapAtomicU32::new(&f, rw, do_mlock, DHISTHEAD_SIZE as u64, dhh.hash_size as usize)
             .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
 
         Ok(DHistoryInner {
@@ -361,6 +363,7 @@ impl DHistoryInner {
             hash_size:    dhh.hash_size,
             hash_mask:    dhh.hash_size - 1,
             data_offset:  data_offset,
+            lock_mode,
         })
     }
 
@@ -602,7 +605,7 @@ impl DHistoryInner {
         let mut new_path = self.path.clone();
         new_path.set_extension("new");
         DHistory::create(&new_path, self.hash_size)?;
-        let mut new_inner = DHistoryInner::open(&new_path, true)?;
+        let mut new_inner = DHistoryInner::open(&new_path, true, self.lock_mode)?;
 
         let mut rpos = self.data_offset + DHISTENT_SIZE as u64;
 

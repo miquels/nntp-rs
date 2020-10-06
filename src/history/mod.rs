@@ -17,6 +17,8 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use self::cache::HCache;
 use crate::spool;
 use crate::util::BlockingType;
@@ -62,6 +64,23 @@ pub struct History {
 struct HistoryInner {
     cache:   HCache,
     backend: Box<dyn HistBackend>,
+}
+
+/// which part of the history file to lock into memory.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MLockMode {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "index")]
+    Index,
+    #[serde(rename = "all")]
+    All,
+}
+
+impl Default for MLockMode {
+    fn default() -> MLockMode {
+        MLockMode::None
+    }
 }
 
 /// One history entry.
@@ -138,12 +157,13 @@ impl History {
         tp: &str,
         path: impl AsRef<Path>,
         rw: bool,
+        lock_mode: MLockMode,
         threads: Option<usize>,
         bt: BlockingType,
     ) -> io::Result<History>
     {
         let h: Box<dyn HistBackend> = match tp {
-            "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), rw, threads, bt)?),
+            "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), rw, lock_mode, threads, bt)?),
             "memdb" => Box::new(memdb::MemDb::new()),
             s => Err(io::Error::new(io::ErrorKind::InvalidData, s.to_string()))?,
         };

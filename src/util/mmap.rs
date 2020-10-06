@@ -27,20 +27,27 @@ impl Debug for MmapAtomicU32 {
 }
 
 impl MmapAtomicU32 {
-    pub fn new(file: &fs::File, rw: bool, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
+    pub fn new(file: &fs::File, rw: bool, lock: bool, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
         let mut opts = MmapOptions::new();
+        let len = num_elems * 4;
         Ok(if rw {
             // safe, as long as nothing "outside" changes the mmap'ed file.
-            let mmap: MmapMut = unsafe { opts.offset(offset).len(num_elems * 4).map_mut(file)? };
+            let mmap: MmapMut = unsafe { opts.offset(offset).len(len).map_mut(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
+            if lock {
+                lock_index(mmap.as_ptr(), len);
+            }
             MmapAtomicU32 {
                 map: MmapMode::Rw(mmap),
                 data,
             }
         } else {
             // safe, as long as nothing "outside" changes the mmap'ed file.
-            let mmap: Mmap = unsafe { opts.offset(offset).len(num_elems * 4).map(file)? };
+            let mmap: Mmap = unsafe { opts.offset(offset).len(len).map(file)? };
             let data = mmap.as_ptr() as *const AtomicU32;
+            if lock {
+                lock_index(mmap.as_ptr(), len);
+            }
             MmapAtomicU32 {
                 map: MmapMode::Ro(mmap),
                 data,
@@ -60,3 +67,14 @@ impl MmapAtomicU32 {
         elem.store(val, Ordering::SeqCst);
     }
 }
+
+fn lock_index(address: *const u8, size: usize) {
+    match region::lock(address, size) {
+        Ok(guard) => {
+            // Don't need the guard, unmap will unlock.
+            std::mem::forget(guard);
+        },
+        Err(e) => log::warn!("history file index: cannot mlock: {}", e),
+    }
+}
+
