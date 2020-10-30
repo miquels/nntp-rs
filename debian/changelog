@@ -1,3 +1,9 @@
+nntp-rs (0.2) UNRELEASED; urgency=low
+
+  * systemd unit file: allow more open files, allow mlock()
+
+ -- Miquel van Smoorenburg <miquels@debian.org>  Sat, 03 Oct 2020 19:50:27 +0200
+
 nntp-rs (0.1) buster; urgency=low
 
   * initial release

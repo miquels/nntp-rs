@@ -4,6 +4,8 @@ After=network.target
 ConditionPathExists=/etc/news/config.cfg
 
 [Service]
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
 ExecStart=/usr/sbin/nntp-rs-server -c /etc/news/config.cfg serve
 KillMode=process
 
