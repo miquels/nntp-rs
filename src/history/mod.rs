@@ -185,6 +185,7 @@ impl History {
     ) -> io::Result<()>
     {
         let remember = if remember.as_secs() == 0 {
+            log::warn!("history:: expire: remember not set, defaulting to 1d");
             86400
         } else {
             remember.as_secs()

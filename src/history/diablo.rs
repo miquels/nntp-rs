@@ -19,7 +19,7 @@ use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 use crate::history::{HistBackend, HistEnt, HistStatus, MLockMode};
 use crate::spool;
 use crate::util::byteorder::*;
-use crate::util::{self, DHash, MmapAtomicU32, UnixTime};
+use crate::util::{self, format, DHash, MmapAtomicU32, UnixTime};
 use crate::util::{BlockingPool, BlockingType};
 
 /// Diablo compatible history file.
@@ -147,15 +147,12 @@ impl DHistory {
     ) -> io::Result<()>
     {
         let inner = self.inner.load().clone();
+        let self_inner = self.inner.clone();
 
-        let new_inner = self
+        self
             .blocking_pool
-            .spawn_fn(move || inner.do_expire(spool, remember, no_rename, force))
-            .await?;
-        if let Some(new_inner) = new_inner {
-            self.inner.store(new_inner);
-        }
-        Ok(())
+            .spawn_fn(move || inner.do_expire(spool, remember, no_rename, force, self_inner))
+            .await
     }
 
     // Inspect.
@@ -320,7 +317,7 @@ impl DHistoryInner {
         // read DHistHead and validate it.
         let dhh = read_dhisthead_at(&f, 0)?;
         log::debug!("{:?} - dhisthead: {:?}", path, &dhh);
-        if dhh.magic != DHISTHEAD_MAGIC ||
+        if (dhh.magic != DHISTHEAD_MAGIC && dhh.magic != DHISTHEAD_DEADMAGIC) ||
             dhh.version != DHISTHEAD_VERSION2 ||
             dhh.histent_size as usize != DHISTENT_SIZE ||
             dhh.head_size as usize != DHISTHEAD_SIZE
@@ -329,6 +326,9 @@ impl DHistoryInner {
                 io::ErrorKind::InvalidData,
                 format!("{:?}: not a dhistory file", path),
             ));
+        }
+        if rw && dhh.magic == DHISTHEAD_DEADMAGIC {
+            return Err(ioerr!(InvalidData, "{:?}: dead history file", path));
         }
 
         // consistency check.
@@ -462,15 +462,21 @@ impl DHistoryInner {
         rpos: u64,
         spool_oldest: &HashMap<u8, UnixTime>,
         remember: u64,
-        first: bool,
+        round: u32,
     ) -> io::Result<u64>
     {
+        let round_name = if round > 0 {
+            format!("round {}", round)
+        } else {
+            String::from("final round")
+        };
+
         // seek to the end, clone filehandle, and buffer it.
         let mut w = new.wfile.lock();
-        let mut wpos = w.file.seek(io::SeekFrom::End(0))?;
+        w.wpos = w.file.seek(io::SeekFrom::End(0))?;
         let mut wfile = io::BufWriter::with_capacity(8000 * DHISTENT_SIZE, w.file.try_clone()?);
 
-        // clone filehandle of current file and seek to the first entry.
+        // clone filehandle of current file and seek to where we left off.
         let mut rfile = io::BufReader::with_capacity(8000 * DHISTENT_SIZE, self.rfile.try_clone()?);
         let mut rpos = rpos;
         rfile.seek(io::SeekFrom::Start(rpos))?;
@@ -484,9 +490,7 @@ impl DHistoryInner {
         let mut marked = 0u64;
         let mut removed = 0u64;
 
-        // rebuild history file.
         loop {
-            let mut did_mark = false;
 
             // read entry.
             let mut dhe = match read_dhistent(&mut rfile) {
@@ -500,42 +504,46 @@ impl DHistoryInner {
             rpos += DHISTENT_SIZE as u64;
 
             // validate entry.
-            let when = dhe.when();
-            let mut expired = true;
-            if dhe.status() == HistStatus::Present {
-                // Not expired yet, see if it should be.
-                if let Some(spool) = dhe.spool() {
-                    // valid spool. get minimum age.
-                    if let Some(&oldest) = spool_oldest.get(&spool) {
-                        if when >= oldest {
-                            // still valid.
-                            expired = false;
-                        }
-                    }
-                }
-                if expired {
-                    did_mark = true;
-                    dhe.set_status(HistStatus::Expired);
+            let when = dhe.when().as_secs();
+            let mut keep = true;
+
+            // get the timestamp of the oldest article in the spool of the entry.
+            let mut oldest = now.as_secs();
+            if let Some(spool) = dhe.spool() {
+                // valid spool. get minimum age.
+                if let Some(&t) = spool_oldest.get(&spool) {
+                    oldest = t.as_secs();
                 }
             }
 
-            // only write the entry if it is not expired or if it still is within "remember".
-            if !expired || now.seconds_since(when) < remember {
+            // if the entry is older than the oldest article in the
+            // spool minus "remember", drop it from the history file.
+            if when + remember < oldest {
+                keep = false;
+                removed += 1;
+            } else {
                 kept += 1;
-                if did_mark {
+            }
+
+            // if it is present see if it's too old and should be marked as expired.
+            if dhe.status() == HistStatus::Present && keep {
+                if when < oldest {
+                    // mark as expired.
+                    dhe.set_status(HistStatus::Expired);
                     marked += 1;
                 }
-                wpos = new.write_dhistent_append(&mut wfile, dhe, wpos)?;
-            } else {
-                removed += 1;
+            }
+
+            // only write the entry if we want to keep it.
+            if keep {
+                w.wpos = new.write_dhistent_append(&mut wfile, dhe, w.wpos)?;
             }
 
             // status update while we're running.
-
             if (kept + removed) % 10000 == 0 && last_tm.seconds_elapsed() >= 10 {
                 last_pct = (100 * (rpos - self.data_offset)) / (rsize - self.data_offset);
                 last_tm = UnixTime::now();
-                log::info!("expire {:?}: {}%", self.path, last_pct);
+                log::info!("expire {:?}: {}: {}%", self.path, round_name, last_pct);
             }
         }
 
@@ -543,21 +551,19 @@ impl DHistoryInner {
         let wfile = wfile.into_inner()?;
         wfile.sync_all()?;
 
+        // if we did not write '100%' yet, do it now.
         if last_pct > 0 && last_pct < 100 {
-            log::info!("expire {:?}: 100%", self.path);
+            log::info!("expire {:?}: {}: 100%", self.path, round_name);
         }
 
-        if first || removed > 0 || marked > 0 {
-            let i = if first { "" } else { " (incremental)" };
-            log::info!(
-                "expire {:?}{}: removed {} entries, kept {} entries, marked {} entries as expired",
-                self.path,
-                i,
-                removed,
-                kept,
-                marked
-            );
-        }
+        log::info!(
+            "expire {:?}: {}: removed {} entries, kept {} entries, marked {} entries as expired",
+            self.path,
+            round_name,
+            removed,
+            kept,
+            marked
+        );
 
         Ok(rpos)
     }
@@ -590,13 +596,14 @@ impl DHistoryInner {
         remember: u64,
         no_rename: bool,
         force: bool,
-    ) -> io::Result<Option<Arc<DHistoryInner>>>
+        arcswap: ArcSwap<DHistoryInner>,
+    ) -> io::Result<()>
     {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !force && !self.need_expire(&spool_oldest) {
             log::info!("expire {:?}: no expire needed", self.path);
-            return Ok(None);
+            return Ok(());
         }
 
         log::info!("expire {:?}: start", self.path);
@@ -612,8 +619,8 @@ impl DHistoryInner {
         // Call expire_incremental a couple of times. The first time will take the longest
         // since we need to sync the entire new history file to disk. After that it will
         // get faster. Try until there are less than 1000 entries left, for a maximum of 5 times.
-        for i in 0..5 {
-            rpos = self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, i == 0)?;
+        for i in 1..=5 {
+            rpos = self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, i)?;
             let meta = self.rfile.metadata()?;
             if rpos + 1000 * (DHISTENT_SIZE as u64) > meta.len() {
                 break;
@@ -628,11 +635,11 @@ impl DHistoryInner {
         let mut wfile = self.wfile.lock();
 
         // process entries that were added in the mean time.
-        self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, false)?;
+        self.expire_incremental(&new_inner, rpos, &spool_oldest, remember, 0)?;
 
         if no_rename {
             log::info!("expire {:?}: done, new file is {:?}", self.path, new_path);
-            return Ok(None);
+            return Ok(());
         }
 
         // first link "dhistory" to "dhistory.old"
@@ -649,10 +656,19 @@ impl DHistoryInner {
 
         log::info!("expire {:?}: done", self.path);
 
-        // update, and return new inner.
-        new_inner.path = self.path.clone();
+        // Invalidate old history fle handle.
         wfile.invalidated = true;
-        Ok(Some(Arc::new(new_inner)))
+
+        // Install new history file handle.
+        new_inner.path = self.path.clone();
+        arcswap.store(Arc::new(new_inner));
+
+        // Sleep for a short while to give current readers the
+        // time to switch to the new history file handle.
+        // Yes, this is racy. Does anyone have a better idea?
+        std::thread::sleep(Duration::from_millis(100));
+
+        Ok(())
     }
 
     // Inspect the history file.
@@ -677,6 +693,7 @@ impl DHistoryInner {
             rej:          u64,
             unk:          u64,
             oldest:       UnixTime,
+            oldest_idx:   u64,
             newest:       UnixTime,
             spool_oldest: UnixTime,
             is_defined:   bool,
@@ -714,6 +731,7 @@ impl DHistoryInner {
 
             if when < s.oldest || s.oldest.is_zero() {
                 s.oldest = when;
+                s.oldest_idx = idx;
             }
             if when > s.newest {
                 s.newest = when;
@@ -733,19 +751,23 @@ impl DHistoryInner {
             } else {
                 (*k).to_string()
             };
-            log::info!(
-                "spool {:>4}{} present: {:10} remembered: {:10} rejected: {:10} \
-                 unknown: {:10} oldest: {:?} newest: {:?} spool_oldest: {:?}",
-                spno,
-                star,
-                s.tot,
-                s.exp,
-                s.rej,
-                s.unk,
-                s.oldest,
-                s.newest,
-                s.spool_oldest
-            );
+            let now = UnixTime::now();
+            let fmt_d = |t: UnixTime| {
+                if t.is_zero() {
+                    "-".to_string()
+                } else {
+                    format!("{} ({})", t, format::duration(&(now - t)))
+                }
+            };
+            log::info!("spool {}{}", spno, star);
+            log::info!("       present: {:10}", s.tot);
+            log::info!("    remembered: {:10}", s.exp);
+            log::info!("      rejected: {:10}", s.rej);
+            log::info!("       unknown: {:10}", s.unk);
+            log::info!("        oldest: {}", fmt_d(s.oldest));
+            log::info!("    oldest_idx: {}", s.oldest_idx);
+            log::info!("        newest: {}", fmt_d(s.newest));
+            log::info!("  spool_oldest: {}", fmt_d(s.spool_oldest));
         }
         Ok(())
     }
