@@ -84,9 +84,13 @@ impl NewsFeeds {
         for e in self.peers.iter_mut() {
             let mut hosts = Vec::new();
             for h in &e.accept_from {
-                match IpNet::from_str(h) {
-                    Ok(net) => e.innet.push(net),
-                    Err(_) => hosts.push(h.clone()),
+                if let Ok(ipaddr) = h.parse::<IpAddr>() {
+                    e.innet.push(ipaddr.into());
+                } else {
+                    match IpNet::from_str(h) {
+                        Ok(net) => e.innet.push(net),
+                        Err(_) => hosts.push(h.clone()),
+                    }
                 }
             }
             e.accept_from = hosts;
@@ -184,7 +188,7 @@ impl NewsFeeds {
 /// Definition of a newspeer.
 #[rustfmt::skip]
 #[derive(Default,Debug,Clone,Deserialize)]
-#[serde(default)]
+#[serde(default = "NewsPeer::new")]
 pub struct NewsPeer {
     /// Name of this feed.
     #[serde(rename = "__label__")]

@@ -147,12 +147,24 @@ impl DHistory {
     ) -> io::Result<()>
     {
         let inner = self.inner.load().clone();
-        let self_inner = self.inner.clone();
 
-        self
+        let new_inner = self
             .blocking_pool
-            .spawn_fn(move || inner.do_expire(spool, remember, no_rename, force, self_inner))
-            .await
+            .spawn_fn(move || inner.do_expire(spool, remember, no_rename, force))
+            .await?;
+
+        if let Some(new_inner) = new_inner {
+
+            // Before storing the new handle, take a write lock on it so that
+            // new writers have to wait for a  while. This gives time for existing
+            // readers to finish what they're doing and drop the old handle.
+            let new_inner2 = Arc::clone(&new_inner);
+            let _wlock = new_inner2.wfile.lock();
+            self.inner.store(new_inner);
+            std::thread::sleep(Duration::from_millis(250));
+        }
+
+        Ok(())
     }
 
     // Inspect.
@@ -596,14 +608,13 @@ impl DHistoryInner {
         remember: u64,
         no_rename: bool,
         force: bool,
-        arcswap: ArcSwap<DHistoryInner>,
-    ) -> io::Result<()>
+    ) -> io::Result<Option<Arc<DHistoryInner>>>
     {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !force && !self.need_expire(&spool_oldest) {
             log::info!("expire {:?}: no expire needed", self.path);
-            return Ok(());
+            return Ok(None);
         }
 
         log::info!("expire {:?}: start", self.path);
@@ -639,7 +650,7 @@ impl DHistoryInner {
 
         if no_rename {
             log::info!("expire {:?}: done, new file is {:?}", self.path, new_path);
-            return Ok(());
+            return Ok(None);
         }
 
         // first link "dhistory" to "dhistory.old"
@@ -659,16 +670,10 @@ impl DHistoryInner {
         // Invalidate old history fle handle.
         wfile.invalidated = true;
 
-        // Install new history file handle.
+        // Update new history file handle.
         new_inner.path = self.path.clone();
-        arcswap.store(Arc::new(new_inner));
 
-        // Sleep for a short while to give current readers the
-        // time to switch to the new history file handle.
-        // Yes, this is racy. Does anyone have a better idea?
-        std::thread::sleep(Duration::from_millis(100));
-
-        Ok(())
+        Ok(Some(Arc::new(new_inner)))
     }
 
     // Inspect the history file.
