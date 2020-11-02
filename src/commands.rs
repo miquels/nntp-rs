@@ -241,7 +241,7 @@ impl CmdParser {
 
     pub fn help(&self) -> Buffer {
         let mut out = Buffer::new();
-        put_str(&mut out, "100 Legal commands\r\n");
+        put_str(&mut out, "100 help (nntp-rs 0.1)\r\n");
 
         let mut cmds: Vec<&CmdDef> = self.cmd_map.values().collect();
         cmds.sort_unstable_by(|a, b| a.name.cmp(b.name));
@@ -272,8 +272,8 @@ impl CmdParser {
     pub fn capabilities(&self) -> Buffer {
         let mut out = Buffer::new();
         put_str(&mut out, "101 Capability list:\r\n");
-        put_str(&mut out, "VERSION: 2\r\n");
-        put_str(&mut out, "IMPLEMENTATION: NNTP-RS 0.1\r\n");
+        put_str(&mut out, "VERSION 2\r\n");
+        put_str(&mut out, "IMPLEMENTATION nntp-rs 0.1\r\n");
         if (self.caps & Capb::Authinfo as usize) > 0 {
             put_str(&mut out, "AUTHINFO\r\n");
         }
