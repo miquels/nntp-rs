@@ -208,11 +208,11 @@ impl NntpServer {
         } else {
             self.parser.add_cap(Capb::Ihave);
             self.parser.add_cap(Capb::Streaming);
+            if peer.accept_headfeed {
+                self.parser.add_cap(Capb::ModeHeadfeed);
+            }
             200
         };
-        if peer.accept_headfeed {
-            self.parser.add_cap(Capb::ModeHeadfeed);
-        }
         let msg = format!("{} {} hello {}", code, self.config.server.hostname, peer.label);
         Ok(NntpResult::text(msg))
     }
