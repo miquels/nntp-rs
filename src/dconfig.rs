@@ -306,14 +306,23 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
         if words.len() > 2 {
             Err(ioerr!(InvalidData, "{}: {}: data after label", info, words[0]))?;
         }
-        match nf.peer_map.get(words[1]) {
+        match get_peer_idx(nf, words[1]) {
             None => log::warn!("{}: label {} not found in dnewsfeeds", info, words[1]),
             Some(idx) => {
-                nf.peers[*idx].accept_from.push(words[0].to_string());
+                nf.peers[idx].accept_from.push(words[0].to_string());
             },
         }
     }
     Ok(())
+}
+
+fn get_peer_idx(nf: &NewsFeeds, name: &str) -> Option<usize> {
+    for idx in 0 .. nf.peers.len() {
+        if name == nf.peers[idx].label.as_str() {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 // check_dnewsfeeds state.

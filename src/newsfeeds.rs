@@ -49,9 +49,6 @@ pub struct NewsFeeds {
 
     // The below are all non-configfile items.
 
-    // Mapping from peername to index in the peer vec.
-    #[serde(skip)]
-    pub(crate) peer_map:    HashMap<SmartString, usize>,
     // timestamp of file when we loaded this data
     #[serde(skip)]
     pub(crate) timestamp:   UnixTime,
@@ -69,7 +66,6 @@ impl Default for NewsFeeds {
             templates: Vec::new(),
             groupdefs: Vec::new(),
             peers:     Vec::new(),
-            peer_map:  HashMap::new(),
             timestamp: UnixTime::now(),
             infilter:  None,
             hcache:    HostCache::get(),
@@ -167,17 +163,24 @@ impl NewsFeeds {
     /// Returns a tuple consisting of the index into the peers vector
     /// and a reference to the NewsPeer instance.
     pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
-        if let Some(name) = self.hcache.lookup(ipaddr) {
-            return self
-                .peer_map
-                .get(name.as_str())
-                .map(|idx| (*idx, &self.peers[*idx]));
-        }
-        for i in 0..self.peers.len() {
-            let e = &self.peers[i];
-            for n in &e.innet {
-                if n.contains(ipaddr) {
-                    return Some((i, e));
+
+        // hostcache lookup.
+        let hcache_name = self.hcache.lookup(ipaddr);
+        let hcache_name = hcache_name.as_ref().map(|name| name.as_str());
+
+        // walk over the peers one by one (instead of using a hashmap or some other
+        // optimization) since we want to match the entries in the order they
+        // were put in the config file.
+        for idx in 0..self.peers.len() {
+            let peer = &self.peers[idx];
+            if let Some(name) = hcache_name {
+                if name == peer.label {
+                    return Some((idx, peer));
+                }
+            }
+            for net in &peer.innet {
+                if net.contains(ipaddr) {
+                    return Some((idx, peer));
                 }
             }
         }
@@ -275,9 +278,6 @@ pub struct NewsPeer {
     /// metadata for non-feed related things.
     pub meta:               HashMap<String, Vec<String>>,
 
-    /// non-config items.
-    #[serde(skip)]
-    pub index:              usize,
     #[serde(skip)]
     pub is_self:            bool,
 }
