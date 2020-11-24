@@ -23,6 +23,7 @@ pub async fn nntp_connect(
     cmd: &str,
     respcode: u32,
     bindaddr: Option<IpAddr>,
+    sendbuf_size: Option<usize>,
 ) -> io::Result<(NntpCodec, IpAddr, String)>
 {
     // A lookup of the hostname might return multiple addresses.
@@ -75,6 +76,12 @@ pub async fn nntp_connect(
                     ioerr!(e.kind(), "bind {}: {}", sa, e)
                 })?;
             }
+
+            // Set (max) outbuf buffer size.
+            if let Some(size) = sendbuf_size {
+                let _ = socket.set_send_buffer_size(size);
+            }
+
             /*
                         // Now this sucks, having to run it on a threadpool.
                         //

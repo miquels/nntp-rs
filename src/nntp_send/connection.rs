@@ -259,6 +259,7 @@ impl Connection {
             cmd,
             code,
             newspeer.bindaddress.clone(),
+            newspeer.sendbuf_size.clone(),
         )
         .await;
         match res {

@@ -158,20 +158,20 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
 
         .alias::<NewsPeer>("hostname", "send-to")
         .alias::<NewsPeer>("bindaddress", "bind-address")
+        .alias::<NewsPeer>("transmitbuf", "sendbuf-size")
         .alias::<NewsPeer>("maxparallel", "max-connections-out")
         .alias::<NewsPeer>("maxstream", "max-inflight")
         .alias::<NewsPeer>("delayfeed", "delay-feed")
         .alias::<NewsPeer>("nobatch", "no-backlog")
         .alias::<NewsPeer>("maxqueue", "max-backlog-queue")
         .alias::<NewsPeer>("headfeed", "send-headfeed")
-        .alias::<NewsPeer>("preservebyts", "preserve-bytes")
+        .alias::<NewsPeer>("preservebytes", "preserve-bytes")
 
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")
         .alias::<GroupDef>("groupref", "groups")
 
-        .ignore::<NewsPeer>("transmitbuf")
         .ignore::<NewsPeer>("receivebuf")
         .ignore::<NewsPeer>("realtime")
         .ignore::<NewsPeer>("priority")

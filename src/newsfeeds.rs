@@ -239,6 +239,8 @@ pub struct NewsPeer {
     #[serde(rename = "bind-address")]
     pub bindaddress:        Option<IpAddr>,
     pub port:               u16,
+    #[serde(rename = "sendbuf-size", deserialize_with = "util::option_deserialize_size")]
+    pub sendbuf_size:       Option<u64>,
 
     #[serde(rename = "min-crosspost")]
     pub mincross:           u32,
