@@ -278,18 +278,12 @@ impl Connection {
         if maxstream == 0 {
             maxstream = 1;
         }
-        let max_qbytes = if self.newspeer.max_qbytes == 0 {
-            // zero means unlimited, just set it to some stupid large amount.
-            // 10G means 10000 articles of 1 MB, large enough.
-            10_000_000_000
-        } else {
-            self.newspeer.max_qbytes as usize
-        };
         let part = if self.newspeer.headfeed {
             ArtPart::Head
         } else {
             ArtPart::Article
         };
+        let max_qbytes = self.newspeer.max_qbytes as usize;
         let mut processing_backlog = false;
         let mut sent_quit = false;
 
@@ -321,7 +315,7 @@ impl Connection {
 
             // Do we want to queue a new article?
             let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let need_item = !xmit_busy && queue_len < maxstream && self.send_queue_size() < max_qbytes;
+            let need_item = !xmit_busy && queue_len < maxstream && (max_qbytes == 0 || self.recv_queue_size() < max_qbytes);
 
             if processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
@@ -697,19 +691,15 @@ impl Connection {
         (hb, body)
     }
 
-    fn send_queue_size(&self) -> usize {
+    // the items in the recv_queue are already sent, and waiting
+    // for a response. the total size of those items is the number
+    // of bytes in-flight at the moment.
+    fn recv_queue_size(&self) -> usize {
         let mut size = 0;
-        for item in &self.send_queue {
+        for item in &self.recv_queue {
             match item {
-                &ConnItem::Check(ref art) => size += 9 + art.msgid.len(),
-                &ConnItem::Takethis(ref art) => {
-                    if self.newspeer.headfeed {
-                        // rough estimation: header size is 1000 bytes.
-                        size += 12 + art.msgid.len() + 1000;
-                    } else {
-                        size += 12 + art.msgid.len() + art.size;
-                    }
-                },
+                &ConnItem::Check(ref art) => size += 8 + art.msgid.len(),
+                &ConnItem::Takethis(ref art) => size += 14 + art.msgid.len() + art.size,
                 _ => {},
             }
         }
