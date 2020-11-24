@@ -253,8 +253,10 @@ pub struct NewsPeer {
     pub arttypes:           Vec<ArtType>,
     #[serde(rename = "max-connections-out")]
     pub maxparallel:        u32,
-    #[serde(rename = "max-streaming-queue-size")]
+    #[serde(rename = "max-inflight")]
     pub maxstream:          u32,
+    #[serde(rename = "max-inflight-bytes", deserialize_with = "util::deserialize_size")]
+    pub max_qbytes:         u64,
     #[serde(rename = "delay-feed", deserialize_with = "util::deserialize_duration")]
     pub delay_feed:         Duration,
     #[serde(rename = "no-backlog")]

@@ -159,7 +159,7 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
         .alias::<NewsPeer>("hostname", "send-to")
         .alias::<NewsPeer>("bindaddress", "bind-address")
         .alias::<NewsPeer>("maxparallel", "max-connections-out")
-        .alias::<NewsPeer>("maxstream", "max-streaming-queue-size")
+        .alias::<NewsPeer>("maxstream", "max-inflight")
         .alias::<NewsPeer>("delayfeed", "delay-feed")
         .alias::<NewsPeer>("nobatch", "no-backlog")
         .alias::<NewsPeer>("maxqueue", "max-backlog-queue")

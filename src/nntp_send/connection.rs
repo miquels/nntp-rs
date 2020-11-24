@@ -277,6 +277,13 @@ impl Connection {
         if maxstream == 0 {
             maxstream = 1;
         }
+        let max_qbytes = if self.newspeer.max_qbytes == 0 {
+            // zero means unlimited, just set it to some stupid large amount.
+            // 10G means 10000 articles of 1 MB, large enough.
+            10_000_000_000
+        } else {
+            self.newspeer.max_qbytes as usize
+        };
         let part = if self.newspeer.headfeed {
             ArtPart::Head
         } else {
@@ -313,7 +320,7 @@ impl Connection {
 
             // Do we want to queue a new article?
             let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let need_item = !xmit_busy && queue_len < maxstream;
+            let need_item = !xmit_busy && queue_len < maxstream && self.send_queue_size() < max_qbytes;
 
             if processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
@@ -687,6 +694,25 @@ impl Connection {
         let mut hb = Buffer::new();
         headers.header_bytes(&mut hb);
         (hb, body)
+    }
+
+    fn send_queue_size(&self) -> usize {
+        let mut size = 0;
+        for item in &self.send_queue {
+            match item {
+                &ConnItem::Check(ref art) => size += 9 + art.msgid.len(),
+                &ConnItem::Takethis(ref art) => {
+                    if self.newspeer.headfeed {
+                        // rough estimation: header size is 1000 bytes.
+                        size += 12 + art.msgid.len() + 1000;
+                    } else {
+                        size += 12 + art.msgid.len() + art.size;
+                    }
+                },
+                _ => {},
+            }
+        }
+        size
     }
 }
 
