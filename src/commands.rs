@@ -109,6 +109,7 @@ cmd! {
     ( "mode headfeed",      Mode_Headfeed,      0, 0, Capb::ModeHeadfeed,    "" ),
     ( "mode reader",        Mode_Reader,        0, 0, Capb::ModeReader,      "" ),
     ( "mode stream",        Mode_Stream,        0, 0, Capb::Streaming,       "" ),
+    ( "mode readonly",      Mode_Readonly,      0, 0, Capb::Basic,           "" ),
     ( "mode",               Mode,               1, 0, Capb::Never,           "" ),
     ( "newgroups",          NewGroups,          1, 4, Capb::Reader,          "[yy]yymmdd hhmmss [GMT]" ),
     ( "newnews",            NewNews,            1, 5, Capb::NewNews,         "%w [yy]yymmdd <hhmmss> [GMT]" ),

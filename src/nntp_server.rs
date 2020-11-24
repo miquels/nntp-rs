@@ -376,6 +376,12 @@ impl NntpServer {
             Cmd::Mode_Headfeed => {
                 return self.cmd_mode_headfeed().await;
             },
+            Cmd::Mode_Readonly => {
+                self.parser.remove_cap(Capb::Ihave);
+                self.parser.remove_cap(Capb::Streaming);
+                self.parser.remove_cap(Capb::ModeHeadfeed);
+                return Ok(NntpResult::text("250 Mode readonly"));
+            },
             Cmd::NewGroups => {
                 return Ok(NntpResult::text("503 Not maintaining an active file"));
             },
