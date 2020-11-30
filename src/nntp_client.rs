@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 
 use crate::dns;
 use crate::nntp_codec::NntpCodec;
-use crate::util::{self, hostname};
+use crate::util::{self, hostname, CongestionControl};
 
 static HOSTNAME: Lazy<String> = Lazy::new(|| hostname());
 
@@ -24,6 +24,7 @@ pub async fn nntp_connect(
     respcode: u32,
     bindaddr: Option<IpAddr>,
     sendbuf_size: Option<usize>,
+    congestion_control: Option<CongestionControl>,
 ) -> io::Result<(NntpCodec, IpAddr, String)>
 {
     // A lookup of the hostname might return multiple addresses.
@@ -118,6 +119,12 @@ pub async fn nntp_connect(
                     })?
                 }
             };
+
+            // set congestion control algorithm (if the OS supports it).
+            if let Some(cc) = congestion_control {
+                util::set_congestion_control(&socket, cc)
+                    .map_err(|e| ioerr!(e.kind(), "set_congestion_control {:?}: {}", cc, e))?;
+            }
 
             // Create codec from socket.
             let mut codec = NntpCodec::builder(socket)

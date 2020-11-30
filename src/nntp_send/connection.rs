@@ -260,6 +260,7 @@ impl Connection {
             code,
             newspeer.bindaddress.clone(),
             newspeer.sendbuf_size.clone(),
+            newspeer.congestion_control.clone(),
         )
         .await;
         match res {
@@ -315,7 +316,9 @@ impl Connection {
 
             // Do we want to queue a new article?
             let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let need_item = !xmit_busy && queue_len < maxstream && (max_qbytes == 0 || self.recv_queue_size() < max_qbytes);
+            let need_item = !xmit_busy &&
+                queue_len < maxstream &&
+                (max_qbytes == 0 || self.recv_queue_size() < max_qbytes);
 
             if processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {

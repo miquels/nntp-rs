@@ -187,7 +187,6 @@ pub struct ActiveSync {
     pub descriptions:   bool,
 }
 
-
 /// Multiple single-threaded executors.
 #[derive(Default,Deserialize)]
 #[rustfmt::skip]
@@ -291,16 +290,15 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
 }
 
 pub fn set_config(mut cfg: Config) -> Arc<Config> {
-
     // initialize the new newsfeeds config.
-    let newsfeeds =  Arc::get_mut(&mut cfg.newsfeeds).unwrap();
+    let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
     let mut nf = std::mem::replace(newsfeeds, NewsFeeds::default());
     nf.set_hostname_default();
     nf.init_hostcache();
     nf.resolve_references();
     nf.setup_xclient();
     nf.check_self(&cfg);
-    let newsfeeds =  Arc::get_mut(&mut cfg.newsfeeds).unwrap();
+    let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
     std::mem::swap(&mut nf, newsfeeds);
 
     // Set the global NEWSFEEDS.

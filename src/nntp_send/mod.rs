@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::newsfeeds::NewsPeer;
 use crate::spool::ArtLoc;
+use crate::util::CongestionControl;
 
 macro_rules! conditional_fut {
     ($cond:expr, $fut:expr) => {{
@@ -76,41 +77,43 @@ struct PeerArticle {
 // A shorter version of newsfeeds::NewsPeer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Peer {
-    label:         SmartString,
-    outhost:       String,
-    bindaddress:   Option<IpAddr>,
-    port:          u16,
-    sendbuf_size:  Option<usize>,
-    maxparallel:   u32,
-    maxstream:     u32,
-    max_qbytes:    u64,
-    delay_feed:    Duration,
-    no_backlog:    bool,
-    drop_deferred: bool,
-    maxqueue:      u32,
-    headfeed:      bool,
-    preservebytes: bool,
-    queue_only:    bool,
+    label:              SmartString,
+    outhost:            String,
+    bindaddress:        Option<IpAddr>,
+    port:               u16,
+    sendbuf_size:       Option<usize>,
+    congestion_control: Option<CongestionControl>,
+    maxparallel:        u32,
+    maxstream:          u32,
+    max_qbytes:         u64,
+    delay_feed:         Duration,
+    no_backlog:         bool,
+    drop_deferred:      bool,
+    maxqueue:           u32,
+    headfeed:           bool,
+    preservebytes:      bool,
+    queue_only:         bool,
 }
 
 impl Peer {
     fn new(nfpeer: &NewsPeer) -> Peer {
         Peer {
-            label:         nfpeer.label.clone(),
-            outhost:       nfpeer.outhost.clone(),
-            bindaddress:   nfpeer.bindaddress.clone(),
-            port:          nfpeer.port,
-            sendbuf_size: nfpeer.sendbuf_size.map(|sz| sz as usize),
-            maxparallel:   nfpeer.maxparallel,
-            delay_feed:    nfpeer.delay_feed,
-            no_backlog:    nfpeer.no_backlog,
-            drop_deferred: nfpeer.drop_deferred,
-            maxqueue:      nfpeer.maxqueue,
-            maxstream:     nfpeer.maxstream,
-            max_qbytes:    nfpeer.max_qbytes,
-            headfeed:      nfpeer.send_headfeed,
-            preservebytes: nfpeer.preservebytes,
-            queue_only:    nfpeer.queue_only,
+            label:              nfpeer.label.clone(),
+            outhost:            nfpeer.outhost.clone(),
+            bindaddress:        nfpeer.bindaddress.clone(),
+            port:               nfpeer.port,
+            sendbuf_size:       nfpeer.sendbuf_size.map(|sz| sz as usize),
+            congestion_control: nfpeer.congestion_control.clone(),
+            maxparallel:        nfpeer.maxparallel,
+            delay_feed:         nfpeer.delay_feed,
+            no_backlog:         nfpeer.no_backlog,
+            drop_deferred:      nfpeer.drop_deferred,
+            maxqueue:           nfpeer.maxqueue,
+            maxstream:          nfpeer.maxstream,
+            max_qbytes:         nfpeer.max_qbytes,
+            headfeed:           nfpeer.send_headfeed,
+            preservebytes:      nfpeer.preservebytes,
+            queue_only:         nfpeer.queue_only,
         }
     }
 }

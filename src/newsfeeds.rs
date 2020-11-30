@@ -28,7 +28,7 @@ use crate::article::Article;
 use crate::arttype::ArtType;
 use crate::config;
 use crate::dns::HostCache;
-use crate::util::{self, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
+use crate::util::{self, CongestionControl, HashFeed, MatchList, MatchResult, UnixTime, WildMatList};
 
 use ipnet::IpNet;
 
@@ -74,7 +74,6 @@ impl Default for NewsFeeds {
 }
 
 impl NewsFeeds {
-
     /// Initialize the host cache.
     pub fn init_hostcache(&mut self) {
         for e in self.peers.iter_mut() {
@@ -163,7 +162,6 @@ impl NewsFeeds {
     /// Returns a tuple consisting of the index into the peers vector
     /// and a reference to the NewsPeer instance.
     pub fn find_peer(&self, ipaddr: &IpAddr) -> Option<(usize, &NewsPeer)> {
-
         // hostcache lookup.
         let hcache_name = self.hcache.lookup(ipaddr);
         let hcache_name = hcache_name.as_ref().map(|name| name.as_str());
@@ -241,6 +239,8 @@ pub struct NewsPeer {
     pub port:               u16,
     #[serde(rename = "sendbuf-size", deserialize_with = "util::option_deserialize_size")]
     pub sendbuf_size:       Option<u64>,
+    #[serde(rename = "congestion-control")]
+    pub congestion_control: Option<CongestionControl>,
 
     #[serde(rename = "min-crosspost")]
     pub mincross:           u32,
@@ -479,4 +479,3 @@ impl NewsPeer {
         true
     }
 }
-
