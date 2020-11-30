@@ -27,7 +27,14 @@ impl Debug for MmapAtomicU32 {
 }
 
 impl MmapAtomicU32 {
-    pub fn new(file: &fs::File, rw: bool, lock: bool, offset: u64, num_elems: usize) -> io::Result<MmapAtomicU32> {
+    pub fn new(
+        file: &fs::File,
+        rw: bool,
+        lock: bool,
+        offset: u64,
+        num_elems: usize,
+    ) -> io::Result<MmapAtomicU32>
+    {
         let mut opts = MmapOptions::new();
         let len = num_elems * 4;
         Ok(if rw {
@@ -77,4 +84,3 @@ fn lock_index(address: *const u8, size: usize) {
         Err(e) => log::warn!("history file index: cannot mlock: {}", e),
     }
 }
-

@@ -58,23 +58,23 @@ type Range = std::ops::Range<usize>;
 /// An open database handle.
 pub struct KpDb {
     // appends since db creation.
-    append_seq: u32,
+    append_seq:  u32,
     // last modified (written on exit).
-    modified: u32,
+    modified:    u32,
     // appends since last sort.
     append_sseq: u32,
     // for each group, location and current value of artno_xref.
-    records: BTreeMap<String, RecordLoc>,
+    records:     BTreeMap<String, RecordLoc>,
     // The mmap'd file (impl's DerefMut &[u8]).
-    data: MmapMut,
+    data:        MmapMut,
     // Size of the mmap'ed file.
-    datasz: usize,
+    datasz:      usize,
     // File descriptor of the file.
-    file: fs::File,
+    file:        fs::File,
     // Data to be appended.
-    ndata: Vec<u8>,
+    ndata:       Vec<u8>,
     // Filename of db file
-    path: String,
+    path:        String,
 }
 
 impl KpDb {
@@ -108,36 +108,40 @@ impl KpDb {
         if data.len() > MAX_FILE_SIZE {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("kpdb: {}: file too big (>={})", path, MAX_FILE_SIZE)
+                format!("kpdb: {}: file too big (>={})", path, MAX_FILE_SIZE),
             ));
         }
 
         // Decode the head.
-        if data.len() < 35
-            || data[7] != b' '
-            || data[16] != b' '
-            || data[25] != b' '
-            || data[34] != b'\n'
-        {
+        if data.len() < 35 || data[7] != b' ' || data[16] != b' ' || data[25] != b' ' || data[34] != b'\n' {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("kpdb: {}: head: cannot parse", path)
+                format!("kpdb: {}: head: cannot parse", path),
             ));
         }
         if &data[0..7] != &b"$V00.00"[..] {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("kpdb: {}: head: unsupported version", path)
+                format!("kpdb: {}: head: unsupported version", path),
             ));
         }
         let append_seq = u32_from_hex(&data[8..16]).ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidData, format!("kpdb: {}: head: field 2 damaged", path))
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("kpdb: {}: head: field 2 damaged", path),
+            )
         })?;
         let modified = u32_from_hex(&data[17..25]).ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidData, format!("kpdb: {}: head: field 3 damaged", path))
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("kpdb: {}: head: field 3 damaged", path),
+            )
         })?;
         let append_sseq = u32_from_hex(&data[26..34]).ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidData, format!("kpdb: {}: head: field 4 damaged", path))
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("kpdb: {}: head: field 4 damaged", path),
+            )
         })?;
 
         // Lock the file into memory, so that we never block on pagefaults.
@@ -247,7 +251,7 @@ impl KpDb {
                         "kpdb: FATAL: {}: partial written database file, can't recover: {}",
                         self.path, e
                     ));
-                }
+                },
                 Ok(meta) => {
                     // See if we can recover.
                     if meta.len() != oldlen {
@@ -260,11 +264,8 @@ impl KpDb {
                         }
                     }
                     self.ndata = ndata;
-                    return Err(io::Error::new(
-                        e.kind(),
-                        format!("kpdb: {}: {}", self.path, e),
-                    ));
-                }
+                    return Err(io::Error::new(e.kind(), format!("kpdb: {}: {}", self.path, e)));
+                },
             }
         }
 
@@ -327,7 +328,6 @@ impl KpDb {
     ///
     /// Fails if the record already exists.
     pub fn insert<'a>(&'a mut self, key: &str, kvpairs: &HashMap<&'static str, String>) -> io::Result<()> {
-
         if self.records.contains_key(key) {
             return Err(io::Error::new(ErrorKind::AlreadyExists, "duplicate key"));
         }
@@ -347,7 +347,7 @@ impl KpDb {
         let record_loc = RecordLoc {
             lineno: 0,
             offset: start as u32,
-            len: (end - start) as u16,
+            len:    (end - start) as u16,
         };
         self.records.insert(key.to_string(), record_loc);
 
@@ -375,7 +375,7 @@ impl KpDb {
 struct RecordLoc {
     lineno: u32,
     offset: u32,
-    len: u16,
+    len:    u16,
 }
 
 impl RecordLoc {
@@ -438,7 +438,7 @@ impl RecordLoc {
 #[derive(Clone)]
 pub struct Record<'a> {
     lineno: u32,
-    line: &'a [u8],
+    line:   &'a [u8],
 }
 
 impl<'a> Record<'a> {
@@ -460,7 +460,7 @@ impl<'a> Record<'a> {
         let end = start + e.len as usize;
         Record {
             lineno: e.lineno,
-            line: &data[start..end],
+            line:   &data[start..end],
         }
     }
 
@@ -500,10 +500,10 @@ impl<'a> Record<'a> {
 
 /// A handle for a mutable record in the database.
 pub struct RecordMut<'a> {
-    kpdb: &'a mut KpDb,
+    kpdb:       &'a mut KpDb,
     record_loc: RecordLoc,
-    changed: bool,
-    modified: Option<HashMap<&'static [u8], String>>,
+    changed:    bool,
+    modified:   Option<HashMap<&'static [u8], String>>,
 }
 
 impl<'a> RecordMut<'a> {
@@ -545,7 +545,6 @@ impl<'a> RecordMut<'a> {
 
     /// Set or replace a string value.
     pub fn set_str(&mut self, key: &'static str, val: &str) {
-
         self.changed = true;
 
         // If we can modify the value in-place, do so.
@@ -655,7 +654,7 @@ impl<'a> Drop for RecordMut<'a> {
                 RecordLoc {
                     lineno: 0,
                     offset: start as u32,
-                    len: (end - start) as u16,
+                    len:    (end - start) as u16,
                 },
             );
         }
@@ -705,7 +704,7 @@ fn get_range(key: &str, line: &[u8]) -> Option<Range> {
             if std::str::from_utf8(&line[eq + 1..idx]).is_ok() {
                 return Some(Range {
                     start: eq + 1,
-                    end: idx,
+                    end:   idx,
                 });
             }
         }
@@ -781,7 +780,6 @@ pub fn percent_encode(s: impl AsRef<[u8]>) -> String {
     p
 }
 
-
 // helper.
 fn u32_from_hex(data: &[u8]) -> Option<u32> {
     let hex = std::str::from_utf8(data).ok()?;
@@ -838,7 +836,5 @@ mod tests {
 
         let t1 = db.get("test.1").expect("test.1");
         assert!(t1.get_str("GD").unwrap() == "testgroup1");
-
     }
 }
-

@@ -89,7 +89,14 @@ impl DHistHead {
 impl DHistory {
     /// open existing history database
     /// Note: blocking.
-    pub fn open(path: &Path, rw: bool, lock_mode: MLockMode, threads: Option<usize>, bt: BlockingType) -> io::Result<DHistory> {
+    pub fn open(
+        path: &Path,
+        rw: bool,
+        lock_mode: MLockMode,
+        threads: Option<usize>,
+        bt: BlockingType,
+    ) -> io::Result<DHistory>
+    {
         let inner = DHistoryInner::open(path, rw, lock_mode)?;
         Ok(DHistory {
             inner:         ArcSwap::from(Arc::new(inner)),
@@ -154,7 +161,6 @@ impl DHistory {
             .await?;
 
         if let Some(new_inner) = new_inner {
-
             // Before storing the new handle, take a write lock on it so that
             // new writers have to wait for a  while. This gives time for existing
             // readers to finish what they're doing and drop the old handle.
@@ -364,17 +370,17 @@ impl DHistoryInner {
             .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
 
         Ok(DHistoryInner {
-            path:         path.to_owned(),
-            rfile:        f,
-            wfile:        Mutex::new(WFile {
+            path: path.to_owned(),
+            rfile: f,
+            wfile: Mutex::new(WFile {
                 wpos:        meta.len(),
                 file:        w,
                 invalidated: false,
             }),
             hash_buckets: buckets,
-            hash_size:    dhh.hash_size,
-            hash_mask:    dhh.hash_size - 1,
-            data_offset:  data_offset,
+            hash_size: dhh.hash_size,
+            hash_mask: dhh.hash_size - 1,
+            data_offset: data_offset,
             lock_mode,
         })
     }
@@ -503,7 +509,6 @@ impl DHistoryInner {
         let mut removed = 0u64;
 
         loop {
-
             // read entry.
             let mut dhe = match read_dhistent(&mut rfile) {
                 Ok(None) => break,

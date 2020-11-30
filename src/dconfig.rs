@@ -31,7 +31,7 @@ struct DNewsFeeds {
     #[serde(rename = "label")]
     pub labels:   Labels,
     pub groupdef: Vec<GroupDef>,
-    pub global: Option<NewsPeer>,
+    pub global:   Option<NewsPeer>,
 }
 
 // Append all the DNewsfeeds data to the main NewsFeeds.
@@ -130,7 +130,6 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
     // Now build the config reader configuration.
     let dnf: DNewsFeeds = curlyconf::Builder::new()
         .mode(curlyconf::Mode::Diablo)
-
         .alias::<NewsPeer>("host", "hostname")
         .alias::<NewsPeer>("alias", "path-identity")
         .alias::<NewsPeer>("inhost", "accept-from")
@@ -139,7 +138,6 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
         .alias::<NewsPeer>("nofilter", "filter-groups")
         .alias::<NewsPeer>("nomismatch", "ignore-path-mismatch")
         .alias::<NewsPeer>("precomreject", "dont-defer")
-
         .alias::<NewsPeer>("maxcross", "max-crosspost")
         .alias::<NewsPeer>("mincross", "min-crosspost")
         .alias::<NewsPeer>("maxpath", "max-path-length")
@@ -147,7 +145,6 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
         .alias::<NewsPeer>("maxsize", "max-article-size")
         .alias::<NewsPeer>("minsize", "min-article-size")
         .alias::<NewsPeer>("arttypes", "article-types")
-
         .alias::<NewsPeer>("addgroup", "groups")
         .alias::<NewsPeer>("delgroup", "groups")
         .alias::<NewsPeer>("delgroupany", "groups")
@@ -155,7 +152,6 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
         .alias::<NewsPeer>("requiregroup", "groups-required")
         .alias::<NewsPeer>("adddist", "distributions")
         .alias::<NewsPeer>("deldist", "distributions")
-
         .alias::<NewsPeer>("hostname", "send-to")
         .alias::<NewsPeer>("bindaddress", "bind-address")
         .alias::<NewsPeer>("transmitbuf", "sendbuf-size")
@@ -166,12 +162,10 @@ pub fn read_dnewsfeeds(name: &str, nf: &mut NewsFeeds) -> io::Result<()> {
         .alias::<NewsPeer>("maxqueue", "max-backlog-queue")
         .alias::<NewsPeer>("headfeed", "send-headfeed")
         .alias::<NewsPeer>("preservebytes", "preserve-bytes")
-
         .alias::<GroupDef>("addgroup", "groups")
         .alias::<GroupDef>("delgroup", "groups")
         .alias::<GroupDef>("delgroupany", "groups")
         .alias::<GroupDef>("groupref", "groups")
-
         .ignore::<NewsPeer>("receivebuf")
         .ignore::<NewsPeer>("realtime")
         .ignore::<NewsPeer>("priority")
@@ -317,7 +311,7 @@ pub fn read_diablo_hosts(nf: &mut NewsFeeds, name: &str) -> io::Result<()> {
 }
 
 fn get_peer_idx(nf: &NewsFeeds, name: &str) -> Option<usize> {
-    for idx in 0 .. nf.peers.len() {
+    for idx in 0..nf.peers.len() {
         if name == nf.peers[idx].label.as_str() {
             return Some(idx);
         }

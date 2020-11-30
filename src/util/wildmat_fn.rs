@@ -98,9 +98,7 @@ impl<'a> Iterator for BytesIter<'a> {
 // Match 'text' and 'pat'. Returns Some(true), Some(false), or None.
 // None is what in the original code is called ABORT.
 fn do_match<T>(mut text_iter: T, mut pat_iter: T) -> Option<bool>
-where
-    T: Iterator<Item = char> + Clone,
-{
+where T: Iterator<Item = char> + Clone {
     //println!("do_match({:?}, {:?}", text, pat);
 
     loop {
@@ -114,7 +112,7 @@ where
                 // Match anything.
                 text_iter.next()?;
                 continue;
-            }
+            },
             '*' => {
                 // Check for consecutive stars.
                 let mut pat_clone = pat_iter.clone();
@@ -123,7 +121,7 @@ where
                         None => {
                             // Trailing star matches everything.
                             return Some(true);
-                        }
+                        },
                         Some('*') => pat_clone = pat_iter.clone(),
                         _ => break,
                     }
@@ -132,14 +130,14 @@ where
                 loop {
                     //println!("recurse");
                     match do_match(text_iter.clone(), pat_clone.clone()) {
-                        Some(false) => {}
+                        Some(false) => {},
                         p => return p,
                     }
                     if text_iter.next().is_none() {
                         return None;
                     }
                 }
-            }
+            },
             '[' => {
                 // Inverted character set?
                 let (p, fail) = match pat_iter.next()? {
@@ -157,7 +155,7 @@ where
                             matched = true;
                         }
                         pat_iter.next()?
-                    }
+                    },
                     p => p,
                 };
 
@@ -190,7 +188,7 @@ where
                 if matched == fail {
                     return Some(false);
                 }
-            }
+            },
             a => {
                 let c = match text_iter.next()? {
                     '\\' => text_iter.next()?,
@@ -199,7 +197,7 @@ where
                 if a != c {
                     return Some(false);
                 }
-            }
+            },
         }
     }
     Some(text_iter.next().is_none())

@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::{self, ErrorKind};
 use std::sync::Mutex;
 
-use super::kpdb::{Record, KpDb};
+use super::kpdb::{KpDb, Record};
 use crate::util::wildmat;
 
 // contains the exclusively locked active file.
@@ -60,7 +60,13 @@ impl ActiveFile {
         }
     }
 
-    pub fn sync_active(&self, active: &[u8], groups: Option<impl AsRef<str>>, remove: bool) -> io::Result<()> {
+    pub fn sync_active(
+        &self,
+        active: &[u8],
+        groups: Option<impl AsRef<str>>,
+        remove: bool,
+    ) -> io::Result<()>
+    {
         let mut inner = self.0.lock().unwrap();
         inner.sync_active(active, groups.as_ref().map(|s| s.as_ref()), remove)
     }
@@ -77,13 +83,14 @@ impl ActiveFile {
     /// This is so that accidental removals don't ruin the article numbering.
     pub fn inc_xref(&mut self, group: &str) -> io::Result<u64> {
         let mut inner = self.0.lock().unwrap();
-        let mut rec = inner.kpdb.get_mut(group).ok_or_else(|| {
-            io::Error::new(ErrorKind::NotFound, "NotFound")
-        })?;
+        let mut rec = inner
+            .kpdb
+            .get_mut(group)
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "NotFound"))?;
 
-        let mut nx = rec.get_u64("NX").ok_or_else(|| {
-            io::Error::new(ErrorKind::NotFound, "NotFound")
-        })?;
+        let mut nx = rec
+            .get_u64("NX")
+            .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "NotFound"))?;
 
         nx += 1;
         rec.set_str("NX", &format!("{:10}", nx));
@@ -202,10 +209,8 @@ impl ActiveInner {
         }
 
         for line in active.split(|&b| b == b'\n') {
-
             // If it's not UTF-8 just ignore it - what can we do?
             if let Ok(line) = std::str::from_utf8(line) {
-
                 // Check that it has at least four fields.
                 let fields: Vec<_> = line.split_ascii_whitespace().collect();
                 if fields.len() < 4 {
@@ -257,7 +262,6 @@ impl ActiveInner {
         let groups = groups.unwrap_or("*");
 
         for line in newsgroups.split(|&b| b == b'\n') {
-
             // Split. Must have 2 fields, and first one must be utf-8.
             let mut iter = line.splitn(2, |&c| c.is_ascii_whitespace());
             let name = match iter.next().map(|n| std::str::from_utf8(n).ok()).flatten() {
@@ -302,9 +306,9 @@ pub enum GroupStatus {
     PostingOk = b'y',
     NoPosting = b'n',
     Moderated = b'm',
-    Junk = b'j',
-    Closed = b'x',
-    Removed = b'r',
+    Junk      = b'j',
+    Closed    = b'x',
+    Removed   = b'r',
 }
 
 impl fmt::Display for GroupStatus {
@@ -337,7 +341,7 @@ impl std::str::FromStr for GroupStatus {
 
 #[derive(Debug)]
 pub struct GroupCounters {
-    pub low: u64,
+    pub low:  u64,
     pub high: u64,
     pub xref: u64,
 }
@@ -357,8 +361,7 @@ fn trim_bytes(mut b: &[u8]) -> &[u8] {
         b = &b[1..];
     }
     while b.len() > 0 && b[b.len() - 1].is_ascii_whitespace() {
-        b = &b[..b.len()-1];
+        b = &b[..b.len() - 1];
     }
     b
 }
-

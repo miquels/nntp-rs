@@ -95,8 +95,8 @@ mod try_read_at {
 
 #[cfg(not(target_os = "linux"))]
 mod try_read_at {
-    use std::io;
     use std::fs::File;
+    use std::io;
 
     pub fn try_read_at(_file: &File, _buf: &mut [u8], _offset: u64) -> io::Result<usize> {
         Err(io::ErrorKind::InvalidInput)?
@@ -128,3 +128,57 @@ pub fn touch(path: impl Into<PathBuf>, time: UnixTime) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+mod congestion_control {
+
+    use serde::Deserialize;
+    use std::io;
+    use std::os::unix::io::AsRawFd;
+
+    #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum CongestionControl {
+        #[serde(rename = "cubic")]
+        Cubic,
+        #[serde(rename = "reno")]
+        Reno,
+        #[serde(rename = "bbr")]
+        Bbr,
+    }
+
+    pub fn set_congestion_control(strm: &tokio::net::TcpStream, algo: CongestionControl) -> io::Result<()> {
+        let algo_s = match algo {
+            CongestionControl::Cubic => "cubic\0",
+            CongestionControl::Reno => "reno\0",
+            CongestionControl::Bbr => "bbr\0",
+        };
+        let r = unsafe {
+            // safe: all data has been initialized.
+            libc::setsockopt(
+                strm.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_CONGESTION,
+                algo_s.as_ptr() as *const libc::c_void,
+                (algo_s.len() - 1) as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod congestion_control {
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum CongestionControl {}
+
+    pub fn set_congestion_control(_fd: impl AsRawFd, _algo: CongestionControl) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
+pub use congestion_control::*;

@@ -151,7 +151,6 @@ impl Drop for RxSessionStats {
     }
 }
 
-
 impl RxSessionStats {
     pub fn new(ipaddr: IpAddr, fdno: u32) -> RxSessionStats {
         RxSessionStats {
