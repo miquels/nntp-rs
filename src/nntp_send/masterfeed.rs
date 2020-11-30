@@ -147,7 +147,6 @@ impl MasterFeed {
                             let _ = tokio::time::delay_for(Duration::from_millis(1000)).await;
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
                             self.broadcast(PeerFeedItem::ExitNow, closing).await;
-                            closing = true;
                             return;
                         }
                         Some(Notification::Reconfigure) => {
