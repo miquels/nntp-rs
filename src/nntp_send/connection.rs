@@ -261,6 +261,8 @@ impl Connection {
             newspeer.bindaddress.clone(),
             newspeer.sendbuf_size.clone(),
             newspeer.congestion_control.clone(),
+            // convert Mbit/s -> bytes/sec. 1Mbit/s == 125000 bytes/sec.
+            newspeer.max_pacing_rate.map(|rate| rate * 125000),
         )
         .await;
         match res {

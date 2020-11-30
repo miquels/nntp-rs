@@ -25,6 +25,7 @@ pub async fn nntp_connect(
     bindaddr: Option<IpAddr>,
     sendbuf_size: Option<usize>,
     congestion_control: Option<CongestionControl>,
+    max_pacing_rate: Option<u32>,
 ) -> io::Result<(NntpCodec, IpAddr, String)>
 {
     // A lookup of the hostname might return multiple addresses.
@@ -124,6 +125,12 @@ pub async fn nntp_connect(
             if let Some(cc) = congestion_control {
                 util::set_congestion_control(&socket, cc)
                     .map_err(|e| ioerr!(e.kind(), "set_congestion_control {:?}: {}", cc, e))?;
+            }
+
+            // set max pacing rate (if the OS supports it).
+            if let Some(rate) = max_pacing_rate {
+                util::set_max_pacing_rate(&socket, rate)
+                    .map_err(|e| ioerr!(e.kind(), "set_max_pacing_rate {:?}: {}", rate, e))?;
             }
 
             // Create codec from socket.

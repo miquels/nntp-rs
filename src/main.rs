@@ -487,7 +487,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
         ("MODE STREAM", 203)
     };
     let (mut codec, _, welcome) =
-        nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None, None, None).await?;
+        nntp_client::nntp_connect(&opts.hostname, port, cmd, code, None, None, None, None).await?;
     println!("<< {}", welcome);
 
     let num_arts = opts.num_arts.unwrap_or(1);

@@ -241,6 +241,8 @@ pub struct NewsPeer {
     pub sendbuf_size:       Option<u64>,
     #[serde(rename = "congestion-control")]
     pub congestion_control: Option<CongestionControl>,
+    #[serde(rename = "max-pacing-rate")]
+    pub max_pacing_rate:    Option<u32>,
 
     #[serde(rename = "min-crosspost")]
     pub mincross:           u32,

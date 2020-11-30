@@ -182,3 +182,37 @@ mod congestion_control {
 }
 
 pub use congestion_control::*;
+
+#[cfg(target_os = "linux")]
+mod pacing_rate {
+
+    use std::io;
+    use std::os::unix::io::AsRawFd;
+
+    pub fn set_max_pacing_rate(strm: &tokio::net::TcpStream, bytes_per_sec: u32) -> io::Result<()> {
+        let r = unsafe {
+            // safe: all data has been initialized.
+            libc::setsockopt(
+                strm.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MAX_PACING_RATE,
+                (&bytes_per_sec) as *const u32 as *const libc::c_void,
+                std::mem::size_of_val(&bytes_per_sec) as libc::socklen_t,
+            )
+        };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod pacing_rate {
+
+    pub fn set_max_pacing_rate(_fd: impl AsRawFd, _bytes_per_sec: u32) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
+pub use pacing_rate::*;
