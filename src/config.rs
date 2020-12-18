@@ -75,14 +75,20 @@ pub struct Server {
     pub runtime:        Runtime,
     pub user:           Option<String>,
     pub group:          Option<String>,
-    pub uid:            Option<users::uid_t>,
-    pub gid:            Option<users::gid_t>,
+    #[serde(rename = "aux-groups")]
+    pub aux_groups:     Option<Vec<String>>,
     #[serde(default)]
     pub pidfile:        Option<String>,
     #[serde(default)]
     pub log_panics:     bool,
     #[serde(default,rename = "max-article-size", deserialize_with = "util::option_deserialize_size")]
     pub maxartsize:     Option<u64>,
+    #[serde(skip)]
+    pub uid:            Option<users::uid_t>,
+    #[serde(skip)]
+    pub gid:            Option<users::gid_t>,
+    #[serde(skip)]
+    pub aux_gids:       Option<Vec<u32>>,
 }
 
 /// Paths.
@@ -326,17 +332,19 @@ fn pathhosts_fixup(path: &mut Vec<String>) {
 fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
     let user = cfg.server.user.as_ref();
     let group = cfg.server.group.as_ref();
+    let groups = cfg.server.aux_groups.as_ref();
 
     // lookup username and group.
-    let (uid, ugid) = match user {
+    let (uid, ugid, ugids) = match user {
         Some(u) => {
             let user = get_user_by_name(u).ok_or(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("user {}: not found", u),
             ))?;
-            (Some(user.uid()), Some(user.primary_group_id()))
+            let gids = user.groups().map(|v| v.into_iter().map(|g| g.gid()).collect());
+            (Some(user.uid()), Some(user.primary_group_id()), gids)
         },
-        None => (None, None),
+        None => (None, None, None),
     };
     // lookup group if specified separately.
     let gid = match group {
@@ -349,8 +357,27 @@ fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
         },
         None => ugid,
     };
+    // lookup auxilary groups if specified separately.
+    let gids = match groups {
+        Some(groups) => {
+            let mut gids = Vec::new();
+            gids.extend(&gid);
+            gids.extend(&ugid);
+            for g in groups {
+                let group = get_group_by_name(g).ok_or(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("group {}: not found", g),
+                ))?;
+                gids.push(group.gid());
+            }
+            gids.dedup();
+            Some(gids)
+        },
+        None => ugids,
+    };
     cfg.server.uid = uid;
     cfg.server.gid = gid;
+    cfg.server.aux_gids = gids;
     Ok(())
 }
 
@@ -358,15 +385,16 @@ fn resolve_user_group(cfg: &mut Config) -> io::Result<()> {
 pub fn switch_uids(cfg: &Config) -> io::Result<()> {
     let uid = cfg.server.uid;
     let gid = cfg.server.gid;
+    let gids = cfg.server.aux_gids.as_ref().map(|g| g.as_slice()).unwrap_or(&[]);
 
     // if user and group not set, return.
-    if uid.is_none() && gid.is_none() {
+    if uid.is_none() && gid.is_none() && gids.is_empty() {
         return Ok(());
     }
     let euid = get_effective_uid();
     let egid = get_effective_gid();
-    // if user and group are unchanged, return.
-    if Some(euid) == uid && Some(egid) == gid {
+    // if user and group are unchanged and "aux-groups" was not set return.
+    if Some(euid) == uid && Some(egid) == gid && cfg.server.aux_groups.is_none() {
         return Ok(());
     }
     // switch to root.
@@ -377,6 +405,7 @@ pub fn switch_uids(cfg: &Config) -> io::Result<()> {
         ));
     }
     // this will panic on fail, but that's what we want.
+    util::setgroups(gids).unwrap();
     set_effective_gid(gid.unwrap_or(egid)).unwrap();
     set_effective_uid(uid.unwrap_or(euid)).unwrap();
     Ok(())
