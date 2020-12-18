@@ -6,7 +6,7 @@ use std::default::Default;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -654,8 +654,7 @@ pub async fn load() -> io::Result<()> {
         Some(filename) => filename,
         None => return Ok(()),
     };
-    let mut path = PathBuf::from(&config.paths.db);
-    path.push(filename);
+    let path = config::expand_path(&config.paths, &filename);
     let json = match tokio::fs::read_to_string(&path).await {
         Ok(json) => json,
         Err(e) => {
