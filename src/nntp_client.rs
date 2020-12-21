@@ -28,19 +28,21 @@ pub async fn nntp_connect(
     max_pacing_rate: Option<u32>,
 ) -> io::Result<(NntpCodec, IpAddr, String)>
 {
+    use rand::seq::SliceRandom;
+
     // A lookup of the hostname might return multiple addresses.
-    // We're not sure of the order that addresses are returned in,
-    // so sort IPv6 before IPv4 but otherwise keep the order
-    // intact.
+    // Shuffle IPv4 and IPv6 addresses separately, then return
+    // the lot with the IPv6 addresses in front.
     let addrs = match dns::RESOLVER.lookup_ip(hostname).await {
         Ok(lookupip) => {
             let addrs: Vec<SocketAddr> = lookupip.iter().map(|a| SocketAddr::new(a, port)).collect();
-            let v6 = addrs.iter().filter(|a| a.is_ipv6()).cloned();
-            let v4 = addrs.iter().filter(|a| a.is_ipv4()).cloned();
-            let mut addrs2 = Vec::new();
-            addrs2.extend(v6);
-            addrs2.extend(v4);
-            addrs2
+            let mut v6 = addrs.iter().filter(|a| a.is_ipv6()).cloned().collect::<Vec<_>>();
+            let mut v4 = addrs.iter().filter(|a| a.is_ipv4()).cloned().collect::<Vec<_>>();
+            let mut rng = rand::thread_rng();
+            v6.shuffle(&mut rng);
+            v4.shuffle(&mut rng);
+            v6.extend(v4.drain(..));
+            v6
         },
         Err(e) => return Err(ioerr!(Other, e)),
     };
