@@ -119,12 +119,6 @@ impl<S> NntpCodecBuilder<S> {
     /// Build the final NntpCodec.
     pub fn build(self) -> NntpCodec<S>
     where S: Any {
-        // Set TCP_NODELAY if socket is a TcpStream.
-        let any = &self.socket as &dyn Any;
-        if let Some(tcp) = any.downcast_ref::<TcpStream>() {
-            let _ = tcp.set_nodelay(true);
-        }
-
         NntpCodec {
             socket:          self.socket,
             bus_recv:        self.bus_recv,

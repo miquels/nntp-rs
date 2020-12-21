@@ -284,6 +284,7 @@ impl Server {
                 Either::Right(Notification::ExitNow) => break,
                 _ => continue,
             };
+            let _ = socket.set_nodelay(true);
 
             // set up codec for reader and writer.
             let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());

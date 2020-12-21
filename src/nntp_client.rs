@@ -135,6 +135,9 @@ pub async fn nntp_connect(
                     .map_err(|e| ioerr!(e.kind(), "set_max_pacing_rate {:?}: {}", rate, e))?;
             }
 
+            // Set tcp_nodelay.
+            let _ = socket.set_nodelay(true);
+
             // Create codec from socket.
             let mut codec = NntpCodec::builder(socket)
                 .read_timeout(30)
