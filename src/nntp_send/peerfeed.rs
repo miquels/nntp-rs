@@ -16,6 +16,7 @@ use smartstring::alias::String as SmartString;
 use tokio::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
+use tokio::time::Instant;
 
 use crate::config;
 use crate::server;
@@ -140,6 +141,7 @@ impl PeerFeed {
         let mut queue_only = self.newspeer.queue_only;
         let mut prev_tx_queue_len = 0;
         let mut main_queue_unread_secs = 0u64;
+        let mut last = Instant::now();
 
         // Tick every 5 seconds.
         let mut interval = tokio::time::interval(Duration::new(MOVE_TO_BACKLOG_EVERY_SECS, 0));
@@ -225,9 +227,17 @@ impl PeerFeed {
                     // if we have no connections, or less than maxconn, create a connection here.
                     let qlen = self.tx_queue.len();
                     if self.num_conns < self.newspeer.maxparallel && !queue_only {
-                        // TODO: use average queue length.
-                        if self.num_conns < 2 || qlen > 1000 || qlen > PEERFEED_QUEUE_SIZE / 2 {
-                            self.add_connection().await;
+                        // TODO/FIXME: better algorithm.
+                        // - average queue length?
+                        // - average delay (how long has oldest article been sitting in queue) ?
+                        // (20201218: lowered from qlen > 1000 to qlen > 2)
+                        if self.num_conns < 2 || qlen > 2 || qlen > PEERFEED_QUEUE_SIZE / 2 {
+                            // Add max. 1 connection per second.
+                            let now = Instant::now();
+                            if self.num_conns == 0 || now.duration_since(last) > Duration::from_millis(1000) {
+                                self.add_connection().await;
+                                last = now;
+                            }
                         }
                     }
 
