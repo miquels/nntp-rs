@@ -16,6 +16,8 @@ use tokio::stream::{Stream, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
+use crate::config;
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
 pub enum Notification {
@@ -205,7 +207,14 @@ pub fn new() -> (Sender, Receiver) {
         let mut sig_hup = signal(SignalKind::hangup()).unwrap();
         while let Some(_) = sig_hup.next().await {
             log::info!("received SIGHUP");
-            let _ = tx.send(Notification::Reconfigure);
+            match config::reread_config() {
+                Ok(false) => log::info!("configuration unchanged"),
+                Ok(true) => {
+                    log::info!("loaded new configuration from disk");
+                    let _ = tx.send(Notification::Reconfigure);
+                },
+                Err(e) => log::error!("{}", e),
+            }
         }
     });
 

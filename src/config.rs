@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use core_affinity::{get_core_ids, CoreId};
+use curlyconf::Watcher;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use regex::{Captures, Regex};
@@ -27,7 +28,7 @@ static CONFIG: Lazy<RwLock<Option<Arc<Config>>>> = Lazy::new(|| RwLock::new(None
 static NEWSFEEDS: Lazy<RwLock<Option<Arc<NewsFeeds>>>> = Lazy::new(|| RwLock::new(None));
 
 /// Curlyconf configuration.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct Config {
     pub server:     Server,
@@ -44,10 +45,12 @@ pub struct Config {
     #[serde(default)]
     pub newsfeeds:  Arc<NewsFeeds>,
     #[serde(skip)]
-    pub timestamp:  u64,
+    filename:       String,
+    #[serde(skip)]
+    watcher:        Watcher,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Runtime {
     Threaded(Threaded),
@@ -61,7 +64,7 @@ impl Default for Runtime {
 }
 
 /// Server config table in Toml config file.
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct Server {
     #[serde(default = "util::hostname")]
@@ -92,7 +95,7 @@ pub struct Server {
 }
 
 /// Paths.
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct Paths {
     pub config:         String,
@@ -104,7 +107,7 @@ pub struct Paths {
 }
 
 /// Config files.
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 #[serde(default)]
 #[rustfmt::skip]
 pub struct Compat {
@@ -114,7 +117,7 @@ pub struct Compat {
 }
 
 /// Logging.
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 #[rustfmt::skip]
 pub struct Logging {
     pub general:        Option<String>,
@@ -124,7 +127,7 @@ pub struct Logging {
 }
 
 /// Histfile config section.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct HistFile {
     pub file:       String,
@@ -138,7 +141,7 @@ pub struct HistFile {
 }
 
 /// Active config section.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct Active {
     pub backend:    ActiveBackend,
@@ -149,7 +152,7 @@ pub struct Active {
 }
 
 /// Backend selection in the active section.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 #[rustfmt::skip]
 pub enum ActiveBackend {
@@ -157,14 +160,14 @@ pub enum ActiveBackend {
 }
 
 /// Settings for the diablo active file backend.
-#[derive(Default,Deserialize, Debug)]
+#[derive(Clone, Default,Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct DActive {
     pub file:       String,
 }
 
 /// Article numbering configuration.
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct XrefConfig {
     mode:       XrefMode,
@@ -173,7 +176,7 @@ pub struct XrefConfig {
 }
 
 /// Article numbering mode (primary/replica).
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 #[rustfmt::skip]
 pub enum XrefMode {
@@ -182,7 +185,7 @@ pub enum XrefMode {
 }
 
 /// Active file synchronisation with a remote server.
-#[derive(Default,Deserialize, Debug)]
+#[derive(Clone, Default,Deserialize, Debug)]
 #[rustfmt::skip]
 pub struct ActiveSync {
     pub server:         String,
@@ -194,7 +197,7 @@ pub struct ActiveSync {
 }
 
 /// Multiple single-threaded executors.
-#[derive(Default,Deserialize)]
+#[derive(Clone, Default,Deserialize)]
 #[rustfmt::skip]
 pub struct MultiSingle {
     pub threads:            Option<usize>,
@@ -205,7 +208,7 @@ pub struct MultiSingle {
 }
 
 /// The (default) threaded executor.
-#[derive(Default,Deserialize,Debug)]
+#[derive(Clone, Default,Deserialize,Debug)]
 #[rustfmt::skip]
 #[serde(default)]
 pub struct Threaded {
@@ -225,7 +228,13 @@ impl std::fmt::Debug for MultiSingle {
 
 /// Read the configuration.
 pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
-    let mut cfg: Config = curlyconf::from_file(name)?;
+
+    let watcher = Watcher::new();
+    let mut cfg: Config = curlyconf::Builder::new()
+        .watcher(&watcher)
+        .from_file(name)?;
+    cfg.watcher = watcher;
+    cfg.filename = name.to_string();
 
     match cfg.server.maxartsize {
         None => cfg.server.maxartsize = Some(10_000_000),
@@ -281,9 +290,12 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     if load_newsfeeds {
         if let Some(dnewsfeeds) = cfg.compat.dnewsfeeds.as_ref() {
             let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
-            read_dnewsfeeds(&expand_path(&cfg.paths, dnewsfeeds), newsfeeds)?;
+            let dnewsfeeds = expand_path(&cfg.paths, dnewsfeeds);
+            read_dnewsfeeds(&dnewsfeeds, newsfeeds)?;
+            cfg.watcher.add_file(&dnewsfeeds)?;
             if let Some(ref dhosts) = expand_path_opt(&cfg.paths, &cfg.compat.diablo_hosts) {
                 read_diablo_hosts(newsfeeds, dhosts)?;
+                cfg.watcher.add_file(dhosts)?;
             }
         }
     }
@@ -293,6 +305,26 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     }
 
     return Ok(cfg);
+}
+
+pub fn reread_config() -> io::Result<bool> {
+    // Changed?
+    let config = get_config();
+    if !config.watcher.changed() {
+        return Ok(false)
+    }
+    // Yes, so read again.
+    let new_config = read_config(&config.filename, true)?;
+
+    // Replace only the parts that are reconfigurable.
+    // For now only the newsfeeds config.
+    let mut config = (&*config).clone();
+    config.watcher = new_config.watcher.clone();
+    config.newsfeeds = new_config.newsfeeds;
+    config.compat = new_config.compat;
+    
+    set_config(config);
+    Ok(true)
 }
 
 pub fn set_config(mut cfg: Config) -> Arc<Config> {
