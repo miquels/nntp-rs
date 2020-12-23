@@ -136,7 +136,7 @@ pub async fn nntp_connect(
             }
 
             // Set tcp_nodelay.
-            let _ = socket.set_nodelay(true);
+            socket.set_nodelay(true).map_err(|e| ioerr!(e.kind(), "set_nodelay: {}", e))?;
 
             // Create codec from socket.
             let mut codec = NntpCodec::builder(socket)
