@@ -754,6 +754,7 @@ where S: AsyncWrite + Unpin
 
         let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
         let res = loop {
+            // TODO FIXME: use poll_write_vectored (in tokio 0.3).
             let res = this.poll_write(cx, &mut bufs[0]);
             if bufs[0].remaining() == 0 {
                 bufs.remove(0);
@@ -772,6 +773,18 @@ where S: AsyncWrite + Unpin
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Buffer) -> Result<(), Self::Error> {
+        if item.len() < 256 && self.wr_bufs.len() > 0 {
+            // This is a bit of a hack. we want to put consecutive
+            // CHECKS in one packet. Maybe better to mark the buffer with
+            // a type like 'check', 'takethis', 'header', 'body', article
+            // so that we can merge TAKETHIS + headers + article, etc.
+            let last = self.wr_bufs.len() - 1;
+            let b = &self.wr_bufs[last];
+            if b.starts_with(b"CHECK <") && b.len() < 1200 {
+                self.as_mut().wr_bufs[last].extend_from_slice(&item);
+                return Ok(());
+            }
+        }
         self.as_mut().wr_bufs.push(item);
         Ok(())
     }
