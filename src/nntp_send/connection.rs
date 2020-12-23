@@ -99,6 +99,9 @@ pub(super) struct Connection {
     qitems:       Option<QItems>,
     // Idle counter, incremented every 10 secs.
     idle_counter: u32,
+    // State.
+    processing_backlog: bool,
+    quitting:     bool,
 }
 
 impl Connection {
@@ -181,6 +184,8 @@ impl Connection {
                             queue,
                             qitems: None,
                             idle_counter: 0,
+                            processing_backlog: false,
+                            quitting: false,
                         };
 
                         // Initialize stats logger and log connect message.
@@ -274,73 +279,34 @@ impl Connection {
         }
     }
 
-    // Feeder loop.
-    async fn feed(&mut self) -> io::Result<()> {
-        let mut xmit_busy = false;
-        let mut maxstream = self.newspeer.maxstream as usize;
-        if maxstream == 0 {
-            maxstream = 1;
+    async fn fill_send_queue(&mut self) -> bool {
+
+        let maxstream = self.newspeer.maxstream as usize;
+        let label = &self.newspeer.label;
+
+        let queue_len = self.recv_queue.len() + self.send_queue.len();
+        if queue_len > maxstream || self.quitting {
+            return false;
         }
-        let part = if self.newspeer.headfeed {
-            ArtPart::Head
-        } else {
-            ArtPart::Article
-        };
-        let max_qbytes = self.newspeer.max_qbytes as usize;
-        let mut processing_backlog = false;
-        let mut sent_quit = false;
 
-        let mut interval = tokio::time::interval(Duration::new(10, 0));
+        // Try to add up to 'maxstream' items to the send_queue.
+        for _ in 0 .. maxstream {
 
-        loop {
-            // If there is an item in the send queue, and we're not still busy
-            // sending the previous item, pop it from the queue and start
-            // sending it to the remote peer.
-            if !xmit_busy {
-                if let Some(mut item) = self.send_queue.pop_front() {
-                    log::trace!(
-                        "Connection::feed: {}:{}: sending {:?}",
-                        self.newspeer.label,
-                        self.id,
-                        item,
-                    );
-
-                    if !self.transmit_item(&mut item, part).await? {
-                        // wanted to do TAKETHIS, but article not found, so start from the top.
-                        continue;
-                    }
-
-                    // and queue item for the receiving side.
-                    self.recv_queue.push_back(item);
-                    xmit_busy = true;
-                }
-            }
-
-            // Do we want to queue a new article?
-            let queue_len = self.recv_queue.len() + self.send_queue.len();
-            let need_item = !xmit_busy &&
-                queue_len < maxstream &&
-                (max_qbytes == 0 || self.recv_queue_size() < max_qbytes);
-
-            if processing_backlog && queue_len == 0 {
+            if self.processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
-                    log::trace!(
-                        "Connection::feed: {}:{}: backlog run done",
-                        self.newspeer.label,
-                        self.id
-                    );
+                    log::trace!("Connection::feed: {}:{}: backlog run done", label, self.id);
                     if let Some(qitems) = self.qitems.take() {
                         self.queue.ack_items(qitems).await;
                     }
-                    processing_backlog = false;
+                    self.processing_backlog = false;
                 }
             }
 
-            if need_item && processing_backlog {
-                // Get an items from the backlog.
+            if self.processing_backlog {
+                // Get an item from the backlog.
                 if let Some(art) = self.qitems.as_mut().unwrap().next_art(&self.spool) {
                     log::trace!(
-                        "Connection::feed: {}:{}: push onto send queue: CHECK {} (backlog)",
+                        "Connection::feed: {}:{}: add to send queue: CHECK {} (backlog)",
                         self.newspeer.label,
                         self.id,
                         art.msgid,
@@ -348,47 +314,90 @@ impl Connection {
                     self.send_queue.push_back(ConnItem::Check(art));
                     continue;
                 }
+                break;
             }
 
-            if need_item && !processing_backlog {
-                // Try to get one item from the main queue.
-                match self.rx_queue.try_recv().map_err(|e| e.into()) {
-                    Ok(art) => {
+            // Try to get one item from the main queue.
+            match self.rx_queue.try_recv().map_err(|e| e.into()) {
+                Ok(art) => {
+                    log::trace!(
+                        "Connection::feed: {}:{}: add to send queue: CHECK {}",
+                        self.newspeer.label,
+                        self.id,
+                        art.msgid,
+                    );
+                    self.send_queue.push_back(ConnItem::Check(art));
+                },
+                Err(mpmc::TryRecvError::Empty) => {
+                    log::trace!(
+                        "Connection::feed: {}:{}: empty, trying backlog",
+                        self.newspeer.label,
+                        self.id,
+                    );
+                    if let Some(qitems) = self.queue.read_items(200).await {
                         log::trace!(
-                            "Connection::feed: {}:{}: push onto send queue: CHECK {}",
+                            "Connection::feed: {}:{}: processing backlog count={}",
                             self.newspeer.label,
                             self.id,
-                            art.msgid,
+                            qitems.len(),
                         );
-                        self.send_queue.push_back(ConnItem::Check(art));
-                        continue;
-                    },
-                    Err(mpmc::TryRecvError::Empty) => {
-                        log::trace!(
-                            "Connection::feed: {}:{}: empty, trying backlog",
-                            self.newspeer.label,
-                            self.id,
-                        );
-                        if let Some(qitems) = self.queue.read_items(200).await {
-                            log::trace!(
-                                "Connection::feed: {}:{}: processing backlog count={}",
-                                self.newspeer.label,
-                                self.id,
-                                qitems.len(),
-                            );
-                            self.qitems = Some(qitems);
-                            processing_backlog = true;
-                            continue;
-                        }
-                    },
-                    _ => {},
-                }
+                        self.qitems = Some(qitems);
+                        self.processing_backlog = true;
+                    } else {
+                        break;
+                    }
+                },
+                _ => break,
             }
+        }
+
+        if self.processing_backlog || self.quitting || self.recv_queue.len() >= maxstream {
+            return false;
+        }
+        true
+    }
+
+    // Feeder loop.
+    async fn feed(&mut self) -> io::Result<()> {
+
+        let maxstream = std::cmp::max(1, self.newspeer.maxstream) as usize;
+        let part = if self.newspeer.headfeed {
+            ArtPart::Head
+        } else {
+            ArtPart::Article
+        };
+        let mut interval = tokio::time::interval(Duration::new(10, 0));
+
+        loop {
+
+            // fill up the send queue.
+            self.fill_send_queue().await;
+
+            // Take requests from the send queue and actually send them.
+            while self.recv_queue.len() < maxstream && self.send_queue.len() > 0 {
+
+                let mut item = self.send_queue.pop_front().unwrap();
+                let label = &self.newspeer.label;
+                log::trace!( "Connection::feed: {}:{}: sending {:?}", label, self.id, item);
+
+                if !self.transmit_item(&mut item, part).await? {
+                    // skip article, it was not present in the spool.
+                    continue;
+                }
+
+                // and queue item waiting for a response.
+                self.recv_queue.push_back(item);
+            }
+
+
+            // top it up once more.
+            let need_item = self.fill_send_queue().await;
+            let do_flush = self.writer.write_is_pending();
 
             futures::select_biased! {
 
                 // If we need to, get an item from the global queue for this feed.
-                res = conditional_fut!(need_item && !processing_backlog, self.rx_queue.recv()) => {
+                res = conditional_fut!(need_item, self.rx_queue.recv()) => {
                     match res {
                         Ok(art) => {
                             log::trace!(
@@ -409,19 +418,17 @@ impl Connection {
                             // drop anything in the send_queue and send quit.
                             self.dropped.extend(self.send_queue.drain(..));
                             self.send_queue.push_back(ConnItem::Quit);
-                            // this will make sure that need_item == false.
-                            maxstream = 0;
+                            self.quitting = true;
                         },
                     }
                 }
 
-                // If we're writing, keep driving it.
-                res = conditional_fut!(xmit_busy, self.writer.flush()) => {
+                // Try to write buffered data (if there is any)
+                res = conditional_fut!(do_flush, self.writer.flush()) => {
                     // Done sending either CHECK or TAKETHIS.
                     if let Err(e) = res {
                         return Err(ioerr!(e.kind(), "writing to socket: {}", e));
                     }
-                    xmit_busy = false;
                     self.idle_counter = 0;
                 }
 
@@ -434,7 +441,7 @@ impl Connection {
                     // What did we receive?
                     match res.and_then(NntpResponse::try_from) {
                         Err(e) => {
-                            if sent_quit {
+                            if self.quitting {
                                 // We sent quit, the remote side closed the
                                 // connection without a 205. don't complain.
                                 return Ok(());
@@ -462,7 +469,7 @@ impl Connection {
                 }
 
                 // Check the deferred queue.
-                defer_art = self.deferred.next().fuse() => {
+                defer_art = conditional_fut!(!self.quitting, self.deferred.next()) => {
                     let art = defer_art.unwrap();
                     log::trace!(
                         "Connection::feed: {}:{}: re-pushing CHECK {} onto send queue",
@@ -483,8 +490,7 @@ impl Connection {
                             // exit gracefully.
                             log::info!("{}:{}: connection is idle, closing", self.newspeer.label, self.id);
                             self.send_queue.push_back(ConnItem::Quit);
-                            sent_quit = true;
-                            maxstream = 0;
+                            self.quitting = true;
                         }
                         self.idle_counter = 0;
                     }
@@ -500,20 +506,19 @@ impl Connection {
                     );
                     match res {
                         Ok(PeerFeedItem::ExitNow) => {
-                            self.dropped.extend(self.send_queue.drain(..));
                             return Err(ioerr!(Interrupted, "forced exit"));
                         }
                         Ok(PeerFeedItem::ExitGraceful) => {
                             // exit gracefully.
                             self.dropped.extend(self.send_queue.drain(..));
                             self.send_queue.push_back(ConnItem::Quit);
-                            maxstream = 0;
+                            self.quitting = true;
                         },
                         Ok(PeerFeedItem::Reconfigure) => {
                             // config changed. drain slowly and quit.
                             self.dropped.extend(self.send_queue.drain(..));
                             self.send_queue.push_back(ConnItem::Quit);
-                            maxstream = 0;
+                            self.quitting = true;
                         },
                         Err(broadcast::RecvError::Lagged(num)) => {
                             // what else can we do ?
@@ -564,7 +569,9 @@ impl Connection {
                 match resp.code {
                     238 => {
                         // remote wants it. queue a takethis command.
-                        self.send_queue.push_back(ConnItem::Takethis(art));
+                        if !self.quitting {
+                            self.send_queue.push_back(ConnItem::Takethis(art));
+                        }
                     },
                     431 => {
                         // remote deferred it (aka "try again a bit later")
@@ -694,21 +701,6 @@ impl Connection {
         let mut hb = Buffer::new();
         headers.header_bytes(&mut hb);
         (hb, body)
-    }
-
-    // the items in the recv_queue are already sent, and waiting
-    // for a response. the total size of those items is the number
-    // of bytes in-flight at the moment.
-    fn recv_queue_size(&self) -> usize {
-        let mut size = 0;
-        for item in &self.recv_queue {
-            match item {
-                &ConnItem::Check(ref art) => size += 8 + art.msgid.len(),
-                &ConnItem::Takethis(ref art) => size += 14 + art.msgid.len() + art.size,
-                _ => {},
-            }
-        }
-        size
     }
 }
 

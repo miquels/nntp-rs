@@ -722,6 +722,16 @@ where
         let mut buf = buf;
         poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
     }
+
+    /// Is there still data pending, waiting to be written?
+    pub fn write_is_pending(&self) -> bool {
+        for buf in &self.wr_bufs {
+            if buf.remaining() > 0 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl<S> Stream for NntpCodec<S>
