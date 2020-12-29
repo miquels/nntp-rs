@@ -138,6 +138,26 @@ pub fn setgroups(gids: &[u32]) -> io::Result<()> {
     Ok(())
 }
 
+pub fn set_nodelay(strm: &tokio::net::TcpStream) -> io::Result<()> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let fd = strm.as_raw_fd();
+    let std_strm = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+    let res = std_strm.set_nodelay(true);
+    std::mem::forget(std_strm);
+    res
+}
+
+pub fn set_only_v6(socket: &tokio::net::TcpSocket) -> io::Result<()> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let fd = socket.as_raw_fd();
+    let socket2 = unsafe { socket2::Socket::from_raw_fd(fd) };
+    let res = socket2.set_only_v6(true);
+    std::mem::forget(socket2);
+    res
+}
+
 #[cfg(target_os = "linux")]
 mod congestion_control {
 

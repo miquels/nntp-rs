@@ -18,11 +18,11 @@ use futures::future::poll_fn;
 use futures::sink::Sink;
 use memchr::memchr;
 use smallvec::SmallVec;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::pin;
-use tokio::prelude::*;
-use tokio::stream::Stream;
-use tokio::time::{self, Delay, Instant};
+use tokio_stream::Stream;
+use tokio::time::{self, Sleep, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
 pub const READ_TIMEOUT: u64 = 630;
@@ -155,11 +155,11 @@ pub struct NntpCodec<S = TcpStream> {
     rd_line_start:   usize,
     rd_reserve_size: usize,
     rd_tmout:        Option<Duration>,
-    rd_timer:        Option<Delay>,
+    rd_timer:        Option<Pin<Box<Sleep>>>,
     rd_mode:         CodecMode,
     wr_bufs:         Vec<Buffer>,
     wr_tmout:        Option<Duration>,
-    wr_timer:        Option<Delay>,
+    wr_timer:        Option<Pin<Box<Sleep>>>,
     arttype_scanner: ArtTypeScanner,
     notification:    Option<Notification>,
     msgid:           Option<String>,
@@ -290,9 +290,9 @@ where
             self.rd.reserve(size);
 
             // Read data into the buffer if it's available.
-            let socket = &mut self.socket;
-            pin!(socket);
-            match socket.poll_read_buf(cx, &mut self.rd) {
+            let socket = Pin::new(&mut self.socket);
+            //pin!(socket);
+            match self.rd.poll_read(socket, cx) {
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
                         self.rd_eof = true;
@@ -519,8 +519,7 @@ where
 
         // check the timer.
         if let Some(timeout) = self.rd_timer.as_mut() {
-            pin!(timeout);
-            return match timeout.poll(cx) {
+            return match timeout.as_mut().poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(()) => Poll::Ready(Err(ioerr!(TimedOut, "TimedOut"))),
             };
@@ -532,9 +531,9 @@ where
     fn reset_rd_timer(&mut self) {
         if let Some(ref tmout) = self.rd_tmout {
             if let Some(ref mut timer) = self.rd_timer {
-                timer.reset(calc_delay(tmout));
+                timer.as_mut().reset(calc_delay(tmout));
             } else {
-                self.rd_timer = Some(time::delay_for(tmout.clone()));
+                self.rd_timer = Some(Box::pin(time::sleep(tmout.clone())));
             }
         }
     }
@@ -702,9 +701,9 @@ where
     fn reset_wr_timer(&mut self) {
         if let Some(ref tmout) = self.wr_tmout {
             if let Some(ref mut timer) = self.wr_timer {
-                timer.reset(calc_delay(tmout));
+                timer.as_mut().reset(calc_delay(tmout));
             } else {
-                self.wr_timer = Some(time::delay_for(tmout.clone()));
+                self.wr_timer = Some(Box::pin(time::sleep(tmout.clone())));
             }
         }
     }

@@ -19,7 +19,11 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::mem;
 use std::ops::{Deref, DerefMut};
+use std::marker::Unpin;
+use std::pin::Pin;
 use std::slice;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, ReadBuf};
 
 use bytes::{Buf, BufMut};
 
@@ -30,6 +34,7 @@ pub struct Buffer {
     start_offset: usize,
     rd_pos:       usize,
     data:         Vec<u8>,
+    initialized:  usize,
 }
 
 impl Buffer {
@@ -39,6 +44,7 @@ impl Buffer {
             start_offset: 0,
             rd_pos:       0,
             data:         Vec::new(),
+            initialized:  0,
         }
     }
 
@@ -140,7 +146,10 @@ impl Buffer {
         // this is safe as long as `reader` behaves itself properly.
         unsafe { self.data.set_len(prev_len + len) };
         match reader.read_exact(&mut self.data[prev_len..]) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.update_initialized();
+                Ok(())
+            },
             Err(e) => {
                 // this is safe, it sets it back to what it was.
                 unsafe { self.data.set_len(prev_len) };
@@ -175,6 +184,7 @@ impl Buffer {
                 },
             }
         }
+        self.update_initialized();
         Ok(())
     }
 
@@ -182,12 +192,14 @@ impl Buffer {
     #[inline]
     pub fn extend_from_slice(&mut self, extend: &[u8]) {
         self.data.extend_from_slice(extend);
+        self.update_initialized();
     }
 
     /// Add text data to this buffer.
     #[inline]
     pub fn push_str(&mut self, s: &str) {
         self.data.extend_from_slice(s.as_bytes());
+        self.update_initialized();
     }
 
     /// Make sure at least `size` bytes are available.
@@ -200,6 +212,7 @@ impl Buffer {
     #[inline]
     pub fn put_str(&mut self, s: impl AsRef<str>) {
         self.extend_from_slice(s.as_ref().as_bytes());
+        self.update_initialized();
     }
 
     /// Return a reference to this Buffer as an UTF-8 string.
@@ -212,6 +225,38 @@ impl Buffer {
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
+
+    #[inline]
+    fn update_initialized(&mut self) {
+        let len = self.data.len();
+        if len > self.initialized {
+            self.initialized = len;
+        }
+    }
+
+    // BufMut::bytes_mut() returns a MaybeUninit. Some of that may
+    // already have been initialized - find out how much.
+    fn bytes_mut_initialized_size(&self) -> usize {
+        if self.initialized > self.data.len() {
+            self.initialized - self.data.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn poll_read<R>(&mut self, reader: Pin<&mut R>, cx: &mut Context<'_>) -> Poll<io::Result<usize>>
+    where
+        R: AsyncRead + Unpin + ?Sized,
+    {
+        let initialized = self.bytes_mut_initialized_size();
+        let mut buf = unsafe {
+            let mut buf = ReadBuf::uninit(self.bytes_mut());
+            buf.assume_init(initialized);
+            buf
+        };
+        futures::ready!(reader.poll_read(cx, &mut buf))?;
+        Poll::Ready(Ok(buf.filled().len()))
+    }
 }
 
 impl BufMut for Buffer {
@@ -221,6 +266,7 @@ impl BufMut for Buffer {
             panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
         }
         self.data.set_len(self.data.len() + cnt);
+        self.update_initialized();
     }
 
     fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
@@ -301,6 +347,7 @@ impl From<Vec<u8>> for Buffer {
         Buffer {
             start_offset: 0,
             rd_pos:       0,
+            initialized:  src.len(),
             data:         src,
         }
     }

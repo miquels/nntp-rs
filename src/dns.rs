@@ -9,21 +9,16 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt;
+use std::io;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tokio::task;
-use tokio::time::delay_for;
-use trust_dns_resolver::{
-    config::LookupIpStrategy,
-    error::{ResolveError, ResolveErrorKind},
-    TokioAsyncResolver,
-};
+use tokio::time::sleep;
 
 use crate::bus::{self, Notification};
 use crate::newsfeeds::NewsFeeds;
@@ -32,28 +27,109 @@ const DNS_REFRESH_SECS: Duration = Duration::from_secs(3600);
 const DNS_MAX_TEMPERROR_SECS: Duration = Duration::from_secs(86400);
 
 static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
-static RESOLVER_DONE: AtomicBool = AtomicBool::new(false);
-static RESOLVER_OPT: Lazy<Mutex<Option<TokioAsyncResolver>>> = Lazy::new(|| Mutex::new(None));
-pub static RESOLVER: Lazy<TokioAsyncResolver> = Lazy::new(|| RESOLVER_OPT.lock().take().unwrap());
 
-// Initialize trust-dns resolver.
-pub async fn init_resolver() -> Result<(), ResolveError> {
-    if RESOLVER_DONE.load(Ordering::SeqCst) {
-        return Ok(());
+#[cfg(feature = "trust-dns-resolver")]
+mod resolver {
+    use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use std::net::IpAddr;
+
+    use once_cell::sync::Lazy;
+    use parking_lot::Mutex;
+    use trust_dns_resolver::{
+        config::LookupIpStrategy,
+        error::{ResolveError, ResolveErrorKind},
+        TokioAsyncResolver,
+    };
+
+    static RESOLVER_DONE: AtomicBool = AtomicBool::new(false);
+    static RESOLVER_OPT: Lazy<Mutex<Option<TokioAsyncResolver>>> = Lazy::new(|| Mutex::new(None));
+    static RESOLVER: Lazy<TokioAsyncResolver> = Lazy::new(|| RESOLVER_OPT.lock().take().unwrap());
+
+    // Initialize trust-dns resolver.
+    pub async fn init_resolver() -> Result<(), ResolveError> {
+        if RESOLVER_DONE.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        RESOLVER_DONE.store(true, Ordering::SeqCst);
+        log::trace!("initializing trust-dns-resolver.");
+        let (config, mut opts) = trust_dns_resolver::system_conf::read_system_conf()?;
+        opts.timeout = Duration::new(1, 0);
+        opts.attempts = 5;
+        opts.rotate = true;
+        opts.edns0 = true;
+        opts.use_hosts_file = true;
+        opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+        let resolver = TokioAsyncResolver::tokio(config, opts).await.map_err(to_io_error)?;
+        RESOLVER_OPT.lock().replace(resolver);
+        Ok(())
     }
-    RESOLVER_DONE.store(true, Ordering::SeqCst);
-    log::trace!("initializing trust-dns-resolver.");
-    let (config, mut opts) = trust_dns_resolver::system_conf::read_system_conf()?;
-    opts.timeout = Duration::new(1, 0);
-    opts.attempts = 5;
-    opts.rotate = true;
-    opts.edns0 = true;
-    opts.use_hosts_file = true;
-    opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-    let resolver = TokioAsyncResolver::tokio(config, opts).await?;
-    RESOLVER_OPT.lock().replace(resolver);
-    Ok(())
+
+    pub async fn lookup_ip(host: &str) -> io::Result<impl Iterator<Item = IpAddr>> {
+        let res = RESOLVER.lookup_ip(host).await;
+        match res {
+            Ok(a) => Ok(a.into_iter()),
+            Err(e) => Err(to_io_error(e)),
+        }
+    }
+
+    pub async fn reverse_lookup(ipaddr: IpAddr) -> io::Result<String> {
+        let res = RESOLVER.reverse_lookup(ipaddr).await;
+        match res {
+            Ok(a) => match a.iter().next().map(|name| name.to_utf8()) {
+                Some(mut name) => {
+                    // reverse lookup might return hostname terminated with a '.'.
+                    if name.ends_with(".") {
+                        name.pop();
+                    }
+                    Ok(name)
+                },
+                None => Err(ioerr!(NotFound, "host not found")),
+            },
+            Err(e) => Err(to_io_error(e)),
+        }
+    }
+
+    fn to_io_error(e: ResolveError) -> io::Error {
+        match e.kind() {
+            ResolveErrorKind::Message(m) => ioerr!(Other, "{}", m),
+            ResolveErrorKind::Msg(m) => ioerr!(Other, "{}", m),
+            ResolveErrorKind::NoRecordsFound{ .. } => ioerr!(NotFound, "{}", e),
+            ResolveErrorKind::Io(err) => ioerr!(err.kind(), "{}", err),
+            ResolveErrorKind::Proto(err) => ioerr!(Other, "{}", err),
+            ResolveErrorKind::Timeout => ioerr!(TimedOut, "{}", e),
+        }
+    }
 }
+
+#[cfg(feature = "dns-lookup")]
+mod resolver {
+    use std::io;
+    use std::net::IpAddr;
+    use tokio::task;
+
+    pub async fn init_resolver() -> io::Result<()> {
+        Ok(())
+    }
+
+    pub async fn lookup_ip(host: &str) -> io::Result<impl Iterator<Item = IpAddr> + '_> {
+        let res = tokio::net::lookup_host(host).await?;
+        Ok(res.map(|sa| sa.ip()))
+    }
+
+    pub async fn reverse_lookup(ipaddr: IpAddr) -> io::Result<String> {
+        let res = task::spawn_blocking(move || {
+            dns_lookup::lookup_addr(&ipaddr)
+        }).await;
+        match res {
+            Ok(res) => res,
+            Err(e) => Err(ioerr!(Other, "{}", e)),
+        }
+    }
+}
+
+pub use resolver::*;
 
 #[derive(Clone, Default, Debug)]
 struct HostEntry {
@@ -144,7 +220,7 @@ impl HostCache {
     }
 
     // Spawn the resolver task.
-    pub async fn start(mut bus_recv: bus::Receiver) -> Result<(), ResolveError> {
+    pub async fn start(mut bus_recv: bus::Receiver) -> io::Result<()> {
         log::debug!("HostCache::start: initializing");
         init_resolver().await?;
 
@@ -157,7 +233,7 @@ impl HostCache {
         task::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = delay_for(Duration::from_secs(60)) => {
+                    _ = sleep(Duration::from_secs(60)) => {
                         this.resolve(false).await;
                     }
                     item = bus_recv.recv() => {
@@ -201,7 +277,6 @@ impl HostCache {
             (inner.generation, inner.entries.clone())
         };
 
-        let resolver = &*RESOLVER;
         let mut updated = HashMap::new();
 
         loop {
@@ -220,12 +295,12 @@ impl HostCache {
                 // Run the host lookups in parallel because why not.
                 let task = async move {
                     // Space a few ms between lookups.
-                    tokio::time::delay_for(delay).await;
+                    tokio::time::sleep(delay).await;
 
                     // Lookup "hostname".
                     log::debug!("Refreshing host cache for {}", entry.hostname);
                     let start = Instant::now();
-                    let res = resolver.lookup_ip(entry.hostname.as_str()).await;
+                    let res = lookup_ip(entry.hostname.as_str()).await;
                     let elapsed = start.elapsed();
                     let elapsed_ms = elapsed.as_millis();
                     if elapsed_ms >= 1500 {
@@ -236,7 +311,7 @@ impl HostCache {
 
                     match res {
                         Ok(a) => {
-                            let addrs: Vec<_> = a.iter().collect();
+                            let addrs: Vec<_> = a.into_iter().collect();
                             if addrs.len() == 0 {
                                 // should not happen. log and handle as transient error.
                                 log::warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
@@ -248,7 +323,7 @@ impl HostCache {
                         Err(e) => {
                             match e.kind() {
                                 // NXDOMAIN or NODATA - normal retry time.
-                                ResolveErrorKind::NoRecordsFound { .. } => {
+                                io::ErrorKind::NotFound { .. } => {
                                     log::warn!("resolver: lookup {}: host not found", entry.hostname);
                                     entry.addrs.truncate(0);
                                     entry.lastupdate = Some(start);

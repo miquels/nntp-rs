@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 use tokio::time::Instant;
@@ -185,7 +185,7 @@ impl PeerFeed {
                     // Delayed article. A DelayQueue always returns Some(item).
                     res
                 }
-                _ = interval.next().fuse() => {
+                _ = interval.tick().fuse() => {
 
                     // queue_only mode, so every tick (5 secs) we flush the
                     // main queue to the backlog on disk.
@@ -435,7 +435,7 @@ impl PeerFeed {
 
     async fn add_connection(&mut self) {
         let newspeer = self.newspeer.clone();
-        let mut tx_chan = self.tx_chan.clone();
+        let tx_chan = self.tx_chan.clone();
         let rx_queue = self.rx_queue.clone();
         let spool = self.spool.clone();
         let broadcast = self.broadcast.clone();

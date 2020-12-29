@@ -18,11 +18,10 @@ use std::time::Duration;
 
 use futures::future::FutureExt;
 use futures::sink::{Sink, SinkExt};
-use tokio::prelude::*;
-use tokio::stream::Stream;
-use tokio::stream::StreamExt;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_stream::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 use crate::article::{HeaderName, HeadersParser};
 use crate::metrics::TxSessionStats;
@@ -137,10 +136,11 @@ impl Connection {
             let conn_fut = Connection::connect(newspeer.clone(), id);
             tokio::pin!(conn_fut);
 
-            let mut delay_fut = conditional_fut!(do_delay, {
+            let delay_fut = conditional_fut!(do_delay, {
                 log::debug!("Connection::new: delay {} ms", fail_delay as u64);
-                delay_for(Duration::from_millis(fail_delay as u64))
+                sleep(Duration::from_millis(fail_delay as u64))
             });
+            tokio::pin!(delay_fut);
 
             // Start connecting, but also listen to broadcasts while connecting.
             loop {
@@ -217,7 +217,7 @@ impl Connection {
                 log::error!("Feed {}:{}: fatal: {}", self.newspeer.label, self.id, e);
                 // We got an error, delay a bit so the main loop doesn't
                 // reconnect right away. We should have a better strategy.
-                delay_for(Duration::new(1, 0)).await;
+                sleep(Duration::new(1, 0)).await;
             }
 
             // If we were processing backlog messages, put them back
@@ -482,7 +482,7 @@ impl Connection {
                 }
 
                 // Timer tick.
-                _ = interval.next().fuse() => {
+                _ = interval.tick().fuse() => {
                     self.idle_counter += 1;
                     if self.idle_counter >= CONNECTION_MAX_IDLE / 10 {
                         // if the queues are not empty, we're not really idle.
@@ -520,11 +520,11 @@ impl Connection {
                             self.send_queue.push_back(ConnItem::Quit);
                             self.quitting = true;
                         },
-                        Err(broadcast::RecvError::Lagged(num)) => {
+                        Err(broadcast::error::RecvError::Lagged(num)) => {
                             // what else can we do ?
                             return Err(ioerr!(TimedOut, "missed too many messages ({}) on bus", num));
                         },
-                        Err(broadcast::RecvError::Closed) => {
+                        Err(broadcast::error::RecvError::Closed) => {
                             // what else can we do?
                             return Err(ioerr!(TimedOut, "bus unexpectedly closed"));
                         },

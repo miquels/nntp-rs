@@ -8,11 +8,12 @@
 //!
 //! This prevents blocking and lost updates.
 use std::default::Default;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::stream::{Stream, StreamExt};
+use tokio_stream::Stream;
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
@@ -88,9 +89,9 @@ impl Receiver {
             if next.is_some() {
                 return next;
             }
-            self.nstate = match self.rx.recv().await {
-                Some(s) => s,
-                None => return None,
+            self.nstate = match self.rx.changed().await {
+                Ok(_) => self.rx.borrow().clone(),
+                Err(_) => return None,
             };
         }
     }
@@ -122,10 +123,17 @@ impl Stream for Receiver {
         if let Some(item) = self.as_mut().next_item() {
             return Poll::Ready(Some(item));
         }
-        match Pin::new(&mut self.rx).poll_next(cx) {
-            Poll::Ready(None) => return Poll::Ready(None),
-            Poll::Ready(Some(state)) => {
-                self.nstate = state;
+        let res = {
+            let fut = self.rx.changed();
+            tokio::pin!(fut);
+            fut.poll(cx)
+        };
+
+        match res {
+            Poll::Ready(Err(_)) => return Poll::Ready(None),
+            Poll::Ready(Ok(_)) => {
+                let nstate = self.rx.borrow().clone();
+                self.nstate = nstate;
                 if let Some(item) = self.next_item() {
                     return Poll::Ready(Some(item));
                 }
@@ -168,13 +176,13 @@ pub fn new() -> (Sender, Receiver) {
     // forward a message from the MPSC channel to all the watchers.
     task::spawn(async move {
         let mut state = State::default();
-        while let Some(notification) = notifier_receiver.next().await {
+        while let Some(notification) = notifier_receiver.recv().await {
             let i = notification as u32 as usize;
             if state.0.len() < i + 1 {
                 state.0.resize(i + 1, 0);
             }
             state.0[i] += 1;
-            if let Err(_e) = notifier_master.broadcast(state.clone()) {
+            if let Err(_e) = notifier_master.send(state.clone()) {
                 log::error!("bus::broadcast_task: exit");
                 break;
             }
@@ -185,7 +193,7 @@ pub fn new() -> (Sender, Receiver) {
     let tx = notifier.clone();
     task::spawn(async move {
         let mut sig_int = signal(SignalKind::interrupt()).unwrap();
-        while let Some(_) = sig_int.next().await {
+        while let Some(_) = sig_int.recv().await {
             log::info!("received SIGINT");
             let _ = tx.send(Notification::ExitGraceful);
         }
@@ -195,7 +203,7 @@ pub fn new() -> (Sender, Receiver) {
     let tx = notifier.clone();
     task::spawn(async move {
         let mut sig_term = signal(SignalKind::terminate()).unwrap();
-        while let Some(_) = sig_term.next().await {
+        while let Some(_) = sig_term.recv().await {
             log::info!("received SIGTERM");
             let _ = tx.send(Notification::ExitGraceful);
         }
@@ -205,7 +213,7 @@ pub fn new() -> (Sender, Receiver) {
     let tx = notifier.clone();
     task::spawn(async move {
         let mut sig_hup = signal(SignalKind::hangup()).unwrap();
-        while let Some(_) = sig_hup.next().await {
+        while let Some(_) = sig_hup.recv().await {
             log::info!("received SIGHUP");
             match config::reread_config() {
                 Ok(false) => log::info!("configuration unchanged"),
@@ -222,7 +230,7 @@ pub fn new() -> (Sender, Receiver) {
     let tx = notifier.clone();
     task::spawn(async move {
         let mut sig_usr1 = signal(SignalKind::user_defined1()).unwrap();
-        while let Some(_) = sig_usr1.next().await {
+        while let Some(_) = sig_usr1.recv().await {
             log::info!("received SIGUSR1");
             let _ = tx.send(Notification::Expire);
         }

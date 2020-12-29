@@ -686,6 +686,7 @@ impl Queue {
             let mut qreader = self.inner.qreader.lock().await;
             if let Ok(Some(qfile)) = qwriter.rotate(qreader.low_seq(), false).await {
                 qreader.qfiles.push(qfile);
+                qreader.expire_qfiles().await;
             }
         }
 

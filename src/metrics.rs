@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::time::delay_for;
+use tokio::time::sleep;
 
 use crate::article::Article;
 use crate::bus::{self, Notification};
@@ -194,30 +194,16 @@ impl RxSessionStats {
 
     pub async fn on_connect(&mut self, label: String, ipaddr: IpAddr) {
         self.ipaddr = ipaddr;
-        let host = match dns::RESOLVER.reverse_lookup(self.ipaddr).await {
-            Ok(m) => {
-                let mut h = m.iter().next().map(|name| name.to_utf8());
-                if let Some(ref mut h) = h {
-                    // reverse lookup might return hostname terminated with a '.'.
-                    if h.ends_with(".") {
-                        h.pop();
-                    }
-                }
-                h
-            },
-            Err(_) => None,
-        };
-        let peer_stats = {
+        self.hostname = dns::reverse_lookup(self.ipaddr).await.unwrap_or(self.ipaddr.to_string());
+        self.label = label.clone();
+        self.peer_stats = {
             let mut stats = PEER_STATS.write();
             stats
                 .recv
-                .entry(label.clone())
+                .entry(label)
                 .or_insert_with(|| Arc::new(PeerRecvStats::default()))
                 .clone()
         };
-        self.hostname = host.unwrap_or(self.ipaddr.to_string());
-        self.label = label;
-        self.peer_stats = peer_stats;
         if !self.connected {
             // on_connect might be called twice in the XCLIENT case.
             self.connected = true;
@@ -746,7 +732,7 @@ pub async fn metrics_task(mut bus_recv: bus::Receiver) {
         let mut hash = None;
         loop {
             tokio::select! {
-                _ = delay_for(Duration::from_secs(60)) => {
+                _ = sleep(Duration::from_secs(60)) => {
                     match save(hash).await {
                         Ok(val) => {
                             if error {

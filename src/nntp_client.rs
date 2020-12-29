@@ -5,7 +5,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use once_cell::sync::Lazy;
-use tokio::net::TcpStream;
 
 use crate::dns;
 use crate::nntp_codec::NntpCodec;
@@ -33,9 +32,9 @@ pub async fn nntp_connect(
     // A lookup of the hostname might return multiple addresses.
     // Shuffle IPv4 and IPv6 addresses separately, then return
     // the lot with the IPv6 addresses in front.
-    let addrs = match dns::RESOLVER.lookup_ip(hostname).await {
+    let addrs = match dns::lookup_ip(hostname).await {
         Ok(lookupip) => {
-            let addrs: Vec<SocketAddr> = lookupip.iter().map(|a| SocketAddr::new(a, port)).collect();
+            let addrs: Vec<SocketAddr> = lookupip.into_iter().map(|a| SocketAddr::new(a, port)).collect();
             let mut v6 = addrs.iter().filter(|a| a.is_ipv6()).cloned().collect::<Vec<_>>();
             let mut v4 = addrs.iter().filter(|a| a.is_ipv4()).cloned().collect::<Vec<_>>();
             let mut rng = rand::thread_rng();
@@ -44,7 +43,7 @@ pub async fn nntp_connect(
             v6.extend(v4.drain(..));
             v6
         },
-        Err(e) => return Err(ioerr!(Other, e)),
+        Err(e) => return Err(e),
     };
 
     // Try to connect to the peer.
@@ -54,28 +53,27 @@ pub async fn nntp_connect(
         let result = async move {
             // Create socket.
             let is_ipv6 = bindaddr.map(|ref a| a.is_ipv6()).unwrap_or(addr.is_ipv6());
-            let domain = if is_ipv6 {
-                socket2::Domain::ipv6()
-            } else {
-                socket2::Domain::ipv4()
-            };
-            let socket = socket2::Socket::new(domain, socket2::Type::stream(), None).map_err(|e| {
-                log::trace!("Connection::connect: Socket::new({:?}): {}", domain, e);
-                e
-            })?;
-
-            // Set IPV6_V6ONLY if this is going to be an IPv6 connection.
-            if is_ipv6 {
-                socket.set_only_v6(true).map_err(|_| {
-                    log::trace!("Connection::connect: Socket.set_only_v6() failed");
-                    ioerr!(AddrNotAvailable, "socket.set_only_v6() failed")
+            let socket = if is_ipv6 {
+                let socket = tokio::net::TcpSocket::new_v6().map_err(|e| {
+                    log::trace!("Connection::connect: TcpSocket::new_v6: {}", e);
+                    ioerr!(e.kind(), "TcpSocket::new_v6: {}", e)
                 })?;
-            }
+                util::set_only_v6(&socket).map_err(|e| {
+                    log::trace!("Connection::connect: util::set_only_v6(socket): {}", e);
+                    ioerr!(AddrNotAvailable, "socket.set_only_v6(): {}", e)
+                })?;
+                socket
+            } else {
+                tokio::net::TcpSocket::new_v4().map_err(|e| {
+                    log::trace!("Connection::connect: TcpSocket::new_v4: {}", e);
+                    ioerr!(e.kind(), "TcpSocket::new_v4: {}", e)
+                })?
+            };
 
             // Bind local address.
             if let Some(ref bindaddr) = bindaddr {
                 let sa = SocketAddr::new(bindaddr.to_owned(), 0);
-                socket.bind(&sa.clone().into()).map_err(|e| {
+                socket.bind(sa).map_err(|e| {
                     log::trace!("Connection::connect: Socket::bind({:?}): {}", sa, e);
                     ioerr!(e.kind(), "bind {}: {}", sa, e)
                 })?;
@@ -83,39 +81,15 @@ pub async fn nntp_connect(
 
             // Set (max) outbuf buffer size.
             if let Some(size) = sendbuf_size {
-                let _ = socket.set_send_buffer_size(size);
+                let _ = socket.set_send_buffer_size(size as u32); // XXX FIXME make sendbuf_size u32
             }
 
-            /*
-                        // Now this sucks, having to run it on a threadpool.
-                        //
-                        // See below, turns out that tokio _does_ have a method
-                        // for this, but it's undocumented. I'm leaving this
-                        // here in case it gets removed without a replacement.
-                        //
-                        log::trace!("Trying to connect to {}", addr);
-                        let addr2: socket2::SockAddr = addr.to_owned().into();
-                        let res = task::spawn_blocking(move || {
-                            // 10 second timeout for a connect is more than enough.
-                            socket.connect_timeout(&addr2, Duration::new(10, 0))?;
-                            Ok(socket)
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(ioerr!(Other, "spawn_blocking: {}", e)));
-                        let socket = res.map_err(|e| {
-                            log::trace!("Connection::connect({}): {}", addr, e);
-                            ioerr!(e.kind(), "{}: {}", addr, e)
-                        })?;
-
-                        // Now turn it into a tokio::net::TcpStream.
-                        let socket = TcpStream::from_std(socket.into()).unwrap();
-            */
             let socket = tokio::select! {
-                _ = tokio::time::delay_for(Duration::new(10, 0)) => {
+                _ = tokio::time::sleep(Duration::new(10, 0)) => {
                     log::trace!("Connection::connect({}): timed out", addr);
                     return Err(ioerr!(TimedOut, "{}: connection timed out", addr));
                 }
-                res = TcpStream::connect_std(socket.into(), addr) => {
+                res = socket.connect(addr.clone()) => {
                     res.map_err(|e| {
                         log::trace!("Connection::connect({}): {}", addr, e);
                         ioerr!(e.kind(), "{}: {}", addr, e)

@@ -317,7 +317,7 @@ fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -
     let target = LogTarget::new_stdout();
     logger::logger_init(target, Some("nntp_rs_server".to_string()));
 
-    let mut runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     let res = runtime.block_on(async move {
         // run subcommand.
         let config = config.map(|c| &*c);
@@ -545,7 +545,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
         println!("<< {}", resp.short());
 
         if let Some(delay) = opts.delay {
-            tokio::time::delay_for(std::time::Duration::from_micros((delay * 1000f64) as u64)).await;
+            tokio::time::sleep(std::time::Duration::from_micros((delay * 1000f64) as u64)).await;
         }
     }
     Ok(())

@@ -5,8 +5,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::stream::Stream;
-use tokio::time::delay_for;
+use tokio_stream::Stream;
+use tokio::time::{Sleep, sleep};
 use tokio::time::{Duration, Instant};
 
 // max 10 seconds, resolution 500ms.
@@ -59,7 +59,7 @@ pub struct DelayQueue<T> {
     head:        usize,
     size:        usize,
     cap:         usize,
-    timer:       Option<tokio::time::Delay>,
+    timer:       Option<Pin<Box<Sleep>>>,
 }
 
 impl<T: Unpin> DelayQueue<T> {
@@ -111,9 +111,10 @@ impl<T: Unpin> DelayQueue<T> {
     fn arm_timer(&mut self) {
         let d = Duration::from_millis(1000 / TICKS_PER_SEC + 1);
         if let Some(timer) = self.timer.as_mut() {
-            timer.reset(Instant::now() + d);
+            // second time as_mut() is to get at the Future.
+            timer.as_mut().reset(Instant::now() + d);
         } else {
-            self.timer = Some(delay_for(d));
+            self.timer = Some(Box::pin(sleep(d)));
         }
     }
 }
@@ -134,8 +135,11 @@ where T: Unpin
         }
 
         // poll timer.
-        if let Some(timer) = this.timer.as_mut() {
-            futures::ready!(Pin::new(timer).poll(cx));
+        if let Some(timer) = this.timer.take() {
+            tokio::pin!(timer);
+            //futures::ready!(timer.as_mut().poll(cx));
+            //futures::ready!(Pin::new(timer).poll(cx));
+            futures::ready!(timer.poll(cx));
             tick = true;
         }
 

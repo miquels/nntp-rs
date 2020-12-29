@@ -7,9 +7,9 @@ use std::sync::{atomic::AtomicU64, atomic::Ordering, Arc};
 use std::thread;
 use std::time::Duration;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::runtime::{self, Runtime};
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -23,7 +23,7 @@ use crate::nntp_codec::{self, NntpCodec};
 use crate::nntp_send::{FeedArticle, MasterFeed};
 use crate::nntp_server::NntpServer;
 use crate::spool::Spool;
-use crate::util::TcpListenerSets;
+use crate::util::{self, TcpListenerSets};
 
 static TOT_SESSIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -135,8 +135,7 @@ impl Server {
                 }
 
                 // tokio runtime for this thread alone.
-                let mut basic_runtime = runtime::Builder::new()
-                    .basic_scheduler()
+                let basic_runtime = runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .unwrap();
@@ -230,7 +229,7 @@ impl Server {
                 let _ = bus_sender.send(Notification::ExitNow);
             }
             waited += 1;
-            let _ = tokio::time::delay_for(Duration::from_millis(100)).await;
+            let _ = tokio::time::sleep(Duration::from_millis(100)).await;
             if waited % 100 == 0 {
                 // every 10 seconds.
                 log::warn!("still waiting!");
@@ -262,35 +261,37 @@ impl Server {
     }
 
     // This is run for every TCP listener socket.
-    async fn run(self, mut listener: tokio::net::TcpListener, bus_recv: bus::Receiver) {
-        use futures::future::Either;
-        use futures::stream;
+    async fn run(self, listener: tokio::net::TcpListener, mut bus_recv: bus::Receiver) {
 
-        // We have two streams. One, a stream of incoming connections.
-        // Two, a stream of notifications. Combine them.
-        let incoming = listener.incoming().map(|s| Either::Left(s));
-        let bus_recv2 = bus_recv.clone().map(|w| Either::Right(w));
-        let mut items = stream::select(incoming, bus_recv2);
-
-        // Now iterate over the combined stream.
-        while let Some(item) = items.next().await {
-            let socket = match item {
-                Either::Left(Ok(s)) => s,
-                Either::Left(Err(_)) => {
-                    tokio::time::delay_for(Duration::from_millis(50)).await;
-                    continue;
-                },
-                Either::Right(Notification::ExitGraceful) => break,
-                Either::Right(Notification::ExitNow) => break,
-                _ => continue,
+        // Run the listener and the bus futures in a loop.
+        loop {
+            let socket = futures::select_biased! {
+                incoming = listener.accept().fuse() => {
+                    match incoming {
+                        Ok(s) => s,
+                        Err(_) => {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    }
+                }
+                notification = bus_recv.recv().fuse() => {
+                    match notification {
+                        Some(Notification::ExitGraceful) => break,
+                        Some(Notification::ExitNow) => break,
+                        None => break,
+                        _ => continue,
+                    }
+                }
             };
-            if let Err(e) = socket.set_nodelay(true) {
+            let (mut socket, peer) = socket;
+
+            if let Err(e) = util::set_nodelay(&mut socket) {
                 log::warn!("connection from {:?}: set_nodelay: {}", socket.peer_addr(), e);
                 continue;
             }
 
             // set up codec for reader and writer.
-            let peer = socket.peer_addr().unwrap_or("0.0.0.0:0".parse().unwrap());
             let fdno = socket.as_raw_fd() as u32;
             let codec = NntpCodec::builder(socket)
                 .bus_recv(bus_recv.clone())

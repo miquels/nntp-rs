@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::bus::{self, Notification};
@@ -58,7 +57,7 @@ impl MasterFeed {
             removed.remove(peer.label.as_str());
         }
         for peer in removed.iter() {
-            if let Some(mut orphan) = self.peerfeeds.remove(peer.as_str()) {
+            if let Some(orphan) = self.peerfeeds.remove(peer.as_str()) {
                 // notify NewsPeer to shut down.
                 let mut res = orphan.send(PeerFeedItem::ExitGraceful).await;
                 if res.is_ok() {
@@ -116,7 +115,7 @@ impl MasterFeed {
 
         loop {
             futures::select_biased! {
-                article = conditional_fut!(recv_arts, self.art_chan.next()) => {
+                article = conditional_fut!(recv_arts, self.art_chan.recv()) => {
                     let art = match article {
                         Some(article) => article,
                         None => {
@@ -144,7 +143,7 @@ impl MasterFeed {
                             // Time's up!
                             log::debug!("MasterFeed: broadcasting ExitNow to connections");
                             self.broadcast(PeerFeedItem::ExitNow, closing).await;
-                            let _ = tokio::time::delay_for(Duration::from_millis(1000)).await;
+                            let _ = tokio::time::sleep(Duration::from_millis(1000)).await;
                             log::debug!("MasterFeed: broadcasting ExitNow to peerfeeds");
                             self.broadcast(PeerFeedItem::ExitNow, closing).await;
                             return;
@@ -203,7 +202,7 @@ impl MasterFeed {
             _ => PeerFeedItem::Ping,
         };
         let mut orphans = Vec::new();
-        for mut peer in self.orphans.drain(..) {
+        for peer in self.orphans.drain(..) {
             // Only retain if it hasn't gone away yet.
             if let Ok(_) = peer.send(item.clone()).await {
                 orphans.push(peer);
