@@ -25,7 +25,7 @@ use std::slice;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, buf::UninitSlice};
 
 /// A buffer structure, like Bytes/BytesMut.
 ///
@@ -126,8 +126,12 @@ impl Buffer {
 
     /// Write all data in this `Buffer` to a file.
     pub fn write_all(&mut self, mut file: impl Write) -> io::Result<()> {
-        file.write_all(self.bytes())?;
-        self.rd_pos = self.len();
+        while self.rd_pos < self.len() {
+            let chunk = self.chunk();
+            let size = chunk.len();
+            file.write_all(chunk)?;
+            self.rd_pos += size;
+        }
         Ok(())
     }
 
@@ -218,13 +222,18 @@ impl Buffer {
     /// Return a reference to this Buffer as an UTF-8 string.
     #[inline]
     pub fn as_utf8_str(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(self.bytes())
+        std::str::from_utf8(self.chunk())
     }
 
     /// Convert this buffer into a Vec<u8>.
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
+
+    /*
+    pub fn bytes(&self) -> &[u8] {
+        self.chunk()
+    }*/
 
     #[inline]
     fn update_initialized(&mut self) {
@@ -244,6 +253,16 @@ impl Buffer {
         }
     }
 
+    // bytes_mut helper for poll_read().
+    fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
+        let chunk = self.chunk_mut();
+        unsafe {
+            let len = chunk.len();
+            let ptr = chunk.as_mut_ptr() as *mut mem::MaybeUninit<u8>;
+            &mut slice::from_raw_parts_mut(ptr, len)[..]
+         }
+    }
+
     pub fn poll_read<R>(&mut self, reader: Pin<&mut R>, cx: &mut Context<'_>) -> Poll<io::Result<usize>>
     where
         R: AsyncRead + Unpin + ?Sized,
@@ -259,7 +278,7 @@ impl Buffer {
     }
 }
 
-impl BufMut for Buffer {
+unsafe impl BufMut for Buffer {
     // this is safe if the caller is safe, but that is the contract of this API.
     unsafe fn advance_mut(&mut self, cnt: usize) {
         if self.data.len() + cnt > self.data.capacity() {
@@ -269,15 +288,14 @@ impl BufMut for Buffer {
         self.update_initialized();
     }
 
-    fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
         let len = self.data.len();
         let mut_len = self.data.capacity() - len;
         // this is safe if the caller is safe, but that is the contract of this API.
         unsafe {
             self.data.set_len(self.data.capacity());
             let mut_data = &mut self.data[len..];
-            let ptr = mut_data.as_mut_ptr() as *mut mem::MaybeUninit<u8>;
-            let r = &mut slice::from_raw_parts_mut(ptr, mut_len)[..];
+            let r = UninitSlice::from_raw_parts_mut(mut_data.as_mut_ptr(), mut_len);
             self.data.set_len(len);
             r
         }
@@ -300,7 +318,7 @@ impl Buf for Buffer {
     }
 
     #[inline]
-    fn bytes(&self) -> &[u8] {
+    fn chunk(&self) -> &[u8] {
         if self.rd_pos >= self.len() {
             return &[][..];
         }
@@ -317,7 +335,7 @@ impl Deref for Buffer {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        self.bytes()
+        self.chunk()
     }
 }
 

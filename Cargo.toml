@@ -33,7 +33,7 @@ opt-level = 0
 arc-swap = "0.4.7"
 array-init = "0.1.1"
 async-channel = { version = "1.1.1", optional = true }
-bytes = "0.5.5"
+bytes = "1.0"
 chrono = "0.4.12"
 clap = "2.33.1"
 core_affinity = "0.5.10"

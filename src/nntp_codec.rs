@@ -622,7 +622,7 @@ where
             //log::trace!("writing; remaining={}", buf.remaining());
             let socket = &mut self.socket;
             pin!(socket);
-            match socket.poll_write(cx, buf.bytes()) {
+            match socket.poll_write(cx, buf.chunk()) {
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
