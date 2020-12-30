@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::article::Article;
 use crate::arttype::ArtTypeScanner;
-use crate::bus::{self, Notification};
+use crate::bus::Notification;
 use crate::util::{Buffer, HashFeed};
 
 use bytes::Buf;
@@ -54,7 +54,6 @@ enum CodecMode {
 pub enum NntpLine {
     Eof,
     Line(Buffer),
-    Notification(Notification),
 }
 
 // Return values from poll_read().
@@ -63,7 +62,6 @@ pub enum NntpInput {
     Line(Buffer),
     Block(Buffer),
     Article(Article),
-    Notification(Notification),
 }
 
 impl Debug for NntpInput {
@@ -73,7 +71,6 @@ impl Debug for NntpInput {
             &NntpInput::Line(_) => "NntpInput::Line",
             &NntpInput::Block(_) => "NntpInput::Block",
             &NntpInput::Article(_) => "NntpInput::Article",
-            &NntpInput::Notification(_) => "NntpInput::Notification",
         };
         write!(f, "{}", name)
     }
@@ -82,7 +79,6 @@ impl Debug for NntpInput {
 /// NntpCodec precursor.
 pub struct NntpCodecBuilder<S = TcpStream> {
     socket:   S,
-    bus_recv: Option<bus::Receiver>,
     rd_tmout: Option<Duration>,
     wr_tmout: Option<Duration>,
 }
@@ -92,7 +88,6 @@ impl<S> NntpCodecBuilder<S> {
     pub fn new(socket: S) -> NntpCodecBuilder<S> {
         NntpCodecBuilder {
             socket,
-            bus_recv: None,
             rd_tmout: None,
             wr_tmout: None,
         }
@@ -110,18 +105,11 @@ impl<S> NntpCodecBuilder<S> {
         self
     }
 
-    /// Set the bus receiver we watch for receipt of Notifications.
-    pub fn bus_recv(mut self, b: bus::Receiver) -> Self {
-        self.bus_recv = Some(b);
-        self
-    }
-
     /// Build the final NntpCodec.
     pub fn build(self) -> NntpCodec<S>
     where S: Any {
         NntpCodec {
             socket:          self.socket,
-            bus_recv:        self.bus_recv,
             rd:              Buffer::new(),
             rd_pos:          0,
             rd_eof:          false,
@@ -146,7 +134,6 @@ impl<S> NntpCodecBuilder<S> {
 /// write buffers to a TcpStream.
 pub struct NntpCodec<S = TcpStream> {
     socket:          S,
-    bus_recv:        Option<bus::Receiver>,
     rd:              Buffer,
     rd_pos:          usize,
     rd_eof:          bool,
@@ -189,7 +176,6 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 
         let r = NntpCodec {
             socket:          Box::new(rsock) as Box<dyn AsyncRead + Send + Unpin>,
-            bus_recv:        self.bus_recv,
             rd:              self.rd,
             rd_pos:          self.rd_pos,
             rd_eof:          self.rd_eof,
@@ -210,7 +196,6 @@ where S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 
         let w = NntpCodec {
             socket:          Box::new(wsock) as Box<dyn AsyncWrite + Send + Unpin>,
-            bus_recv:        None,
             rd:              Buffer::new(),
             rd_pos:          0,
             rd_eof:          false,
@@ -291,7 +276,6 @@ where
 
             // Read data into the buffer if it's available.
             let socket = Pin::new(&mut self.socket);
-            //pin!(socket);
             match self.rd.poll_read(socket, cx) {
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
@@ -301,6 +285,7 @@ where
                     bytes_read += n;
                 },
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending if bytes_read > 0 => return Poll::Ready(Ok(bytes_read)),
                 Poll::Pending => return Poll::Pending,
             };
         }
@@ -447,17 +432,6 @@ where
             Poll::Pending => false,
         };
 
-        // see if the other side closed the socket.
-        if sock_closed {
-            if self.rd.len() > 0 {
-                // We were still reading a line, or a block, and hit EOF
-                // before the end. That's unexpected.
-                return Poll::Ready(Err(ioerr!(UnexpectedEof, "UnexpectedEof")));
-            }
-            // EOF.
-            return Poll::Ready(Ok(NntpInput::Eof));
-        }
-
         // Then process the data.
         if self.rd.len() > 0 {
             let res = match self.rd_mode {
@@ -488,35 +462,6 @@ where
             return Poll::Ready(Ok(NntpInput::Eof));
         }
 
-        // Check the notification channel.
-        if let Some(bus_recv) = self.bus_recv.as_mut() {
-            let n = {
-                let fut = bus_recv.recv();
-                pin!(fut);
-                match fut.poll(cx) {
-                    Poll::Ready(item) => {
-                        match item {
-                            Some(Notification::ExitNow) => {
-                                return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
-                            },
-                            other => other,
-                        }
-                    },
-                    Poll::Pending => None,
-                }
-            };
-            if n.is_some() {
-                self.notification = n;
-            }
-        }
-
-        // Now if we have no input yet process the notifications.
-        if self.rd.len() == 0 && self.rd_mode == CodecMode::ReadLine {
-            if let Some(notification) = self.notification.take() {
-                return Poll::Ready(Ok(NntpInput::Notification(notification)));
-            }
-        }
-
         // check the timer.
         if let Some(timeout) = self.rd_timer.as_mut() {
             return match timeout.as_mut().poll(cx) {
@@ -544,7 +489,6 @@ where
         self.reset_rd_timer();
         match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
             Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
-            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
             Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
             Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
             Err(e) => Err(e),
@@ -563,7 +507,6 @@ where
         self.reset_rd_timer();
         let res = match poll_fn(|cx: &mut Context| self.poll_read(cx)).await {
             Ok(NntpInput::Eof) => Ok(NntpLine::Eof),
-            Ok(NntpInput::Notification(n)) => Ok(NntpLine::Notification(n)),
             Ok(NntpInput::Line(buf)) => Ok(NntpLine::Line(buf)),
             Ok(_) => Err(ioerr!(Other, "read_line: unexpected NntpInput state")),
             Err(e) => Err(e),
@@ -604,6 +547,10 @@ where
             Ok(_) => Err(ioerr!(Other, "read_block: unexpected NntpInput state")),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn input_empty(&self) -> bool {
+        self.rd.len() == 0
     }
 }
 
@@ -663,25 +610,6 @@ where
         }
 
         //
-        // now check the notification channel.
-        //
-        if let Some(bus_recv) = self.bus_recv.as_mut() {
-            let fut = bus_recv.recv();
-            pin!(fut);
-            match fut.poll(cx) {
-                Poll::Ready(item) => {
-                    match item {
-                        Some(Notification::ExitNow) => {
-                            return Poll::Ready(Err(io::ErrorKind::NotFound.into()));
-                        },
-                        other => self.notification = other,
-                    }
-                },
-                Poll::Pending => {},
-            }
-        }
-
-        //
         // finally, check the timer.
         //
         if let Some(timeout) = self.wr_timer.as_mut() {
@@ -708,16 +636,27 @@ where
         }
     }
 
+    async fn flush(&mut self) -> io::Result<()> {
+        self.reset_wr_timer();
+        if self.wr_bufs.len() > 0 {
+            let mut this = Pin::new(self);
+            poll_fn(move |cx: &mut Context| this.as_mut().poll_flush(cx)).await?;
+        }
+        Ok(())
+    }
+
     /// Write a buffer that can be turned into a `Buffer` struct.
     pub async fn write(&mut self, buf: impl Into<Buffer>) -> io::Result<()> {
-        self.reset_wr_timer();
-        let mut buf = buf.into();
-        poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
+        let buf = buf.into();
+        self.wr_bufs.push(buf);
+        self.flush().await?;
+        let mut this = Pin::new(self);
+        poll_fn(move |cx: &mut Context| this.as_mut().poll_flush(cx)).await
     }
 
     /// Write a buffer that impl's the `Buf` trait.
     pub async fn write_buf(&mut self, buf: impl Buf) -> io::Result<()> {
-        self.reset_wr_timer();
+        self.flush().await?;
         let mut buf = buf;
         poll_fn(move |cx: &mut Context| self.poll_write(cx, &mut buf)).await
     }
@@ -973,7 +912,6 @@ impl TryFrom<NntpLine> for NntpResponse {
     fn try_from(value: NntpLine) -> io::Result<NntpResponse> {
         match value {
             NntpLine::Eof => Err(ioerr!(UnexpectedEof, "Connection closed")),
-            NntpLine::Notification(_msg) => Err(ioerr!(InvalidData, "unexpected NntpInput state")),
             NntpLine::Line(buffer) => NntpResponse::parse(buffer),
         }
     }

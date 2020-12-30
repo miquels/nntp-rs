@@ -1,26 +1,14 @@
 //! A simple message bus.
 //!
-//! The messages are simple enums, they cannot contain values.
-//! It's pretty efficient though. We use an mpsc::watcher broadcast
-//! of a state structure with generation counters. Then every
-//! receiver checks if their internal counter < the new counter
-//! and if so, generates that value.
+//! Used to be more complex, is now just a wrapper around tokio::broadcast.
 //!
-//! This prevents blocking and lost updates.
-use std::default::Default;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 use tokio::signal::unix::{signal, SignalKind};
-use tokio_stream::Stream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::task;
 
 use crate::config;
 
 #[derive(Debug, Clone, Copy)]
-#[repr(u32)]
 pub enum Notification {
     ExitGraceful,
     ExitNow,
@@ -29,129 +17,53 @@ pub enum Notification {
     HostCacheUpdate,
 }
 
-impl From<u32> for Notification {
-    fn from(i: u32) -> Notification {
-        match i {
-            0 => Notification::ExitGraceful,
-            1 => Notification::ExitNow,
-            2 => Notification::Reconfigure,
-            3 => Notification::Expire,
-            4 => Notification::HostCacheUpdate,
-            _ => unreachable!(),
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-struct State(Vec<u64>);
-
 /// Send messages on the bus.
 #[derive(Clone)]
 pub struct Sender {
-    tx: mpsc::UnboundedSender<Notification>,
+    tx: broadcast::Sender<Notification>,
 }
 
 impl Sender {
+    fn new(tx: broadcast::Sender<Notification>) -> Sender {
+        Sender { tx }
+    }
+
     /// Send a message on the bus to all listeners.
     pub fn send(&mut self, n: Notification) -> Result<(), ()> {
-        self.tx.send(n).map_err(|_| ())
+        self.tx.send(n).map(|_| ()).map_err(|_| ())
     }
 }
 
 /// Receive messages on the bus.
 pub struct Receiver {
-    state:  State,
-    nstate: State,
-    subs:   u64,
-    rx:     watch::Receiver<State>,
+    tx:     broadcast::Sender<Notification>,
+    rx:     broadcast::Receiver<Notification>,
 }
 
 impl Receiver {
-    fn next_item(&mut self) -> Option<Notification> {
-        if self.state.0.len() < self.nstate.0.len() {
-            self.state.0.resize(self.nstate.0.len(), 0);
-        }
-        for i in 0..self.state.0.len() {
-            if self.state.0[i] < self.nstate.0[i] {
-                self.state.0[i] = self.nstate.0[i];
-                if self.subs == 0 || (self.subs & (1 << i)) > 0 {
-                    return Some((i as u32).into());
-                }
-            }
-        }
-        None
+    fn new(tx: broadcast::Sender<Notification>, rx: broadcast::Receiver<Notification>) -> Receiver {
+        Receiver{ tx, rx }
     }
 
     /// Receive a message from the bus.
     pub async fn recv(&mut self) -> Option<Notification> {
         loop {
-            let next = self.next_item();
-            if next.is_some() {
-                return next;
+            match self.rx.recv().await {
+                Ok(item) => return Some(item),
+                Err(RecvError::Closed) => return None,
+                Err(RecvError::Lagged(n)) => {
+                    log::warn!("Receiver::recv: lagged {}", n);
+                },
             }
-            self.nstate = match self.rx.changed().await {
-                Ok(_) => self.rx.borrow().clone(),
-                Err(_) => return None,
-            };
         }
-    }
-
-    /// Subscribe to a message.
-    ///
-    /// If subscribed to no messages at all, you get all of them.
-    pub fn subscribe(&mut self, n: Notification) {
-        self.subs |= 1u64 << (n as u32);
-    }
-
-    /// Subscribe to all message.
-    ///
-    /// This is the same as subscribing to no messages.
-    pub fn subscribe_all(&mut self) {
-        self.subs = 0;
-    }
-
-    /// Unsubscribe from a message.
-    pub fn unsubscribe(&mut self, n: Notification) {
-        self.subs &= !(1u64 << (n as u32));
-    }
-}
-
-impl Stream for Receiver {
-    type Item = Notification;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(item) = self.as_mut().next_item() {
-            return Poll::Ready(Some(item));
-        }
-        let res = {
-            let fut = self.rx.changed();
-            tokio::pin!(fut);
-            fut.poll(cx)
-        };
-
-        match res {
-            Poll::Ready(Err(_)) => return Poll::Ready(None),
-            Poll::Ready(Ok(_)) => {
-                let nstate = self.rx.borrow().clone();
-                self.nstate = nstate;
-                if let Some(item) = self.next_item() {
-                    return Poll::Ready(Some(item));
-                }
-            },
-            _ => {},
-        }
-        Poll::Pending
     }
 }
 
 impl Clone for Receiver {
-    fn clone(&self) -> Receiver {
-        let state = self.rx.borrow().clone();
+    fn clone(&self) -> Self {
         Receiver {
-            nstate: state.clone(),
-            state,
-            rx: self.rx.clone(),
-            subs: self.subs,
+            tx: self.tx.clone(),
+            rx: self.tx.subscribe(),
         }
     }
 }
@@ -160,37 +72,10 @@ impl Clone for Receiver {
 ///
 /// SIGINT/SIGTERM are forwarded on the bus as notifications.
 pub fn new() -> (Sender, Receiver) {
-    // tokio::watch::channel is SPMC. Front it with a MPSC channel
-    // so that we have, in effect, an MPMC channel.
-    let (notifier_master, watcher) = watch::channel(State::default());
-    let (notifier, mut notifier_receiver) = mpsc::unbounded_channel::<Notification>();
-
-    let sender = Sender { tx: notifier.clone() };
-    let receiver = Receiver {
-        state:  State::default(),
-        nstate: State::default(),
-        subs:   0,
-        rx:     watcher,
-    };
-
-    // forward a message from the MPSC channel to all the watchers.
-    task::spawn(async move {
-        let mut state = State::default();
-        while let Some(notification) = notifier_receiver.recv().await {
-            let i = notification as u32 as usize;
-            if state.0.len() < i + 1 {
-                state.0.resize(i + 1, 0);
-            }
-            state.0[i] += 1;
-            if let Err(_e) = notifier_master.send(state.clone()) {
-                log::error!("bus::broadcast_task: exit");
-                break;
-            }
-        }
-    });
+    let (tx1, rx1) = broadcast::channel(32);
 
     // Forward control-c
-    let tx = notifier.clone();
+    let tx = tx1.clone();
     task::spawn(async move {
         let mut sig_int = signal(SignalKind::interrupt()).unwrap();
         while let Some(_) = sig_int.recv().await {
@@ -200,7 +85,7 @@ pub fn new() -> (Sender, Receiver) {
     });
 
     // Forward SIGTERM
-    let tx = notifier.clone();
+    let tx = tx1.clone();
     task::spawn(async move {
         let mut sig_term = signal(SignalKind::terminate()).unwrap();
         while let Some(_) = sig_term.recv().await {
@@ -210,7 +95,7 @@ pub fn new() -> (Sender, Receiver) {
     });
 
     // Forward SIGHUP
-    let tx = notifier.clone();
+    let tx = tx1.clone();
     task::spawn(async move {
         let mut sig_hup = signal(SignalKind::hangup()).unwrap();
         while let Some(_) = sig_hup.recv().await {
@@ -227,7 +112,7 @@ pub fn new() -> (Sender, Receiver) {
     });
 
     // Forward SIGUSR1
-    let tx = notifier.clone();
+    let tx = tx1.clone();
     task::spawn(async move {
         let mut sig_usr1 = signal(SignalKind::user_defined1()).unwrap();
         while let Some(_) = sig_usr1.recv().await {
@@ -236,5 +121,5 @@ pub fn new() -> (Sender, Receiver) {
         }
     });
 
-    (sender, receiver)
+    (Sender::new(tx1.clone()), Receiver::new(tx1, rx1))
 }

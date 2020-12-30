@@ -6,7 +6,7 @@
 //! Then if a peer connects, we try to find the peers' IP address in the
 //! cache. This way we're not dependent on PTR lookups.
 //!
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
 use std::io;
@@ -114,7 +114,7 @@ mod resolver {
     }
 
     pub async fn lookup_ip(host: &str) -> io::Result<impl Iterator<Item = IpAddr> + '_> {
-        let res = tokio::net::lookup_host(host).await?;
+        let res = tokio::net::lookup_host((host, 0)).await?;
         Ok(res.map(|sa| sa.ip()))
     }
 
@@ -176,22 +176,23 @@ impl HostCache {
         let mut inner = self.inner.lock();
 
         // First empty the list and put all entries in a temp HashMap.
-        let mut hm = HashMap::new();
+        let mut prev = HashMap::new();
         for entry in inner.entries.drain(..) {
-            hm.insert(entry.hostname.clone(), Some(entry));
+            prev.insert(entry.hostname.clone(), entry);
         }
 
-        // Now walk over all configured hostnames, if it's in the
-        // temp hashmap put it back on the list, otherwise add empty entry.
+        // This iterator returns (host, label). We filter out duplicate hostnames.
+        let mut seen = HashSet::new();
         let iter = feeds
             .peers
             .iter()
-            .map(|p| p.accept_from.iter().map(move |h| (h, &p.label)))
-            .flatten();
+            .flat_map(|p| p.accept_from.iter().map(move |h| (h, &p.label)))
+            .filter(|v| seen.insert(v.0));
+
+        // Rebuild inner.entries.
         for (host, label) in iter {
-            match hm.remove(host) {
-                Some(Some(entry)) => inner.entries.push(entry),
-                Some(None) => {},
+            match prev.remove(host) {
+                Some(entry) => inner.entries.push(entry),
                 None => {
                     inner.entries.push(HostEntry {
                         label:      label.to_string(),
@@ -199,7 +200,6 @@ impl HostCache {
                         addrs:      Vec::new(),
                         lastupdate: None,
                     });
-                    hm.insert(host.clone(), None);
                 },
             }
         }
@@ -290,7 +290,7 @@ impl HostCache {
                     continue;
                 }
                 let delay = Duration::from_millis(delay_ms);
-                delay_ms += 2;
+                delay_ms += 10;
 
                 // Run the host lookups in parallel because why not.
                 let task = async move {

@@ -146,9 +146,10 @@ impl Server {
                     for listener in listeners.into_iter() {
                         let server = server.clone();
                         let bus_recv = bus_recv.clone();
+                        let _ = listener.set_nonblocking(true);
                         let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
                             // Never happens.
-                            eprintln!("cannot convert from net2 listener to tokio listener");
+                            eprintln!("cannot convert from std listener to tokio listener");
                             exit(1);
                         });
                         let task = task::spawn(async move {
@@ -169,6 +170,7 @@ impl Server {
     // run the server on the default threaded executor.
     async fn run_threaded(self, listeners: Vec<TcpListener>, bus_recv: bus::Receiver) {
         for listener in listeners.into_iter() {
+            let _ = listener.set_nonblocking(true);
             let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|_| {
                 // Never happens.
                 eprintln!("cannot convert from net2 listener to tokio listener");
@@ -241,6 +243,7 @@ impl Server {
                     TOT_SESSIONS.load(Ordering::SeqCst)
                 );
                 status = Err(ioerr!(Other, "forced exit"));
+                break;
             }
         }
 
@@ -294,15 +297,17 @@ impl Server {
             // set up codec for reader and writer.
             let fdno = socket.as_raw_fd() as u32;
             let codec = NntpCodec::builder(socket)
-                .bus_recv(bus_recv.clone())
                 .read_timeout(nntp_codec::READ_TIMEOUT)
                 .write_timeout(nntp_codec::WRITE_TIMEOUT)
                 .build();
             let stats = RxSessionStats::new(peer.ip(), fdno);
 
             // build and run an nntp session.
-            let session = NntpServer::new(peer, codec, self.clone(), stats);
-            task::spawn(session.run());
+            let session = NntpServer::new(peer, codec, bus_recv.clone(), self.clone(), stats);
+            task::spawn(async move {
+                session.run().await;
+                log::debug!("session.run returned");
+            });
         }
     }
 

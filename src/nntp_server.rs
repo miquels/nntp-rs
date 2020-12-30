@@ -10,9 +10,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use tokio::sync::mpsc;
 
-use crate::bus::Notification;
+use crate::bus::{self, Notification};
 use crate::commands::{Capb, Cmd, CmdParser};
 use crate::config::{self, Config};
 use crate::history::HistStatus;
@@ -27,6 +28,7 @@ use crate::util::{Buffer, UnixTime};
 
 pub struct NntpServer {
     pub codec:                  NntpCodec,
+    pub(crate) bus_recv:        bus::Receiver,
     pub(crate) parser:          CmdParser,
     pub(crate) server:          Server,
     pub(crate) remote:          SocketAddr,
@@ -78,7 +80,7 @@ pub(crate) enum ArtAccept {
 }
 
 impl NntpServer {
-    pub fn new(peer: SocketAddr, codec: NntpCodec, server: Server, stats: RxSessionStats) -> NntpServer {
+    pub fn new(peer: SocketAddr, codec: NntpCodec, bus_recv: bus::Receiver, server: Server, stats: RxSessionStats) -> NntpServer {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();
@@ -89,6 +91,7 @@ impl NntpServer {
 
         NntpServer {
             codec,
+            bus_recv,
             server,
             newsfeeds,
             config,
@@ -123,36 +126,59 @@ impl NntpServer {
             self.on_write_error(e);
             return;
         }
+        let mut quit_asap = false;
 
         //
         // Command loop.
         //
         while !self.quit {
-            let response = match self.codec.read_line().await {
-                Ok(NntpLine::Eof) => break,
-                Ok(NntpLine::Notification(Notification::ExitGraceful)) => {
-                    self.quit = true;
-                    NntpResult::text("400 Server shutting down")
-                },
-                Ok(NntpLine::Notification(_)) => continue,
-                Ok(NntpLine::Line(buf)) => {
-                    match self.cmd(buf).await {
-                        Ok(res) => res,
+            let response = futures::select_biased! {
+                line = self.codec.read_line().fuse() => {
+                    match line {
+                        Ok(NntpLine::Eof) => break,
+                        Ok(NntpLine::Line(buf)) => {
+                            if quit_asap {
+                                self.quit = true;
+                                NntpResult::text("400 Server shutting down")
+                            } else {
+                                match self.cmd(buf).await {
+                                    Ok(res) => res,
+                                    Err(e) => {
+                                        let res = NntpResult::text(format!("400 {}", e));
+                                        self.on_generic_error(e);
+                                        self.quit = true;
+                                        res
+                                    },
+                                }
+                            }
+                        },
                         Err(e) => {
-                            let res = NntpResult::text(format!("400 {}", e));
-                            self.on_generic_error(e);
                             self.quit = true;
-                            res
+                            match self.on_read_error(e) {
+                                Some(msg) => msg,
+                                None => break,
+                            }
                         },
                     }
                 },
-                Err(e) => {
-                    self.quit = true;
-                    match self.on_read_error(e) {
-                        Some(msg) => msg,
-                        None => break,
+                notification = self.bus_recv.recv().fuse() => {
+                    match notification {
+                        Some(Notification::ExitGraceful) => {
+                            if self.codec.input_empty() {
+                                self.quit = true;
+                                NntpResult::text("400 Server shutting down")
+                            } else {
+                                quit_asap = true;
+                                continue;
+                            }
+                        },
+                        Some(Notification::ExitNow) => {
+                            self.quit = true;
+                            break;
+                        },
+                        _ => continue,
                     }
-                },
+                }
             };
             if let Err(e) = self.codec.write_buf(response.data).await {
                 self.on_write_error(e);

@@ -274,7 +274,9 @@ impl Buffer {
             buf
         };
         futures::ready!(reader.poll_read(cx, &mut buf))?;
-        Poll::Ready(Ok(buf.filled().len()))
+        let len = buf.filled().len();
+        unsafe { self.advance_mut(len); }
+        Poll::Ready(Ok(len))
     }
 }
 
