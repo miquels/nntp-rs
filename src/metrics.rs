@@ -138,7 +138,8 @@ pub struct RxSessionStats {
     fdno:           u32,
     connected:      bool,
     // stats
-    instant:        Instant,
+    start:          Instant,
+    lastlog:        Instant,
     pub conn_stats: ConnRecvStats,
     pub peer_stats: Arc<PeerRecvStats>,
 }
@@ -159,7 +160,8 @@ impl RxSessionStats {
             label: "unknown".to_string(),
             fdno: fdno,
             connected: false,
-            instant: Instant::now(),
+            start: Instant::now(),
+            lastlog: Instant::now(),
             conn_stats: ConnRecvStats::default(),
             peer_stats: Arc::new(PeerRecvStats::default()),
         }
@@ -220,7 +222,7 @@ impl RxSessionStats {
 
     pub fn on_disconnect(&mut self) {
         self.log_stats();
-        let elapsed = self.instant.elapsed().as_secs();
+        let elapsed = self.start.elapsed().as_secs();
         log::info!(
             "Disconnect {} from {} {} ({} elapsed)",
             self.fdno,
@@ -237,7 +239,7 @@ impl RxSessionStats {
         }
 
         // reset connection stats.
-        self.instant = Instant::now();
+        self.lastlog = Instant::now();
         self.conn_stats = ConnRecvStats::default();
     }
 
@@ -249,7 +251,7 @@ impl RxSessionStats {
             nuse = self.conn_stats.received;
         }
 
-        let elapsed = self.instant.elapsed().as_millis() as u64;
+        let elapsed = self.lastlog.elapsed().as_millis() as u64;
         let rate = format_rate(elapsed, nuse);
 
         log::info!("Stats {} secs={:.1} ihave={} chk={} takethis={} rec={} acc={} ref={} precom={} postcom={} his={} badmsgid={} ifilthash={} rej={} ctl={} spam={} err={} recbytes={} accbytes={} rejbytes={} ({})",
