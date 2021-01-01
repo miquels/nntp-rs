@@ -8,7 +8,6 @@
 
 ### General
 - add periodic timer infra for hist expire etc
-- detect changed config and reload (note: included files as well)
 
 ### Active file
 - keep active file
@@ -57,8 +56,6 @@
 - refactor xclient support.
 
 ### Outgoing
-- don't start outgoing feed (or queue!) until first article
-- close feed itself after idle?
 - keep "average pending" stats and log actual avpend instead of "1"
 - "drop-deferred-large", "no-backlog-large", "feed-delay-large" settings
   that only trigger for articles > N KB (100 KB?)
@@ -66,9 +63,6 @@
 
 ### Stats
 - http access ?
-
-### Logger
-- for syslog logging, do not re-initialize the syslogger every log line.
 
 ### Other
 
@@ -87,6 +81,9 @@
 
 DONE:
 
+### General
+- detect changed config and reload (note: included files as well)
+
 ### Spool
 
 - implement diablo spool expire
@@ -104,6 +101,8 @@ DONE:
 - implement drop-deferred
 - implement precomreject (as dont-defer)
 - implement delayfeed
+- don't start outgoing feed (or queue!) until first article
+- close feed itself after idle?
 
 ### Stats
 - keep global stats per peer
@@ -113,4 +112,7 @@ DONE:
 - add "$label" variable that can be used in hostname / inhost / etc
 - make label itself meta, bash like, for example: nzspool{1..7}.xs4all.net? (no)
 - templates
+
+### Logger
+- for syslog logging, do not re-initialize the syslogger every log line.
 
