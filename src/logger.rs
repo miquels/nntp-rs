@@ -90,6 +90,138 @@ struct FileData {
     when:    UnixTime,
 }
 
+impl FileData {
+    fn open(name: impl Into<String>, config: &Config) -> io::Result<FileData> {
+        let name = name.into();
+        let curname = config::expand_path(&config.paths, &name);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(&curname)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
+        let ino = file.metadata()?.ino();
+        let file = io::BufWriter::new(file);
+        let when = UnixTime::coarse();
+        Ok(FileData {
+            file,
+            name,
+            curname,
+            ino,
+            when,
+        })
+    }
+
+    fn check_reopen(&mut self) -> io::Result<()> {
+        // max once a second.
+        let now = UnixTime::coarse();
+        let when = self.when;
+        self.when = now.clone();
+        if now.as_secs() <= when.as_secs() {
+            return Ok(());
+        }
+
+        // flush buffer.
+        let _ = self.file.flush();
+
+        // First check if the filename has a date in it, and that date changed.
+        let mut do_reopen = false;
+        if self.name.contains("${date}") {
+            let config = config::get_config();
+            let curname = config::expand_path(&config.paths, &self.name);
+            if curname != self.curname {
+                do_reopen = true;
+            }
+        }
+
+        // Might not have changed, but see if file was renamed/moved.
+        if !do_reopen {
+            do_reopen = match fs::metadata(&self.curname) {
+                Ok(m) => m.ino() != self.ino,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+                Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {}", self.curname, e))),
+            };
+        }
+
+        if do_reopen {
+            let config = config::get_config();
+            *self = FileData::open(&self.name, &config)?;
+        }
+        Ok(())
+    }
+
+    fn log_line(&mut self, is_log: bool, _level: log::Level, line: String) {
+        if let Err(e) = self.check_reopen() {
+            if !is_log {
+                log::error!("{}", e);
+            }
+        }
+        let dt = self.when.datetime_local();
+        let t = format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            dt.timestamp_subsec_millis()
+        );
+        let _ = write!(self.file, "{} {}\n", t, line);
+    }
+
+    fn flush(&mut self) {
+        let _ = self.file.flush();
+    }
+}
+
+struct SyslogData {
+    logger: syslog::Logger<syslog::LoggerBackend, syslog::Formatter3164>,
+}
+
+impl SyslogData {
+    fn open() -> io::Result<SyslogData> {
+        let formatter = syslog::Formatter3164 {
+            facility: syslog::Facility::LOG_NEWS,
+            hostname: None,
+            process:  "nntp-rs-server".to_string(),
+            pid:      util::getpid() as i32,
+        };
+        let logger = syslog::unix(formatter).map_err(|e| {
+            let kind = match e.kind() {
+                syslog::ErrorKind::Io(ref e) => e.kind(),
+                _ => io::ErrorKind::Other,
+            };
+            ioerr!(kind, "{}", e)
+        })?;
+        Ok(SyslogData{ logger })
+    }
+
+    fn log_line(&mut self, _is_log: bool, level: log::Level, line: String) {
+        if match level {
+            log::Level::Error => self.logger.err(&line),
+            log::Level::Warn => self.logger.warning(&line),
+            log::Level::Info => self.logger.info(&line),
+            log::Level::Debug => self.logger.debug(&line),
+            log::Level::Trace => return,
+        }.is_ok() {
+            return;
+        }
+        // The syslog crate appears to not re-open the socket if it fails,
+        // so retry here, once.
+        if let Ok(nlogger) = Self::open() {
+            *self = nlogger;
+            let _ = match level {
+                log::Level::Error => self.logger.err(&line),
+                log::Level::Warn => self.logger.warning(&line),
+                log::Level::Info => self.logger.info(&line),
+                log::Level::Debug => self.logger.debug(&line),
+                log::Level::Trace => return,
+            };
+        }
+    }
+}
+
 // Type of log.
 enum LogDest {
     Stdout,
@@ -99,6 +231,8 @@ enum LogDest {
     Null,
     #[doc(hidden)]
     FileData(FileData),
+    #[doc(hidden)]
+    SyslogData(SyslogData),
 }
 
 // Message sent over the channel to the logging thread.
@@ -135,7 +269,7 @@ impl Logger {
                 channel::select! {
                     recv(ticker) -> _ => {
                         // every second, check.
-                        if let Err(e) = dest.check() {
+                        if let Err(e) = dest.check_reopen() {
                             if !is_log {
                                 log::error!("{}", e);
                             }
@@ -232,7 +366,7 @@ impl LogDest {
     // Log a "log" crate record to the destination.
     fn log_record(&mut self, is_log: bool, r: (log::Level, String, String)) {
         match self {
-            LogDest::Syslog => {
+            LogDest::SyslogData(_) => {
                 // Do not add [target] for info level messages.
                 let line = match r.0 {
                     log::Level::Info => r.2,
@@ -249,54 +383,21 @@ impl LogDest {
             LogDest::File(_) => {
                 unreachable!();
             },
+            LogDest::Syslog => {
+                unreachable!();
+            },
             LogDest::Null => {},
         }
     }
 
     // Log a simple line to the destination.
     fn log_line(&mut self, is_log: bool, level: log::Level, line: String) {
-        if let Err(e) = self.check() {
-            if !is_log {
-                log::error!("{}", e);
-            }
-        }
-
         match self {
-            LogDest::Syslog => {
-                let formatter = syslog::Formatter3164 {
-                    facility: syslog::Facility::LOG_NEWS,
-                    hostname: None,
-                    process:  "nntp-rs-server".to_string(),
-                    pid:      util::getpid() as i32,
-                };
-                match syslog::unix(formatter) {
-                    Err(_) => {},
-                    Ok(mut writer) => {
-                        match level {
-                            log::Level::Error => writer.err(line).ok(),
-                            log::Level::Warn => writer.warning(line).ok(),
-                            log::Level::Info => writer.info(line).ok(),
-                            log::Level::Debug => writer.debug(line).ok(),
-                            log::Level::Trace => None,
-                        };
-                    },
-                }
+            LogDest::SyslogData(ref mut sd) => {
+                sd.log_line(is_log, level, line);
             },
-            LogDest::FileData(FileData {
-                ref mut file, when, ..
-            }) => {
-                let dt = when.datetime_local();
-                let t = format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                    dt.year(),
-                    dt.month(),
-                    dt.day(),
-                    dt.hour(),
-                    dt.minute(),
-                    dt.second(),
-                    dt.timestamp_subsec_millis()
-                );
-                let _ = write!(file, "{} {}\n", t, line);
+            LogDest::FileData(ref mut fd) => {
+                fd.log_line(is_log, level, line);
             },
             LogDest::Stdout => {
                 let _ = println!("{}", line);
@@ -307,15 +408,16 @@ impl LogDest {
             LogDest::File(_) => {
                 unreachable!();
             },
+            LogDest::Syslog => {
+                unreachable!();
+            },
             LogDest::Null => {},
         }
     }
 
     fn log_flush(&mut self) {
         match self {
-            LogDest::FileData(FileData { ref mut file, .. }) => {
-                let _ = file.flush();
-            },
+            LogDest::FileData(ref mut fd) => fd.flush(),
             _ => {},
         }
     }
@@ -325,75 +427,28 @@ impl LogDest {
         let d = match dest {
             LogDest::Stdout => LogDest::Stdout,
             LogDest::Stderr => LogDest::Stderr,
-            LogDest::Syslog => LogDest::Syslog,
-            LogDest::FileData(_) => unreachable!(),
             LogDest::Null => LogDest::Null,
             LogDest::File(name) => {
-                let curname = config::expand_path(&config.paths, &name);
-                let file = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .append(true)
-                    .open(&curname)
-                    .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", curname, e)))?;
-                let ino = file.metadata()?.ino();
-                let file = io::BufWriter::new(file);
-                let when = UnixTime::coarse();
-                LogDest::FileData(FileData {
-                    file,
-                    name,
-                    curname,
-                    ino,
-                    when,
-                })
+                let fd = FileData::open(name, config)?;
+                LogDest::FileData(fd)
             },
+            LogDest::FileData(_) => unreachable!(),
+            LogDest::Syslog => {
+                let sd = SyslogData::open()?;
+                LogDest::SyslogData(sd)
+            },
+            LogDest::SyslogData(_) => unreachable!(),
         };
         Ok(d)
     }
 
     // check if we need to reopen the logfile.
-    fn check(&mut self) -> io::Result<()> {
+    fn check_reopen(&mut self) -> io::Result<()> {
         // only if we're the FileData variant.
-        let mut fd = match self {
-            &mut LogDest::FileData(ref mut fd) => fd,
-            _ => return Ok(()),
-        };
-        // max once a second.
-        let now = UnixTime::coarse();
-        let when = fd.when;
-        fd.when = now.clone();
-        if now.as_secs() <= when.as_secs() {
-            return Ok(());
+        match self {
+            &mut LogDest::FileData(ref mut fd) => fd.check_reopen(),
+            _ => Ok(()),
         }
-
-        // flush buffer.
-        let _ = fd.file.flush();
-
-        // First check if the filename has a date in it, and that date changed.
-        let mut do_reopen = false;
-        if fd.name.contains("${date}") {
-            let config = config::get_config();
-            let curname = config::expand_path(&config.paths, &fd.name);
-            if curname != fd.curname {
-                do_reopen = true;
-            }
-        }
-
-        // Might not have changed, but see if file was renamed/moved.
-        if !do_reopen {
-            do_reopen = match fs::metadata(&fd.curname) {
-                Ok(m) => m.ino() != fd.ino,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => true,
-                Err(e) => return Err(io::Error::new(e.kind(), format!("{}: {}", fd.curname, e))),
-            };
-        }
-
-        if do_reopen {
-            let name = fd.name.clone();
-            let config = config::get_config();
-            *self = LogDest::open(LogDest::File(name), &config)?;
-        }
-        Ok(())
     }
 }
 
@@ -404,7 +459,7 @@ impl LogTarget {
             "" | "null" | "/dev/null" => LogDest::Null,
             "stdout" => LogDest::Stdout,
             "stderr" => LogDest::Stderr,
-            "syslog" => LogDest::Syslog,
+            "syslog" => LogDest::open(LogDest::Syslog, cfg)?,
             name => LogDest::open(LogDest::File(name.to_string()), cfg)?,
         };
         Ok(LogTarget { dest })
