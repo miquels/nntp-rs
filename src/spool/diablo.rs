@@ -16,7 +16,6 @@
 //! - article length (32 bits)
 //!
 use std::collections::VecDeque;
-use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs;
 use std::io;
@@ -28,10 +27,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use bytemuck::{Pod, Zeroable};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use regex::Regex;
-use typic::{self, stability::StableABI, transmute::StableTransmuteInto};
 
 use super::{ArtLoc, ArtPart, Backend, MetaSpool, SpoolArt, SpoolBackend, SpoolDef};
 use crate::util::byteorder::*;
@@ -87,8 +86,8 @@ struct Writer {
 //
 // a complete article ends in CRLF DOT CRLF
 //
-#[typic::repr(C)]
-#[derive(Debug, Default, StableABI)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Zeroable, Pod)]
 #[rustfmt::skip]
 struct DArtHead {
     magic1:     u8,     // 0xff
@@ -107,33 +106,19 @@ struct DArtHead {
     _unused5:   u8,
     _unused6:   u8,
 }
-const DARTHEAD_SIZE: usize = 24;
 
 impl DArtHead {
-    pub fn from_bytes(src: [u8; DARTHEAD_SIZE]) -> DArtHead {
-        DArtHead {
-            magic1:     src[0],
-            magic2:     src[1],
-            version:    src[2],
-            head_len:   src[3],
-            store_type: src[4],
-            _unused1:   src[5],
-            _unused2:   src[6],
-            _unused3:   src[7],
-            arthdr_len: u32::from_ne_bytes(src[8..12].try_into().unwrap()),
-            art_len:    u32::from_ne_bytes(src[12..16].try_into().unwrap()),
-            store_len:  u32::from_ne_bytes(src[16..20].try_into().unwrap()),
-            hdr_end:    src[20],
-            _unused4:   src[21],
-            _unused5:   src[22],
-            _unused6:   src[23],
-        }
+    const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn as_mut_bytes(&mut self) -> &mut [u8; Self::SIZE] {
+        bytemuck::cast_mut(self)
     }
 
-    pub fn to_bytes(self) -> [u8; DARTHEAD_SIZE] {
-        self.transmute_into()
+    pub fn as_bytes(&self) -> &[u8; Self::SIZE] {
+        bytemuck::cast_ref(self)
     }
 }
+static_assertions::const_assert!(DArtHead::SIZE == 24);
 
 // article location, this struct is serialized/deserialized
 // in the entry for this article in the history file.
@@ -169,15 +154,16 @@ fn from_location(loc: DArtLocation) -> ([u8; 16], u8) {
 }
 
 fn read_darthead_at<N: Debug>(path: N, file: &fs::File, pos: u64) -> io::Result<DArtHead> {
-    let mut buf = [0u8; DARTHEAD_SIZE];
-    let n = file.read_at(&mut buf, pos)?;
-    if n != DARTHEAD_SIZE {
+    let mut darthead = DArtHead::zeroed();
+    let bytes = darthead.as_mut_bytes();
+    let n = file.read_at(bytes, pos)?;
+    if n != DArtHead::SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{:?}: short read", path),
         ));
     }
-    Ok(DArtHead::from_bytes(buf))
+    Ok(darthead)
 }
 
 fn article_readahead(part: &ArtPart, loc: &DArtLocation, file: &fs::File) {
@@ -327,8 +313,8 @@ impl DSpool {
                 "invalid art_len or arthdr_len",
             ));
         }
-        if dh.art_len + DARTHEAD_SIZE as u32 > dh.store_len {
-            log::warn!("read({:?}): art_len + DARTHEAD_SIZE > store_len", dh);
+        if dh.art_len + DArtHead::SIZE as u32 > dh.store_len {
+            log::warn!("read({:?}): art_len + DArtHead::SIZE > store_len", dh);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid art_len or store_len",
@@ -371,9 +357,9 @@ impl DSpool {
                     body_size,
                 });
             },
-            ArtPart::Head => (loc.pos + DARTHEAD_SIZE as u32, head.arthdr_len),
-            ArtPart::Article => (loc.pos + DARTHEAD_SIZE as u32, head.art_len),
-            ArtPart::Body => (loc.pos + DARTHEAD_SIZE as u32 + body_off, head.art_len - body_off),
+            ArtPart::Head => (loc.pos + DArtHead::SIZE as u32, head.arthdr_len),
+            ArtPart::Article => (loc.pos + DArtHead::SIZE as u32, head.art_len),
+            ArtPart::Body => (loc.pos + DArtHead::SIZE as u32 + body_off, head.art_len - body_off),
         };
         file.seek(SeekFrom::Start(start as u64))?;
 
@@ -565,22 +551,22 @@ impl DSpool {
         // XXX should we store the filelength instead of fstat()'ing every time?
         let meta = fh.metadata()?;
         let pos = meta.len();
-        let store_len = (DARTHEAD_SIZE + art_len + 1) as u32;
+        let store_len = (DArtHead::SIZE + art_len + 1) as u32;
 
         // build header.
         let mut ah = DArtHead::default();
         ah.magic1 = 0xff;
         ah.magic2 = 0x99;
         ah.version = 1;
-        ah.head_len = DARTHEAD_SIZE as u8;
+        ah.head_len = DArtHead::SIZE as u8;
         ah.store_type = 4;
         ah.arthdr_len = hdr_len as u32;
         ah.art_len = art_len as u32;
         ah.store_len = store_len;
-        let buf: [u8; DARTHEAD_SIZE] = ah.to_bytes();
+        let bytes = ah.as_bytes();
 
         // write header, article, trailing \0.
-        fh.write_all(&buf)
+        fh.write_all(bytes)
             .and_then(|_| headers.write_all(&mut fh))
             .and_then(|_| body.write_all(&mut fh))
             .and_then(|_| fh.write(b"\0"))

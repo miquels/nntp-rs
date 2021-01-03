@@ -1,8 +1,8 @@
-use typic::{self, stability::StableABI};
+use bytemuck::{Pod, Zeroable};
 
 /// Diablo CRC64 hash.
-#[typic::repr(C)]
-#[derive(Clone, Debug, Default, PartialEq, StableABI)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Zeroable, Pod)]
 pub struct DHash {
     pub h1: u32,
     pub h2: u32,

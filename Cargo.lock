@@ -115,6 +115,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e8c087f005730276d1096a652e92a8bacee2e2472bcc9715a74d2bec38b5820"
 
 [[package]]
+name = "bytemuck"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41aa2ec95ca3b5c54cf73c91acf06d24f4495d5f1b1c12506ae3483d646177ac"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e215f8c2f9f79cb53c8335e687ffd07d5bfcb6fe5fc80723762d0be46e7cc54"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -572,15 +592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "generic-array"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ed1e761351b56f54eb9dcd0cfaca9fd0daecf93918e1cfc01c8a3d26ee7adcd"
-dependencies = [
- "typenum",
-]
-
-[[package]]
 name = "getrandom"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -629,12 +640,6 @@ checksum = "df004cfca50ef23c36850aaaa59ad52cc70d0e90243c3c7737a4dd32dc7a3c4f"
 dependencies = [
  "quick-error",
 ]
-
-[[package]]
-name = "if_chain"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f7280c75fb2e2fc47080ec80ccc481376923acb04501957fc38f935c3de5088"
 
 [[package]]
 name = "instant"
@@ -841,6 +846,7 @@ dependencies = [
  "arc-swap",
  "array-init",
  "async-channel",
+ "bytemuck",
  "bytes",
  "chrono",
  "clap",
@@ -875,11 +881,11 @@ dependencies = [
  "smallvec",
  "smartstring",
  "socket2",
+ "static_assertions",
  "structopt",
  "syslog",
  "tokio",
  "tokio-stream",
- "typic",
  "users",
 ]
 
@@ -1455,35 +1461,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "typenum"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373c8a200f9e67a0c95e62a4f52fbf80c23b4381c05a17845531982fa99e6b33"
-
-[[package]]
-name = "typic"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ad3418cc955ce5a0c5e21b3527bf7911f5de36eb684726bf8599cd4a25830dc"
-dependencies = [
- "generic-array",
- "typenum",
- "typic-derive",
-]
-
-[[package]]
-name = "typic-derive"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e04c066c6f508556f70adb82c90c644a9b19f7a43835f3326428790214c6405"
-dependencies = [
- "if_chain",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
