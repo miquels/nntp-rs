@@ -279,6 +279,7 @@ impl PeerFeed {
                     // those to the backlog queue as well.
                     if !exiting {
                         let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                        queue_only = true;
                         exiting = true;
                     }
                     masterfeed_eof = true;
@@ -288,6 +289,7 @@ impl PeerFeed {
                     // until all of them are gone.
                     if !exiting {
                         let _ = self.broadcast.send(PeerFeedItem::ExitGraceful);
+                        queue_only = true;
                         exiting = true;
                     }
                 },
@@ -295,6 +297,7 @@ impl PeerFeed {
                     // last call. we dont exit yet, if a connection is hanging,
                     // let's wait for it as long as possible. that's what the
                     // timeout in the main loop is _for_, right.
+                    queue_only = true;
                     exiting = true;
                     masterfeed_eof = true;
                     let _ = self.broadcast.send(PeerFeedItem::ExitNow);
