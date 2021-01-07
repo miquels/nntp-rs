@@ -160,8 +160,7 @@ impl History {
         lock_mode: MLockMode,
         threads: Option<usize>,
         bt: BlockingType,
-    ) -> io::Result<History>
-    {
+    ) -> io::Result<History> {
         let h: Box<dyn HistBackend> = match tp {
             "diablo" => Box::new(diablo::DHistory::open(path.as_ref(), rw, lock_mode, threads, bt)?),
             "memdb" => Box::new(memdb::MemDb::new()),
@@ -182,8 +181,7 @@ impl History {
         remember: Duration,
         no_rename: bool,
         force: bool,
-    ) -> io::Result<()>
-    {
+    ) -> io::Result<()> {
         let remember = if remember.as_secs() == 0 {
             log::warn!("history:: expire: remember not set, defaulting to 1d");
             86400
@@ -371,7 +369,15 @@ pub(crate) mod tests {
     }
 
     async fn test_simple_async() -> Result<Option<HistEnt>, io::Error> {
-        let h = History::open("memdb", "[memdb]", true, MLockMode::None, None, BlockingType::Blocking).unwrap();
+        let h = History::open(
+            "memdb",
+            "[memdb]",
+            true,
+            MLockMode::None,
+            None,
+            BlockingType::Blocking,
+        )
+        .unwrap();
         let he = HistEnt {
             status:    HistStatus::Tentative,
             time:      crate::util::UnixTime::now(),

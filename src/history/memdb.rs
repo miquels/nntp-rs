@@ -49,8 +49,7 @@ impl MemDb {
         _remember: u64,
         _no_rename: bool,
         _force: bool,
-    ) -> io::Result<()>
-    {
+    ) -> io::Result<()> {
         Ok(())
     }
 
@@ -64,8 +63,7 @@ impl HistBackend for MemDb {
     fn lookup<'a>(
         &'a self,
         msgid: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>> {
         Box::pin(self.do_lookup(msgid))
     }
 
@@ -74,8 +72,7 @@ impl HistBackend for MemDb {
         &'a self,
         msgid: &'a [u8],
         he: &'a HistEnt,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_store(msgid, he))
     }
 
@@ -86,8 +83,7 @@ impl HistBackend for MemDb {
         remember: u64,
         no_rename: bool,
         force: bool,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_expire(spool.clone(), remember, no_rename, force))
     }
 
@@ -95,8 +91,7 @@ impl HistBackend for MemDb {
     fn inspect<'a>(
         &'a self,
         spool: &'a spool::Spool,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_inspect(spool.clone()))
     }
 }

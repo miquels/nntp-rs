@@ -108,8 +108,7 @@ impl Server {
         mcfg: &MultiSingle,
         mut listener_sets: TcpListenerSets,
         bus_recv: bus::Receiver,
-    )
-    {
+    ) {
         let core_ids = mcfg
             .core_ids
             .as_ref()
@@ -265,7 +264,6 @@ impl Server {
 
     // This is run for every TCP listener socket.
     async fn run(self, listener: tokio::net::TcpListener, mut bus_recv: bus::Receiver) {
-
         // Run the listener and the bus futures in a loop.
         loop {
             let socket = futures::select_biased! {

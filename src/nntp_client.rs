@@ -25,8 +25,7 @@ pub async fn nntp_connect(
     sendbuf_size: Option<usize>,
     congestion_control: Option<CongestionControl>,
     max_pacing_rate: Option<u32>,
-) -> io::Result<(NntpCodec, IpAddr, String)>
-{
+) -> io::Result<(NntpCodec, IpAddr, String)> {
     use rand::seq::SliceRandom;
 
     // A lookup of the hostname might return multiple addresses.
@@ -110,7 +109,9 @@ pub async fn nntp_connect(
             }
 
             // Set tcp_nodelay.
-            socket.set_nodelay(true).map_err(|e| ioerr!(e.kind(), "set_nodelay: {}", e))?;
+            socket
+                .set_nodelay(true)
+                .map_err(|e| ioerr!(e.kind(), "set_nodelay: {}", e))?;
 
             // Create codec from socket.
             let mut codec = NntpCodec::builder(socket)

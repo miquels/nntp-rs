@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use tokio_stream::StreamExt;
 use tokio::task;
 use tokio::time::sleep;
+use tokio_stream::StreamExt;
 
 use crate::bus::{self, Notification};
 use crate::newsfeeds::NewsFeeds;
@@ -31,9 +31,9 @@ static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
 #[cfg(feature = "trust-dns-resolver")]
 mod resolver {
     use std::io;
+    use std::net::IpAddr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
-    use std::net::IpAddr;
 
     use once_cell::sync::Lazy;
     use parking_lot::Mutex;
@@ -61,7 +61,9 @@ mod resolver {
         opts.edns0 = true;
         opts.use_hosts_file = true;
         opts.ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
-        let resolver = TokioAsyncResolver::tokio(config, opts).await.map_err(to_io_error)?;
+        let resolver = TokioAsyncResolver::tokio(config, opts)
+            .await
+            .map_err(to_io_error)?;
         RESOLVER_OPT.lock().replace(resolver);
         Ok(())
     }
@@ -77,15 +79,17 @@ mod resolver {
     pub async fn reverse_lookup(ipaddr: IpAddr) -> io::Result<String> {
         let res = RESOLVER.reverse_lookup(ipaddr).await;
         match res {
-            Ok(a) => match a.iter().next().map(|name| name.to_utf8()) {
-                Some(mut name) => {
-                    // reverse lookup might return hostname terminated with a '.'.
-                    if name.ends_with(".") {
-                        name.pop();
-                    }
-                    Ok(name)
-                },
-                None => Err(ioerr!(NotFound, "host not found")),
+            Ok(a) => {
+                match a.iter().next().map(|name| name.to_utf8()) {
+                    Some(mut name) => {
+                        // reverse lookup might return hostname terminated with a '.'.
+                        if name.ends_with(".") {
+                            name.pop();
+                        }
+                        Ok(name)
+                    },
+                    None => Err(ioerr!(NotFound, "host not found")),
+                }
             },
             Err(e) => Err(to_io_error(e)),
         }
@@ -95,7 +99,7 @@ mod resolver {
         match e.kind() {
             ResolveErrorKind::Message(m) => ioerr!(Other, "{}", m),
             ResolveErrorKind::Msg(m) => ioerr!(Other, "{}", m),
-            ResolveErrorKind::NoRecordsFound{ .. } => ioerr!(NotFound, "{}", e),
+            ResolveErrorKind::NoRecordsFound { .. } => ioerr!(NotFound, "{}", e),
             ResolveErrorKind::Io(err) => ioerr!(err.kind(), "{}", err),
             ResolveErrorKind::Proto(err) => ioerr!(Other, "{}", err),
             ResolveErrorKind::Timeout => ioerr!(TimedOut, "{}", e),
@@ -119,9 +123,7 @@ mod resolver {
     }
 
     pub async fn reverse_lookup(ipaddr: IpAddr) -> io::Result<String> {
-        let res = task::spawn_blocking(move || {
-            dns_lookup::lookup_addr(&ipaddr)
-        }).await;
+        let res = task::spawn_blocking(move || dns_lookup::lookup_addr(&ipaddr)).await;
         match res {
             Ok(res) => res,
             Err(e) => Err(ioerr!(Other, "{}", e)),

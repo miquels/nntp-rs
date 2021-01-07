@@ -359,7 +359,12 @@ impl DSpool {
             },
             ArtPart::Head => (loc.pos + DArtHead::SIZE as u32, head.arthdr_len),
             ArtPart::Article => (loc.pos + DArtHead::SIZE as u32, head.art_len),
-            ArtPart::Body => (loc.pos + DArtHead::SIZE as u32 + body_off, head.art_len - body_off),
+            ArtPart::Body => {
+                (
+                    loc.pos + DArtHead::SIZE as u32 + body_off,
+                    head.art_len - body_off,
+                )
+            },
         };
         file.seek(SeekFrom::Start(start as u64))?;
 
@@ -918,4 +923,3 @@ fn to_wireformat(inbuf: Buffer) -> Buffer {
     outbuf.extend_from_slice(b".\r\n");
     outbuf
 }
-

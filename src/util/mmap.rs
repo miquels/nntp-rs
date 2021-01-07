@@ -33,8 +33,7 @@ impl MmapAtomicU32 {
         lock: bool,
         offset: u64,
         num_elems: usize,
-    ) -> io::Result<MmapAtomicU32>
-    {
+    ) -> io::Result<MmapAtomicU32> {
         let mut opts = MmapOptions::new();
         let len = num_elems * 4;
         Ok(if rw {

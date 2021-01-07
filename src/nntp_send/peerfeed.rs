@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use futures::future::FutureExt;
 use smartstring::alias::String as SmartString;
-use tokio_stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
 use tokio::time::Instant;
+use tokio_stream::StreamExt;
 
 use crate::config;
 use crate::server;

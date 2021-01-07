@@ -88,8 +88,7 @@ impl DHistory {
         lock_mode: MLockMode,
         threads: Option<usize>,
         bt: BlockingType,
-    ) -> io::Result<DHistory>
-    {
+    ) -> io::Result<DHistory> {
         let inner = DHistoryInner::open(path, rw, lock_mode)?;
         Ok(DHistory {
             inner:         ArcSwap::from(Arc::new(inner)),
@@ -143,8 +142,7 @@ impl DHistory {
         remember: u64,
         no_rename: bool,
         force: bool,
-    ) -> io::Result<()>
-    {
+    ) -> io::Result<()> {
         let inner = self.inner.load().clone();
 
         let new_inner = self
@@ -271,8 +269,7 @@ impl HistBackend for DHistory {
     fn lookup<'a>(
         &'a self,
         msgid: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<HistEnt>> + Send + 'a>> {
         Box::pin(self.do_lookup(msgid))
     }
 
@@ -281,8 +278,7 @@ impl HistBackend for DHistory {
         &'a self,
         msgid: &'a [u8],
         he: &'a HistEnt,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_store(msgid, he))
     }
 
@@ -293,8 +289,7 @@ impl HistBackend for DHistory {
         remember: u64,
         no_rename: bool,
         force: bool,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_expire(spool.clone(), remember, no_rename, force))
     }
 
@@ -302,8 +297,7 @@ impl HistBackend for DHistory {
     fn inspect<'a>(
         &'a self,
         spool: &'a spool::Spool,
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>
-    {
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
         Box::pin(self.do_inspect(spool.clone()))
     }
 }
@@ -471,8 +465,7 @@ impl DHistoryInner {
         spool_oldest: &HashMap<u8, UnixTime>,
         remember: u64,
         round: u32,
-    ) -> io::Result<u64>
-    {
+    ) -> io::Result<u64> {
         let round_name = if round > 0 {
             format!("round {}", round)
         } else {
@@ -603,8 +596,7 @@ impl DHistoryInner {
         remember: u64,
         no_rename: bool,
         force: bool,
-    ) -> io::Result<Option<Arc<DHistoryInner>>>
-    {
+    ) -> io::Result<Option<Arc<DHistoryInner>>> {
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !force && !self.need_expire(&spool_oldest) {

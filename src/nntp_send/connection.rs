@@ -19,9 +19,9 @@ use std::time::Duration;
 use futures::future::FutureExt;
 use futures::sink::{Sink, SinkExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_stream::{Stream, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
+use tokio_stream::{Stream, StreamExt};
 
 use crate::article::{HeaderName, HeadersParser};
 use crate::metrics::TxSessionStats;
@@ -65,42 +65,42 @@ const DEFER_MAX_QUEUE: usize = 1000;
 //
 pub(super) struct Connection {
     // Unique identifier.
-    id:           u64,
+    id:                 u64,
     // IP address we're connected to.
-    ipaddr:       IpAddr,
+    ipaddr:             IpAddr,
     // Peer info.
-    newspeer:     Arc<Peer>,
+    newspeer:           Arc<Peer>,
     // reader / writer.
-    reader:       NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
-    writer:       NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
+    reader:             NntpCodec<Box<dyn AsyncRead + Send + Unpin>>,
+    writer:             NntpCodec<Box<dyn AsyncWrite + Send + Unpin>>,
     // Local items waiting to be sent (check -> takethis transition)
-    send_queue:   VecDeque<ConnItem>,
+    send_queue:         VecDeque<ConnItem>,
     // Sent items, waiting for a reply.
-    recv_queue:   VecDeque<ConnItem>,
+    recv_queue:         VecDeque<ConnItem>,
     // Dropped items to be pushed onto the backlog.
-    dropped:      Vec<ConnItem>,
+    dropped:            Vec<ConnItem>,
     // Stats
-    stats:        TxSessionStats,
+    stats:              TxSessionStats,
     // Spool.
-    spool:        Spool,
+    spool:              Spool,
     // channel to send information to the PeerFeed.
-    tx_chan:      mpsc::Sender<PeerFeedItem>,
+    tx_chan:            mpsc::Sender<PeerFeedItem>,
     // article queue.
-    rx_queue:     mpmc::Receiver<PeerArticle>,
+    rx_queue:           mpmc::Receiver<PeerArticle>,
     // deferred article queue.
-    deferred:     DeferredQueue,
+    deferred:           DeferredQueue,
     // broadcast channel to receive notifications from the PeerFeed.
-    broadcast:    broadcast::Receiver<PeerFeedItem>,
+    broadcast:          broadcast::Receiver<PeerFeedItem>,
     // do we need to rewrite the headers?
-    rewrite:      bool,
+    rewrite:            bool,
     // Backlog.
-    queue:        Queue,
-    qitems:       Option<QItems>,
+    queue:              Queue,
+    qitems:             Option<QItems>,
     // Idle counter, incremented every 10 secs.
-    idle_counter: u32,
+    idle_counter:       u32,
     // State.
     processing_backlog: bool,
-    quitting:     bool,
+    quitting:           bool,
 }
 
 impl Connection {
@@ -117,8 +117,7 @@ impl Connection {
         broadcast: broadcast::Sender<PeerFeedItem>,
         spool: Spool,
         queue: Queue,
-    ) -> io::Result<Connection>
-    {
+    ) -> io::Result<Connection> {
         let mut broadcast_rx = broadcast.subscribe();
         let mut do_delay = false;
 
@@ -280,7 +279,6 @@ impl Connection {
     }
 
     async fn fill_send_queue(&mut self) -> bool {
-
         let maxstream = self.newspeer.maxstream as usize;
         let label = &self.newspeer.label;
 
@@ -290,8 +288,7 @@ impl Connection {
         }
 
         // Try to add up to 'maxstream' items to the send_queue.
-        for _ in 0 .. maxstream {
-
+        for _ in 0..maxstream {
             if self.processing_backlog && queue_len == 0 {
                 if self.qitems.as_ref().map(|q| q.len()).unwrap_or(0) == 0 {
                     log::trace!("Connection::feed: {}:{}: backlog run done", label, self.id);
@@ -359,7 +356,6 @@ impl Connection {
 
     // Feeder loop.
     async fn feed(&mut self) -> io::Result<()> {
-
         let maxstream = std::cmp::max(1, self.newspeer.maxstream) as usize;
         let part = if self.newspeer.headfeed {
             ArtPart::Head
@@ -369,16 +365,14 @@ impl Connection {
         let mut interval = tokio::time::interval(Duration::new(10, 0));
 
         loop {
-
             // fill up the send queue.
             self.fill_send_queue().await;
 
             // Take requests from the send queue and actually send them.
             while self.recv_queue.len() < maxstream && self.send_queue.len() > 0 {
-
                 let mut item = self.send_queue.pop_front().unwrap();
                 let label = &self.newspeer.label;
-                log::trace!( "Connection::feed: {}:{}: sending {:?}", label, self.id, item);
+                log::trace!("Connection::feed: {}:{}: sending {:?}", label, self.id, item);
 
                 if !self.transmit_item(&mut item, part).await? {
                     // skip article, it was not present in the spool.

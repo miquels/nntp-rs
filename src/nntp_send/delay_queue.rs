@@ -5,9 +5,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio_stream::Stream;
-use tokio::time::{Sleep, sleep};
+use tokio::time::{sleep, Sleep};
 use tokio::time::{Duration, Instant};
+use tokio_stream::Stream;
 
 // max 10 seconds, resolution 500ms.
 const NUM_SLOTS: usize = 20;

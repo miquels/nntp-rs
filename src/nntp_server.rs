@@ -80,7 +80,13 @@ pub(crate) enum ArtAccept {
 }
 
 impl NntpServer {
-    pub fn new(peer: SocketAddr, codec: NntpCodec, bus_recv: bus::Receiver, server: Server, stats: RxSessionStats) -> NntpServer {
+    pub fn new(
+        peer: SocketAddr,
+        codec: NntpCodec,
+        bus_recv: bus::Receiver,
+        server: Server,
+        stats: RxSessionStats,
+    ) -> NntpServer {
         let newsfeeds = config::get_newsfeeds();
         let config = config::get_config();
         let incoming_logger = logger::get_incoming_logger();
@@ -438,8 +444,7 @@ impl NntpServer {
         part: ArtPart,
         msgid: &str,
         buf: Buffer,
-    ) -> io::Result<NntpResult>
-    {
+    ) -> io::Result<NntpResult> {
         let result = match self.server.history.lookup(msgid).await {
             Err(_) => return Ok(NntpResult::text("430 Not found")),
             Ok(None) => return Ok(NntpResult::text("430 Not found")),

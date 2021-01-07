@@ -242,7 +242,10 @@ impl CmdParser {
 
     pub fn help(&self) -> Buffer {
         let mut out = Buffer::new();
-        put_str(&mut out, format!("100 help (nntp-rs {})\r\n", env!("CARGO_PKG_VERSION")));
+        put_str(
+            &mut out,
+            format!("100 help (nntp-rs {})\r\n", env!("CARGO_PKG_VERSION")),
+        );
 
         let mut cmds: Vec<&CmdDef> = self.cmd_map.values().collect();
         cmds.sort_unstable_by(|a, b| a.name.cmp(b.name));

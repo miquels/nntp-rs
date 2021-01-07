@@ -416,8 +416,7 @@ impl NewsPeer {
         newsgroups: &mut MatchList,
         dist: Option<&Vec<&str>>,
         headonly: bool,
-    ) -> bool
-    {
+    ) -> bool {
         // must be an actual outgoing feed.
         if self.outhost.is_empty() && &self.label != "IFILTER" {
             return false;

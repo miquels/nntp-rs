@@ -21,16 +21,16 @@ macro_rules! conditional_fut {
     }};
     ($cond:expr, $holder:expr, $fut:expr) => {{
         use futures::future::{pending, Either, FutureExt};
-            if $cond {
-                Either::Left(async move {
-                    let fut = $fut;
-                    tokio::pin!(fut);
-                    fut.await
-                })
-            } else {
-                Either::Right(pending())
-            }
-    }}
+        if $cond {
+            Either::Left(async move {
+                let fut = $fut;
+                tokio::pin!(fut);
+                fut.await
+            })
+        } else {
+            Either::Right(pending())
+        }
+    }};
 }
 
 mod connection;

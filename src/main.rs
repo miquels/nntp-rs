@@ -349,8 +349,7 @@ fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -
 fn history_common(
     config: &config::Config,
     file: Option<&String>,
-) -> io::Result<(history::History, spool::Spool)>
-{
+) -> io::Result<(history::History, spool::Spool)> {
     // open history file.
     let hpath = config::expand_path(&config.paths, file.unwrap_or(&config.history.file));
     let hist = History::open(

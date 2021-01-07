@@ -196,7 +196,9 @@ impl RxSessionStats {
 
     pub async fn on_connect(&mut self, label: String, ipaddr: IpAddr) {
         self.ipaddr = ipaddr;
-        self.hostname = dns::reverse_lookup(self.ipaddr).await.unwrap_or(self.ipaddr.to_string());
+        self.hostname = dns::reverse_lookup(self.ipaddr)
+            .await
+            .unwrap_or(self.ipaddr.to_string());
         self.label = label.clone();
         self.peer_stats = {
             let mut stats = PEER_STATS.write();

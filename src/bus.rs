@@ -36,13 +36,13 @@ impl Sender {
 
 /// Receive messages on the bus.
 pub struct Receiver {
-    tx:     broadcast::Sender<Notification>,
-    rx:     broadcast::Receiver<Notification>,
+    tx: broadcast::Sender<Notification>,
+    rx: broadcast::Receiver<Notification>,
 }
 
 impl Receiver {
     fn new(tx: broadcast::Sender<Notification>, rx: broadcast::Receiver<Notification>) -> Receiver {
-        Receiver{ tx, rx }
+        Receiver { tx, rx }
     }
 
     /// Receive a message from the bus.

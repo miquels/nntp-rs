@@ -131,8 +131,7 @@ impl NntpServer {
         art: &Article,
         recv_time: UnixTime,
         e: ArtError,
-    ) -> io::Result<ArtAccept>
-    {
+    ) -> io::Result<ArtAccept> {
         let he = HistEnt {
             status:    HistStatus::Rejected,
             time:      recv_time,
@@ -168,8 +167,7 @@ impl NntpServer {
         &mut self,
         art: &Article,
         recv_time: UnixTime,
-    ) -> io::Result<ArtAccept>
-    {
+    ) -> io::Result<ArtAccept> {
         let he = HistEnt {
             status:    HistStatus::Expired,
             time:      recv_time,
@@ -203,8 +201,7 @@ impl NntpServer {
         &mut self,
         mut art: &mut Article,
         can_defer: bool,
-    ) -> io::Result<ArtAccept>
-    {
+    ) -> io::Result<ArtAccept> {
         let recv_time = UnixTime::now();
 
         // parse article.

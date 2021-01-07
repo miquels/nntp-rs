@@ -65,8 +65,7 @@ impl ActiveFile {
         active: &[u8],
         groups: Option<impl AsRef<str>>,
         remove: bool,
-    ) -> io::Result<()>
-    {
+    ) -> io::Result<()> {
         let mut inner = self.0.lock().unwrap();
         inner.sync_active(active, groups.as_ref().map(|s| s.as_ref()), remove)
     }

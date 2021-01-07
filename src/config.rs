@@ -228,11 +228,8 @@ impl std::fmt::Debug for MultiSingle {
 
 /// Read the configuration.
 pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
-
     let watcher = Watcher::new();
-    let mut cfg: Config = curlyconf::Builder::new()
-        .watcher(&watcher)
-        .from_file(name)?;
+    let mut cfg: Config = curlyconf::Builder::new().watcher(&watcher).from_file(name)?;
     cfg.watcher = watcher;
     cfg.filename = name.to_string();
 
@@ -311,7 +308,7 @@ pub fn reread_config() -> io::Result<bool> {
     // Changed?
     let config = get_config();
     if !config.watcher.changed() {
-        return Ok(false)
+        return Ok(false);
     }
     // Yes, so read again.
     let new_config = read_config(&config.filename, true)?;
@@ -322,7 +319,7 @@ pub fn reread_config() -> io::Result<bool> {
     config.watcher = new_config.watcher.clone();
     config.newsfeeds = new_config.newsfeeds;
     config.compat = new_config.compat;
-    
+
     set_config(config);
     Ok(true)
 }

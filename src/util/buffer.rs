@@ -4,9 +4,9 @@
 use std::default::Default;
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::marker::Unpin;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use std::marker::Unpin;
 use std::pin::Pin;
 use std::slice;
 use std::task::{Context, Poll};
@@ -212,20 +212,19 @@ impl Buffer {
         if self.data.len() + cnt > self.data.capacity() {
             panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
         }
-        // Safety: unsafe fn calling unsafe fn.
         self.data.set_len(self.data.len() + cnt);
     }
 
     pub fn poll_read<R>(&mut self, reader: Pin<&mut R>, cx: &mut Context<'_>) -> Poll<io::Result<usize>>
-    where
-        R: AsyncRead + Unpin + ?Sized,
-    {
+    where R: AsyncRead + Unpin + ?Sized {
         // Safety: ReadBuf::uninit takes a MaybeUninit.
         let mut buf = ReadBuf::uninit(unsafe { self.spare_capacity_mut() });
         futures::ready!(reader.poll_read(cx, &mut buf))?;
-        // Safety: buf.filled is guaranteed to be initialized.
         let len = buf.filled().len();
-        unsafe { self.advance_mut(len); }
+        // Safety: len = buf.filled().len() is guaranteed to be correct.
+        unsafe {
+            self.advance_mut(len);
+        }
         Poll::Ready(Ok(len))
     }
 

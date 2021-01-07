@@ -194,7 +194,7 @@ impl SyslogData {
             };
             ioerr!(kind, "{}", e)
         })?;
-        Ok(SyslogData{ logger })
+        Ok(SyslogData { logger })
     }
 
     fn log_line(&mut self, _is_log: bool, level: log::Level, line: String) {
@@ -204,7 +204,9 @@ impl SyslogData {
             log::Level::Info => self.logger.info(&line),
             log::Level::Debug => self.logger.debug(&line),
             log::Level::Trace => return,
-        }.is_ok() {
+        }
+        .is_ok()
+        {
             return;
         }
         // The syslog crate appears to not re-open the socket if it fails,

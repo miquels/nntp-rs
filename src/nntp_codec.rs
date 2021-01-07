@@ -21,8 +21,8 @@ use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::pin;
+use tokio::time::{self, Instant, Sleep};
 use tokio_stream::Stream;
-use tokio::time::{self, Sleep, Instant};
 
 pub const INITIAL_TIMEOUT: u64 = 60;
 pub const READ_TIMEOUT: u64 = 630;
