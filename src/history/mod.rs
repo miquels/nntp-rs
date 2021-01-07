@@ -371,7 +371,7 @@ pub(crate) mod tests {
     }
 
     async fn test_simple_async() -> Result<Option<HistEnt>, io::Error> {
-        let h = History::open("memdb", "[memdb]", true, None, BlockingType::Blocking).unwrap();
+        let h = History::open("memdb", "[memdb]", true, MLockMode::None, None, BlockingType::Blocking).unwrap();
         let he = HistEnt {
             status:    HistStatus::Tentative,
             time:      crate::util::UnixTime::now(),

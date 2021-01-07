@@ -814,10 +814,10 @@ mod tests {
         kv.insert("NX", "0000000000".into());
         kv.insert("S", "y".into());
 
-        db.insert("test.1", &kv);
+        db.insert("test.1", &kv).expect("insert");
 
         kv.insert("GD", "testgroup2".into());
-        db.insert("test.2", &kv);
+        db.insert("test.2", &kv).expect("insert");
 
         db.flush().expect("remap");
 
