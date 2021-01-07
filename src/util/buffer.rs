@@ -1,19 +1,6 @@
 //! Buffer implementation like Bytes / BytesMut.
 //!
 //! It is simpler and contains less unsafe code.
-//
-// The unsafe code is needed for efficiency reasons. You do not
-// want to zero-initialize buffers every time you use them.
-//
-// I have experimented with a non-contiguous buffer approach, with
-// a pool of continously re-used blocks that are pre-initialized.
-// That does away with a lot of unsafe code, since the blocks only have to
-// be initialized once. However it turned out that too much code
-// in the server still assumes it can Deref the Buffer as a flat &[u8].
-//
-// The old code is at
-// https://github.com/miquels/nntp-rs/blob/8a70816767e62c62d2462671f76a8e0efa4552eb/src/util/buffer.rs
-//
 use std::default::Default;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -25,8 +12,6 @@ use std::slice;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 
-use bytes::{Buf, BufMut, buf::UninitSlice};
-
 /// A buffer structure, like Bytes/BytesMut.
 ///
 /// It is not much more than a wrapper around Vec.
@@ -34,7 +19,6 @@ pub struct Buffer {
     start_offset: usize,
     rd_pos:       usize,
     data:         Vec<u8>,
-    initialized:  usize,
 }
 
 impl Buffer {
@@ -44,7 +28,15 @@ impl Buffer {
             start_offset: 0,
             rd_pos:       0,
             data:         Vec::new(),
-            initialized:  0,
+        }
+    }
+
+    /// Create new Buffer.
+    pub fn with_capacity(cap: usize) -> Buffer {
+        Buffer {
+            start_offset: 0,
+            rd_pos:       0,
+            data:         Vec::with_capacity(Self::round_size_up(cap)),
         }
     }
 
@@ -70,6 +62,13 @@ impl Buffer {
         self.data.truncate(size + self.start_offset);
     }
 
+    pub fn bytes(&self) -> &[u8] {
+        if self.rd_pos >= self.len() {
+            return &[][..];
+        }
+        &self.data[self.start_offset + self.rd_pos..]
+    }
+
     /// Split this Buffer in two parts.
     ///
     /// The first part remains in this buffer. The second part is
@@ -81,41 +80,53 @@ impl Buffer {
         if self.rd_pos > at {
             self.rd_pos = at;
         }
-        let mut bnew = Buffer::new();
 
         // If "header" < 32K and "body" >= 32K, use a start_offset
         // for "body" and copy "header".
         if self.start_offset == 0 && at < 32000 && self.len() - at >= 32000 {
+            let mut bnew = Buffer::with_capacity(at);
             mem::swap(self, &mut bnew);
             self.extend_from_slice(&bnew[0..at]);
             bnew.start_offset = at;
             return bnew;
         }
 
-        bnew.data = self.data.split_off(at + self.start_offset);
+        let mut bnew = Buffer::new();
+        let bytes = self.bytes();
+        bnew.extend_from_slice(&bytes[at..]);
+        self.truncate(at);
 
         bnew
     }
 
-    /// Split this Buffer in two parts.
-    ///
-    /// The second part remains in this buffer. The first part is
-    /// returned to the caller.
-    pub fn split_to(&mut self, size: usize) -> Buffer {
-        // move self.data to a new Buffer.
-        let mut nbuf = Buffer::new();
-        let start_offset = self.start_offset;
-        mem::swap(&mut self.data, &mut nbuf.data);
+    /// Add data to this buffer.
+    #[inline]
+    pub fn extend_from_slice(&mut self, extend: &[u8]) {
+        self.reserve(extend.len());
+        self.data.extend_from_slice(extend);
+    }
 
-        // now copy the end of the data back to self.data.
-        self.extend_from_slice(&nbuf.data[self.start_offset + size..]);
-        self.start_offset = 0;
+    #[inline]
+    fn round_size_up(size: usize) -> usize {
+        if size < 128 {
+            128
+        } else if size < 4096 {
+            4096
+        } else if size < 65536 {
+            65536
+        } else {
+            size.next_power_of_two()
+        }
+    }
 
-        // and truncate the new Buffer to the right length.
-        nbuf.start_offset = start_offset;
-        nbuf.data.truncate(start_offset + size);
-
-        nbuf
+    /// Make sure at least `size` bytes are available.
+    #[inline]
+    pub fn reserve(&mut self, size: usize) {
+        let end = self.len() + size;
+        if end < self.data.capacity() {
+            return;
+        }
+        self.data.reserve(Self::round_size_up(end) - self.len());
     }
 
     /// total length of all data in this Buffer.
@@ -124,191 +135,106 @@ impl Buffer {
         self.data.len() - self.start_offset
     }
 
+    /// Split this Buffer in two parts.
+    ///
+    /// The second part remains in this buffer. The first part is
+    /// returned to the caller.
+    pub fn split_to(&mut self, size: usize) -> Buffer {
+        let mut other = self.split_off(size);
+        mem::swap(self, &mut other);
+        other
+    }
+
     /// Write all data in this `Buffer` to a file.
     pub fn write_all(&mut self, mut file: impl Write) -> io::Result<()> {
         while self.rd_pos < self.len() {
-            let chunk = self.chunk();
-            let size = chunk.len();
-            file.write_all(chunk)?;
+            let bytes = self.bytes();
+            let size = bytes.len();
+            file.write_all(bytes)?;
             self.rd_pos += size;
         }
         Ok(())
     }
 
-    /// Read an exact number of bytes.
-    ///
-    /// NOTE: this function lets `reader` read into potentially
-    /// uninitialized memory. So the reader that is passed in to this
-    /// function must:
-    ///
-    /// - never read from the buffer past to it
-    /// - return the correct number of bytes read (and thus, initialized)
-    ///
-    pub fn read_exact(&mut self, mut reader: impl Read, len: usize) -> io::Result<()> {
-        self.data.reserve(len);
-        let prev_len = self.data.len();
-        // this is safe as long as `reader` behaves itself properly.
-        unsafe { self.data.set_len(prev_len + len) };
-        match reader.read_exact(&mut self.data[prev_len..]) {
-            Ok(_) => {
-                self.update_initialized();
-                Ok(())
-            },
-            Err(e) => {
-                // this is safe, it sets it back to what it was.
-                unsafe { self.data.set_len(prev_len) };
-                Err(e)
-            },
-        }
-    }
-
-    /// Read until end-of-file.
-    ///
-    /// See the remarks on `read_exact` for unsafety.
-    ///
-    pub fn read_all(&mut self, mut reader: impl Read) -> io::Result<()> {
-        let mut end_data = self.data.len();
-        loop {
-            self.data.reserve(4096);
-            // this is safe as long as `reader` behaves itself properly.
-            unsafe { self.data.set_len(self.data.capacity()) };
-            match reader.read(&mut self.data[end_data..]) {
-                Ok(n) => {
-                    if n == 0 {
-                        // safe: cap len to the length of the data that was actually read.
-                        unsafe { self.data.set_len(end_data) };
-                        break;
-                    }
-                    end_data += n;
-                },
-                Err(e) => {
-                    // safe: cap len to the length of the data that was actually read.
-                    unsafe { self.data.set_len(end_data) };
-                    return Err(e);
-                },
-            }
-        }
-        self.update_initialized();
-        Ok(())
-    }
-
-    /// Add data to this buffer.
-    #[inline]
-    pub fn extend_from_slice(&mut self, extend: &[u8]) {
-        self.data.extend_from_slice(extend);
-        self.update_initialized();
-    }
-
     /// Add text data to this buffer.
     #[inline]
     pub fn push_str(&mut self, s: &str) {
-        self.data.extend_from_slice(s.as_bytes());
-        self.update_initialized();
-    }
-
-    /// Make sure at least `size` bytes are available.
-    #[inline]
-    pub fn reserve(&mut self, size: usize) {
-        self.data.reserve(size);
+        self.extend_from_slice(s.as_bytes());
     }
 
     /// Add a string to the buffer.
     #[inline]
     pub fn put_str(&mut self, s: impl AsRef<str>) {
         self.extend_from_slice(s.as_ref().as_bytes());
-        self.update_initialized();
     }
 
     /// Return a reference to this Buffer as an UTF-8 string.
     #[inline]
     pub fn as_utf8_str(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(self.chunk())
+        std::str::from_utf8(self.bytes())
     }
 
     /// Convert this buffer into a Vec<u8>.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.data
-    }
-
-    /*
-    pub fn bytes(&self) -> &[u8] {
-        self.chunk()
-    }*/
-
-    #[inline]
-    fn update_initialized(&mut self) {
-        let len = self.data.len();
-        if len > self.initialized {
-            self.initialized = len;
-        }
-    }
-
-    // BufMut::bytes_mut() returns a MaybeUninit. Some of that may
-    // already have been initialized - find out how much.
-    fn bytes_mut_initialized_size(&self) -> usize {
-        if self.initialized > self.data.len() {
-            self.initialized - self.data.len()
+        if self.start_offset > 0 {
+            let mut v = Vec::with_capacity(Self::round_size_up(self.len()));
+            v.extend_from_slice(self.bytes());
+            v
         } else {
-            0
+            self.data
         }
     }
 
-    // bytes_mut helper for poll_read().
-    fn bytes_mut(&mut self) -> &mut [mem::MaybeUninit<u8>] {
-        let chunk = self.chunk_mut();
+    //
+    // ===== Begin unsafe code =====
+    //
+
+    /// Read an exact number of bytes.
+    pub fn read_exact(&mut self, reader: &mut std::fs::File, len: usize) -> io::Result<()> {
+        self.reserve(len);
+
+        // Safety: it is safe for a std::fs::File to read into uninitialized memory.
         unsafe {
-            let len = chunk.len();
-            let ptr = chunk.as_mut_ptr() as *mut mem::MaybeUninit<u8>;
-            &mut slice::from_raw_parts_mut(ptr, len)[..]
-         }
+            reader.read_exact(self.spare_capacity_mut())?;
+            self.advance_mut(len);
+        }
+        Ok(())
+    }
+
+    unsafe fn spare_capacity_mut<T>(&mut self) -> &mut [T] {
+        let len = self.data.len();
+        let spare = self.data.capacity() - len;
+        let ptr = self.data.as_mut_ptr().add(len) as *mut T;
+        &mut slice::from_raw_parts_mut(ptr, spare)[..]
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        if self.data.len() + cnt > self.data.capacity() {
+            panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
+        }
+        // Safety: unsafe fn calling unsafe fn.
+        self.data.set_len(self.data.len() + cnt);
     }
 
     pub fn poll_read<R>(&mut self, reader: Pin<&mut R>, cx: &mut Context<'_>) -> Poll<io::Result<usize>>
     where
         R: AsyncRead + Unpin + ?Sized,
     {
-        let initialized = self.bytes_mut_initialized_size();
-        let mut buf = unsafe {
-            let mut buf = ReadBuf::uninit(self.bytes_mut());
-            buf.assume_init(initialized);
-            buf
-        };
+        // Safety: ReadBuf::uninit takes a MaybeUninit.
+        let mut buf = ReadBuf::uninit(unsafe { self.spare_capacity_mut() });
         futures::ready!(reader.poll_read(cx, &mut buf))?;
+        // Safety: buf.filled is guaranteed to be initialized.
         let len = buf.filled().len();
         unsafe { self.advance_mut(len); }
         Poll::Ready(Ok(len))
     }
+
+    //
+    // ===== End unsafe code =====
+    //
 }
 
-unsafe impl BufMut for Buffer {
-    // this is safe if the caller is safe, but that is the contract of this API.
-    unsafe fn advance_mut(&mut self, cnt: usize) {
-        if self.data.len() + cnt > self.data.capacity() {
-            panic!("Buffer::advance_mut(cnt): would advance past end of Buffer");
-        }
-        self.data.set_len(self.data.len() + cnt);
-        self.update_initialized();
-    }
-
-    fn chunk_mut(&mut self) -> &mut UninitSlice {
-        let len = self.data.len();
-        let mut_len = self.data.capacity() - len;
-        // this is safe if the caller is safe, but that is the contract of this API.
-        unsafe {
-            self.data.set_len(self.data.capacity());
-            let mut_data = &mut self.data[len..];
-            let r = UninitSlice::from_raw_parts_mut(mut_data.as_mut_ptr(), mut_len);
-            self.data.set_len(len);
-            r
-        }
-    }
-
-    fn remaining_mut(&self) -> usize {
-        self.data.capacity() - self.data.len()
-    }
-}
-
-impl Buf for Buffer {
+impl bytes::Buf for Buffer {
     fn advance(&mut self, cnt: usize) {
         // advance buffer read pointer.
         self.rd_pos += cnt;
@@ -321,10 +247,7 @@ impl Buf for Buffer {
 
     #[inline]
     fn chunk(&self) -> &[u8] {
-        if self.rd_pos >= self.len() {
-            return &[][..];
-        }
-        &self.data[self.start_offset + self.rd_pos..]
+        self.bytes()
     }
 
     #[inline]
@@ -336,12 +259,14 @@ impl Buf for Buffer {
 impl Deref for Buffer {
     type Target = [u8];
 
+    #[inline]
     fn deref(&self) -> &[u8] {
-        self.chunk()
+        self.bytes()
     }
 }
 
 impl DerefMut for Buffer {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [u8] {
         &mut self.data[self.start_offset + self.rd_pos..]
     }
@@ -367,7 +292,6 @@ impl From<Vec<u8>> for Buffer {
         Buffer {
             start_offset: 0,
             rd_pos:       0,
-            initialized:  src.len(),
             data:         src,
         }
     }

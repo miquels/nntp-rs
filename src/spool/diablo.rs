@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io;
 use std::io::Error as IoError;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -363,13 +363,9 @@ impl DSpool {
         };
         file.seek(SeekFrom::Start(start as u64))?;
 
+        buffer.read_exact(&mut file, len as usize)?;
         if head.store_type == 1 {
-            let reader = file.try_clone()?.take(len as u64);
-            let reader = CrlfXlat::new(reader);
-            buffer.reserve((len + len / 50) as usize);
-            buffer.read_all(reader)?;
-        } else {
-            buffer.read_exact(file, len as usize)?;
+            buffer = to_wireformat(buffer);
         }
 
         match part {
@@ -910,87 +906,16 @@ impl SpoolBackend for DSpool {
     }
 }
 
-// A reader-wrapper that translates CR to CRLF.
-struct CrlfXlat<T> {
-    inner:  BufReader<T>,
-    lfseen: bool,
-    eof:    bool,
+fn to_wireformat(inbuf: Buffer) -> Buffer {
+    let mut outbuf = Buffer::with_capacity(inbuf.len() + inbuf.len() / 50);
+    for line in inbuf.bytes().split(|&b| b == b'\n') {
+        if line.len() > 0 && line[0] == b'.' {
+            outbuf.extend_from_slice(b".");
+        }
+        outbuf.extend_from_slice(line);
+        outbuf.extend_from_slice(b"\r\n");
+    }
+    outbuf.extend_from_slice(b".\r\n");
+    outbuf
 }
 
-impl<T: Read> CrlfXlat<T> {
-    fn new(file: T) -> CrlfXlat<T> {
-        CrlfXlat {
-            inner:  BufReader::new(file),
-            lfseen: true,
-            eof:    false,
-        }
-    }
-}
-
-impl<T: Read> Read for CrlfXlat<T> {
-    fn read(&mut self, outbuf: &mut [u8]) -> io::Result<usize> {
-        if self.eof {
-            return Ok(0);
-        }
-
-        let mut out_idx = 0;
-        let mut in_idx = 0;
-        {
-            let inbuf = self.inner.fill_buf()?;
-            if inbuf.len() == 0 {
-                outbuf[0] = b'.';
-                outbuf[1] = b'\r';
-                outbuf[2] = b'\n';
-                self.eof = true;
-                return Ok(3);
-            }
-
-            while in_idx < inbuf.len() && out_idx < outbuf.len() {
-                // dotstuffing.
-                if self.lfseen && inbuf[in_idx] == b'.' {
-                    // need to insert a dot. see if there's still space.
-                    if out_idx > outbuf.len() - 2 {
-                        break;
-                    }
-                    outbuf[out_idx] = b'.';
-                    out_idx += 1;
-                }
-                self.lfseen = false;
-
-                // LF -> CRLF
-                if inbuf[in_idx] == b'\n' {
-                    // need to insert a \r. see if there's still space.
-                    if out_idx > outbuf.len() - 2 {
-                        break;
-                    }
-                    outbuf[out_idx] = b'\r';
-                    out_idx += 1;
-                    self.lfseen = true;
-                }
-
-                outbuf[out_idx] = inbuf[in_idx];
-                out_idx += 1;
-                in_idx += 1;
-            }
-        }
-        self.inner.consume(in_idx);
-        Ok(out_idx)
-    }
-
-    fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut]) -> io::Result<usize> {
-        // log::debug!("XXX read_vectored starts, #bufs: {}", bufs.len());
-        let mut done = 0;
-        for idx in 0..bufs.len() {
-            let l = bufs[idx].len();
-            if l != 0 {
-                let n = self.read(&mut bufs[idx][..])?;
-                done += n;
-                if n < l {
-                    break;
-                }
-            }
-        }
-        // log::debug!("XXX read_vectored done, read {}", done);
-        Ok(done)
-    }
-}
