@@ -195,7 +195,8 @@ impl Buffer {
 
         // Safety: it is safe for a std::fs::File to read into uninitialized memory.
         unsafe {
-            reader.read_exact(self.spare_capacity_mut())?;
+            let buf = self.spare_capacity_mut();
+            reader.read_exact(&mut buf[..len])?;
             self.advance_mut(len);
         }
         Ok(())
@@ -378,4 +379,14 @@ mod tests {
         assert!(&n[1000..1010] == &b"yxyzzyzxyz"[..]);
         assert!(&x[1000..1010] == &b"zzyxyzzyzx"[..]);
     }
+
+    #[test]
+    fn test_spare() {
+        let mut b = Buffer::with_capacity(194);
+        assert!(b.data.capacity() == 4096);
+        b.extend_from_slice(b"0123456789");
+        let buf: &mut [u8] = unsafe { b.spare_capacity_mut() };
+        assert!(buf.len() == 4086);
+    }
+
 }
