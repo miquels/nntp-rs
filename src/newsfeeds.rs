@@ -16,6 +16,7 @@
 //!
 use std::collections::HashMap;
 use std::default::Default;
+use std::io;
 use std::mem;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -136,6 +137,22 @@ impl NewsFeeds {
         }
     }
 
+    /// Merge templates into newsfeeds.
+    pub fn merge_templates(&mut self) -> io::Result<()> {
+        for idx in 0..self.peers.len() {
+            for tmpl_idx in 0 .. self.templates.len() {
+                let tmpl_name = &self.templates[tmpl_idx].label;
+                let template = match self.templates.iter().find(|t| &t.label == tmpl_name) {
+                    Some(t) => t,
+                    None => return Err(ioerr!(NotFound, "peer {}: template {}: no such template",
+                                              self.peers[idx].label, tmpl_name)),
+                };
+                self.peers[idx].merge_template(template);
+            }
+        }
+        Ok(())
+    }
+
     /// If the "hostname" field was set, use it to set defaults
     /// for outhost, path_identity and accept_from.
     pub fn set_hostname_default(&mut self) {
@@ -195,8 +212,9 @@ pub struct NewsPeer {
     #[serde(rename = "__label__")]
     pub label:              SmartString,
 
-    /// Default template to use.
-    pub template:           String,
+    /// Default template(s) to use.
+    #[serde(rename = "template")]
+    pub templates:          Vec<String>,
 
     // if set, sets accept_from, outhost, and path-identity in dnewsfeeds.
     pub(crate) hostname:     String,
@@ -328,6 +346,13 @@ impl NewsPeer {
 
         // distributions.
         self.distributions.prepend(&tmpl.distributions);
+
+        // meta.
+        for (k, v) in &tmpl.meta {
+            if !self.meta.contains_key(k) {
+                self.meta.insert(k.to_owned(), v.to_owned());
+            }
+        }
 
         // crosspost.
         if self.mincross == 0 {

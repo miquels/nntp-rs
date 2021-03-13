@@ -320,17 +320,18 @@ pub fn reread_config() -> io::Result<bool> {
     config.newsfeeds = new_config.newsfeeds;
     config.compat = new_config.compat;
 
-    set_config(config);
+    set_config(config)?;
     Ok(true)
 }
 
-pub fn set_config(mut cfg: Config) -> Arc<Config> {
+pub fn set_config(mut cfg: Config) -> io::Result<Arc<Config>> {
     // initialize the new newsfeeds config.
     let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
     let mut nf = std::mem::replace(newsfeeds, NewsFeeds::default());
     nf.set_hostname_default();
     nf.init_hostcache();
     nf.resolve_references();
+    nf.merge_templates()?;
     nf.setup_xclient();
     nf.check_self(&cfg);
     let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
@@ -342,7 +343,7 @@ pub fn set_config(mut cfg: Config) -> Arc<Config> {
     // replace the CONFIG config.
     *CONFIG.write() = Some(Arc::new(cfg));
 
-    get_config()
+    Ok(get_config())
 }
 
 // Any elements separated by '!' get split into sub-elements, and reversed.

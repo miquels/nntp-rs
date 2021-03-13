@@ -205,7 +205,10 @@ fn main() -> Result<()> {
     };
 
     // save the config permanently.
-    let config = config::set_config(config);
+    let config = config::set_config(config).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        exit(1);
+    });
 
     let run_opts = match opts.cmd {
         Command::Serve(opts) => opts,
