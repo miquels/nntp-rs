@@ -403,13 +403,28 @@ impl NntpServer {
             return Err(ArtError::GroupFilter);
         }
 
-        // see if the article matches the IFILTER label.
         let mut grouplist = MatchList::new(&newsgroups, &self.newsfeeds.groupdefs);
+
+        // see if the article matches the IFILTER label.
         if let Some(ref ifilter) = self.newsfeeds.infilter {
             if ifilter.wants(
                 art,
                 &HashFeed::default(),
-                &[],
+                &pathelems,
+                &mut grouplist,
+                distribution.as_ref(),
+                false,
+            ) {
+                return Err(ArtError::IncomingFilter);
+            }
+        }
+
+        // see if the article matches input-filter reject { .. }
+        if let Some(ref reject) = self.config.infilter.reject {
+            if reject.wants(
+                art,
+                &HashFeed::default(),
+                &pathelems,
                 &mut grouplist,
                 distribution.as_ref(),
                 false,

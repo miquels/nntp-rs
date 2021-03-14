@@ -31,7 +31,6 @@ struct DNewsFeeds {
     #[serde(rename = "label")]
     pub labels:   Labels,
     pub groupdef: Vec<GroupDef>,
-    pub global:   Option<NewsPeer>,
 }
 
 // Append all the DNewsfeeds data to the main NewsFeeds.
@@ -39,15 +38,15 @@ fn dnewsfeeds_to_newsfeeds(mut dnf: DNewsFeeds, nf: &mut NewsFeeds) {
     nf.infilter = dnf.labels.ifilter;
     for mut peer in dnf.labels.peers.drain(..) {
         peer.accept_headfeed = true;
+        if let Some(ref global) = dnf.labels.global {
+            peer.merge_template(global);
+        }
         nf.peers.push(peer);
     }
     for gd in dnf.groupdef.into_iter() {
         let mut groups = gd.groups;
         groups.name = gd.label;
         nf.groupdefs.push(groups);
-    }
-    if let Some(global) = dnf.global.take() {
-        nf.templates.push(global);
     }
 }
 
@@ -93,7 +92,7 @@ impl<'de> Deserialize<'de> for Labels {
                 let mut this = Labels::default();
 
                 while let Some(label) = map.next_key::<String>()? {
-                    let peer = map.next_value()?;
+                    let peer: NewsPeer = map.next_value()?;
                     match label.as_str() {
                         "GLOBAL" => {
                             if this.global.is_some() {

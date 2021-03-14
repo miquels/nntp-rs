@@ -44,6 +44,8 @@ pub struct Config {
     pub spool:      SpoolCfg,
     #[serde(default)]
     pub newsfeeds:  Arc<NewsFeeds>,
+    #[serde(rename = "input-filter", default)]
+    pub infilter:   InFilter,
     #[serde(skip)]
     filename:       String,
     #[serde(skip)]
@@ -138,6 +140,16 @@ pub struct HistFile {
     pub mlock:      MLockMode,
     #[serde(default,deserialize_with = "util::deserialize_duration")]
     pub remember:   Duration,
+}
+
+/// Input filters.
+#[derive(Clone, Default, Deserialize, Debug)]
+#[rustfmt::skip]
+pub struct InFilter {
+    #[serde(rename = "reject")]
+    pub reject_:     Option<crate::newsfeeds::Filter>,
+    #[serde(skip)]
+    pub reject:     Option<crate::newsfeeds::NewsPeer>,
 }
 
 /// Active config section.
@@ -268,6 +280,10 @@ pub fn read_config(name: &str, load_newsfeeds: bool) -> io::Result<Config> {
     pathhosts_fixup(&mut cfg.server.path_identity);
     pathhosts_fixup(&mut cfg.server.commonpath);
 
+    if let Some(ref reject) = cfg.infilter.reject_ {
+        cfg.infilter.reject = Some(reject.to_newspeer());
+    }
+
     // metrics must be set if prometheus is set.
     if cfg.logging.prometheus.is_some() && cfg.logging.metrics.is_none() {
         return Err(ioerr!(
@@ -328,10 +344,10 @@ pub fn set_config(mut cfg: Config) -> io::Result<Arc<Config>> {
     // initialize the new newsfeeds config.
     let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
     let mut nf = std::mem::replace(newsfeeds, NewsFeeds::default());
+    nf.merge_templates()?;
     nf.set_hostname_default();
     nf.init_hostcache();
     nf.resolve_references();
-    nf.merge_templates()?;
     nf.setup_xclient();
     nf.check_self(&cfg);
     let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();

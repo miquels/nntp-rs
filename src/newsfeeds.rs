@@ -47,15 +47,15 @@ pub struct NewsFeeds {
     /// Peer definitions.
     #[serde(rename = "peer")]
     pub peers:              Vec<NewsPeer>,
+    /// Input filter, applied on all incoming feeds.
+    #[serde(rename = "input-filter")]
+    pub infilter:           Option<NewsPeer>,
 
     // The below are all non-configfile items.
 
     // timestamp of file when we loaded this data
     #[serde(skip)]
     pub(crate) timestamp:   UnixTime,
-    // The IFILTER label from a dnewsfeeds file.
-    #[serde(skip)]
-    pub(crate) infilter:    Option<NewsPeer>,
     // HostCache for all hostname entries.
     #[serde(skip)]
     hcache:                 HostCache,
@@ -140,8 +140,8 @@ impl NewsFeeds {
     /// Merge templates into newsfeeds.
     pub fn merge_templates(&mut self) -> io::Result<()> {
         for idx in 0..self.peers.len() {
-            for tmpl_idx in 0 .. self.templates.len() {
-                let tmpl_name = &self.templates[tmpl_idx].label;
+            for tmpl_idx in (0 .. self.peers[idx].templates.len()).rev() {
+                let tmpl_name = &self.peers[idx].templates[tmpl_idx];
                 let template = match self.templates.iter().find(|t| &t.label == tmpl_name) {
                     Some(t) => t,
                     None => return Err(ioerr!(NotFound, "peer {}: template {}: no such template",
@@ -503,3 +503,52 @@ impl NewsPeer {
         true
     }
 }
+
+/// Definition of a filter, which is a stripped-down NewsPeer.
+#[rustfmt::skip]
+#[derive(Default,Debug,Clone,Deserialize)]
+#[serde(default)]
+pub struct Filter {
+    /// Paths to reject.
+    #[serde(rename = "path-identity")]
+    pub path_identity:      WildMatList,
+
+    /// Groups to reject.
+    pub groups:             WildMatList,
+
+    /// Distributions to reject.
+    pub distributions:      WildMatList,
+
+    #[serde(rename = "min-crosspost")]
+    pub mincross:           u32,
+    #[serde(rename = "max-crosspost")]
+    pub maxcross:           u32,
+    #[serde(rename = "max-path-length")]
+    pub maxpath:            u32,
+    #[serde(rename = "min-path-length")]
+    pub minpath:            u32,
+    #[serde(rename = "max-article-size",deserialize_with = "util::deserialize_size")]
+    pub maxsize:            u64,
+    #[serde(rename = "min-article-size",deserialize_with = "util::deserialize_size")]
+    pub minsize:            u64,
+    #[serde(rename = "article-types")]
+    pub arttypes:           Vec<ArtType>,
+}
+
+impl Filter {
+    pub fn to_newspeer(&self) -> NewsPeer {
+        let mut nf = NewsPeer::new();
+        nf.path_identity = self.path_identity.clone();
+        nf.groups = self.groups.clone();
+        nf.distributions = self.distributions.clone();
+        nf.mincross = self.mincross;
+        nf.maxcross = self.maxcross;
+        nf.maxpath = self.maxpath;
+        nf.minpath = self.minpath;
+        nf.maxsize = self.maxsize;
+        nf.minsize = self.minsize;
+        nf.arttypes = self.arttypes.clone();
+        nf
+    }
+}
+
