@@ -41,21 +41,25 @@ pub struct NewsFeeds {
     /// Full templates to be referenced as defaults in peers.
     #[serde(rename = "template")]
     pub templates:          Vec<NewsPeer>,
+
     /// Group definition the can referenced in a "groups" entry in a peer.
     #[serde(rename = "groupdef")]
     pub groupdefs:          Vec<WildMatList>,
+
     /// Peer definitions.
     #[serde(rename = "peer")]
     pub peers:              Vec<NewsPeer>,
-    /// Input filter, applied on all incoming feeds.
-    #[serde(rename = "input-filter")]
-    pub infilter:           Option<NewsPeer>,
 
     // The below are all non-configfile items.
+
+    // IFILTER from dnewsfeeds.
+    #[serde(skip)]
+    pub(crate) infilter:    Option<NewsPeer>,
 
     // timestamp of file when we loaded this data
     #[serde(skip)]
     pub(crate) timestamp:   UnixTime,
+
     // HostCache for all hostname entries.
     #[serde(skip)]
     hcache:                 HostCache,
@@ -157,7 +161,15 @@ impl NewsFeeds {
     /// for outhost, path_identity and accept_from.
     pub fn set_hostname_default(&mut self) {
         for peer in self.peers.iter_mut() {
-            peer.hostname = peer.hostname.replace("${label}", peer.label.as_str());
+            let dlabel = "${label}";
+            let with = peer.label.as_str();
+            peer.path_identity.replace(dlabel, with);
+            peer.hostname = peer.hostname.replace(dlabel, with);
+            for item in peer.accept_from.iter_mut() {
+                if item.contains(dlabel) {
+                    *item = item.replace(dlabel, with);
+                }
+            }
             if peer.hostname != "" {
                 if peer.outhost == "" {
                     peer.outhost = peer.hostname.clone();

@@ -129,6 +129,32 @@ impl WildPat {
             WildPat::Reference(_) => None,
         }
     }
+
+    fn replace(&mut self, pat: &str, with: &str) {
+        match self {
+            WildPat::Text(ref mut p) => {
+                if p.contains(pat) {
+                    *p = p.replace(pat, with);
+                }
+            },
+            WildPat::Pattern(ref mut p) => {
+                if p.contains(pat) {
+                    *p = p.replace(pat, with);
+                }
+            },
+            WildPat::Prefix(ref mut p) => {
+                if p.contains(pat) {
+                    *p = p.replace(pat, with);
+                }
+            },
+            WildPat::Suffix(ref mut p) => {
+                if p.contains(pat) {
+                    *p = p.replace(pat, with);
+                }
+            },
+            _ => {},
+        }
+    }
 }
 
 fn new_id() -> u32 {
@@ -347,6 +373,12 @@ impl WildMatList {
             }
         }
         result
+    }
+
+    pub(crate) fn replace(&mut self, from: &str, to: &str) {
+        for pattern in self.patterns.iter_mut() {
+            pattern.replace(from, to);
+        }
     }
 }
 

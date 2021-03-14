@@ -587,6 +587,16 @@ fn dump_config(config: &config::Config) -> Result<()> {
 }
 
 fn dump_newsfeeds() -> Result<()> {
-    println!("{:#?}", config::get_newsfeeds());
+    #[derive(Debug)]
+    struct NewsFeeds<'a> {
+        groupdefs: &'a Vec<nntp_rs::util::WildMatList>,
+        peers:     &'a Vec<nntp_rs::newsfeeds::NewsPeer>,
+    }
+    let nf = config::get_newsfeeds();
+    let np = NewsFeeds {
+        groupdefs:  &nf.groupdefs,
+        peers:  &nf.peers,
+    };
+    println!("{:#?}", np);
     Ok(())
 }
