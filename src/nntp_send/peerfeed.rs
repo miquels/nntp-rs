@@ -146,6 +146,12 @@ impl PeerFeed {
         // Tick every 5 seconds.
         let mut interval = tokio::time::interval(Duration::new(MOVE_TO_BACKLOG_EVERY_SECS, 0));
 
+        // if there's a backlog, start sending articles now.
+        if self.backlog_queue.len().await > 0 {
+            self.add_connection().await;
+            let _ = self.broadcast.send(PeerFeedItem::Ping);
+        }
+
         loop {
             if exiting && masterfeed_eof && self.num_conns == 0 {
                 break;
@@ -213,9 +219,13 @@ impl PeerFeed {
                         if self.num_conns < self.newspeer.maxparallel / 2 {
                             self.add_connection().await;
                         }
+                    }
+
+                    if self.num_conns > 0 {
                         // wake up sleeping connections.
                         let _ = self.broadcast.send(PeerFeedItem::Ping);
                     }
+
                     continue;
                 }
             };
