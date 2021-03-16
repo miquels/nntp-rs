@@ -15,7 +15,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::util::clock;
+use super::nix::clock;
 
 #[derive(Clone, Copy, Default, Deserialize)]
 pub struct UnixTime(u64);
