@@ -3,9 +3,35 @@ use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::PathBuf;
 
 use crate::util::UnixTime;
+
+// There are quite a few systemcall wrappers here. Most are abviously safe,
+// but fork() can be very dangerous. Note that all the wrapper functions
+// are private and cannot be used outside this file.
+
+pub fn pipe() -> io::Result<(fs::File, fs::File)> {
+    let mut fds: [libc::c_int; 2] = [0; 2];
+    // this is safe, `fds` has been initialized.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // this is safe, `fds` is valid.
+    Ok((unsafe { fs::File::from_raw_fd(fds[0]) }, unsafe {
+        fs::File::from_raw_fd(fds[1])
+    }))
+}
+
+pub fn dup2(oldfd: RawFd, newfd: RawFd) -> io::Result<()> {
+    // safe: no rust-related side-effects.
+    if unsafe { libc::dup2(oldfd, newfd) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 
 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
 #[inline]

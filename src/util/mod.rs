@@ -33,6 +33,7 @@ pub use self::nix::creds::*;
 pub use self::nix::daemonize::*;
 pub use self::nix::hostname::*;
 pub use self::nix::io::*;
+pub use self::nix::memlock::*;
 pub use self::nix::proc::*;
 pub use self::nix::socket::*;
 
