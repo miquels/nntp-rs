@@ -215,6 +215,13 @@ fn main() -> Result<()> {
         other => run_subcommand(other, Some(&*config), opts.pretty),
     };
 
+    if config.history.mlock == MLockMode::All {
+        history::mlock::mlock_all(&config.history.file).unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            exit(1);
+        });
+    }
+
     let listenaddrs = run_opts.listen.as_ref().or_else(|| config.server.listen.as_ref());
     let addrs = config::parse_listeners(listenaddrs).unwrap_or_else(|e| {
         eprintln!("nntp-rs: {}", e);

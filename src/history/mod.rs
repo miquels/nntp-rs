@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod cache;
 pub mod diablo;
 pub mod memdb;
+pub mod mlock;
 
 use std::future::Future;
 use std::io;
