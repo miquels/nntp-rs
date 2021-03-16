@@ -1,76 +1,58 @@
 //! Implementation of a DelayQueue.
 //!
-use std::collections::VecDeque;
-use std::future::Future;
+use std::cmp;
+use std::collections::{BinaryHeap, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use tokio::time::{sleep, Sleep};
+use tokio::time::{sleep_until, Sleep};
 use tokio::time::{Duration, Instant};
 use tokio_stream::Stream;
 
-// max 10 seconds, resolution 500ms.
-const NUM_SLOTS: usize = 20;
-const TICKS_PER_SEC: u64 = 2;
-
-/// Iterator returned by DelayQueue::drain()
-pub struct Drain<'a, T> {
-    queue: &'a mut DelayQueue<T>,
-    pos:   usize,
+struct DelayItem<T> {
+    when:   Instant,
+    item:   T,
 }
 
-impl<'a, T: Unpin> Drain<'a, T> {
-    pub fn len(&self) -> usize {
-        self.queue.len()
+// Reverse ordering.
+impl<T> cmp::Ord for DelayItem<T> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        other.when.cmp(&self.when)
     }
 }
 
-impl<'a, T: Unpin> Iterator for Drain<'a, T> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        if let Some(item) = self.queue.ready_items.pop_front() {
-            self.queue.size -= 1;
-            return Some(item);
-        }
-        while self.pos < NUM_SLOTS {
-            let slot = (self.queue.head + self.pos) % NUM_SLOTS;
-            if let Some(item) = self.queue.slots[slot].pop_front() {
-                self.queue.size -= 1;
-                return Some(item);
-            }
-            self.pos += 1;
-        }
-        None
+impl<T> cmp::PartialOrd for DelayItem<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
+
+impl<T> cmp::PartialEq for DelayItem<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.when == other.when
+    }
+}
+impl<T> cmp::Eq for DelayItem<T> {}
 
 /// Our own version of DelayQueue.
 ///
 /// The main difference is that this version can be drained.
-/// The other difference is that this version is very coarse,
-/// and if it's not polled often it get completely inaccurate.
-///
-/// But that's OK, we just want "delay this a bit" in general
-/// and we won't fuss over accuracy.
 pub struct DelayQueue<T> {
-    slots:       [VecDeque<T>; NUM_SLOTS],
-    ready_items: VecDeque<T>,
-    head:        usize,
-    size:        usize,
-    cap:         usize,
-    timer:       Option<Pin<Box<Sleep>>>,
+    queue:            BinaryHeap<DelayItem<T>>,
+    ready_items:      VecDeque<T>,
+    cap:              usize,
+    pub(crate) batch: Duration,
+    timer:            Option<Pin<Box<Sleep>>>,
 }
 
 impl<T: Unpin> DelayQueue<T> {
     /// Create a new bounded queue.
     pub fn with_capacity(cap: usize) -> DelayQueue<T> {
         DelayQueue {
-            slots: array_init::array_init(|_| VecDeque::<T>::new()),
-            ready_items: VecDeque::<T>::new(),
-            head: 0,
-            size: 0,
+            queue: BinaryHeap::new(),
+            ready_items: VecDeque::new(),
             cap,
+            batch: Duration::from_millis(500),
             timer: None,
         }
     }
@@ -79,42 +61,38 @@ impl<T: Unpin> DelayQueue<T> {
     ///
     /// If the queue is full, the item is  returned as an error.
     pub fn insert(&mut self, item: T, delay: Duration) -> Result<(), T> {
-        if self.size == self.cap {
+        if self.queue.len() == self.cap {
             return Err(item);
         }
-        self.size += 1;
 
-        // calculate slot.
-        let slot = std::cmp::max(delay.as_secs(), 1) as usize * TICKS_PER_SEC as usize;
-        let slot = (self.head + std::cmp::min(slot, NUM_SLOTS - 1)) % NUM_SLOTS;
-        self.slots[slot].push_back(item);
-        if self.timer.is_none() {
-            self.arm_timer();
+        let when = Instant::now() + delay;
+        self.queue.push(DelayItem{ when, item });
+
+        if self.queue.peek().map(|first| when < first.when).unwrap_or(true) {
+            // empty queue, or "when" is earlier than "first.when". set timer.
+            self.arm_timer(when);
         }
         Ok(())
     }
 
     /// Queue length.
     pub fn len(&self) -> usize {
-        self.size
+        self.ready_items.len()+ self.queue.len()
     }
 
     /// Drain the queue.
     pub fn drain(&mut self) -> Drain<'_, T> {
         Drain {
-            queue: self,
-            pos:   0,
+            dq: self,
         }
     }
 
     // arm or re-arm the timer.
-    fn arm_timer(&mut self) {
-        let d = Duration::from_millis(1000 / TICKS_PER_SEC + 1);
-        if let Some(timer) = self.timer.as_mut() {
-            // second time as_mut() is to get at the Future.
-            timer.as_mut().reset(Instant::now() + d);
+    fn arm_timer(&mut self, when: Instant) {
+        if let Some(ref mut timer) = self.timer {
+            timer.as_mut().reset(when);
         } else {
-            self.timer = Some(Box::pin(sleep(d)));
+            self.timer = Some(Box::pin(sleep_until(when)));
         }
     }
 }
@@ -124,68 +102,91 @@ where T: Unpin
 {
     type Item = T;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut this = self.get_mut();
-        let mut tick = false;
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
 
         // return ready_items first.
         if let Some(item) = this.ready_items.pop_front() {
-            this.size -= 1;
             return Poll::Ready(Some(item));
         }
 
-        // poll timer.
-        if let Some(timer) = this.timer.take() {
-            tokio::pin!(timer);
-            //futures::ready!(timer.as_mut().poll(cx));
-            //futures::ready!(Pin::new(timer).poll(cx));
-            futures::ready!(timer.poll(cx));
-            tick = true;
-        }
-
-        // see if there's anything to do.
-        if this.size == 0 {
-            this.timer.take();
+        if this.queue.len() == 0 {
             return Poll::Pending;
         }
 
-        // get next item, if any.
-        let head = this.head;
-        let item = if this.slots[head].len() < 2 {
-            // current slot has 0 or 1 items.
-            this.slots[head].pop_front()
-        } else {
-            // add current slot items to the back of the ready_items queue
-            // and return the front item.
-            while let Some(item) = this.slots[head].pop_front() {
-                this.ready_items.push_back(item);
-            }
-            this.ready_items.pop_front()
-        };
-        if item.is_some() {
-            this.size -= 1;
-        }
+        // We batch up the next 0.5 seconds worth of items.
+        let now = Instant::now();
+        let max = now + this.batch;
 
-        // the slot at head is now empty, so if the timer fired, advance head.
-        if tick {
-            this.head = (this.head + 1) % NUM_SLOTS;
-            // if there are more items queued, rearm the timer. otherwise drop it.
-            if this.size - this.ready_items.len() > 0 {
-                this.arm_timer();
-                // The timer needs to be polled at least once. If we're going to
-                // return Poll::Pending, that will not happen, so do it now.
-                if item.is_none() {
-                    let _ = Pin::new(this.timer.as_mut().unwrap()).poll(cx);
-                }
+        while let Some(qitem) = this.queue.peek() {
+            if qitem.when < max {
+                let qitem = this.queue.pop().unwrap();
+                this.ready_items.push_back(qitem.item);
             } else {
-                this.timer.take();
+                break;
             }
         }
 
-        if item.is_some() {
-            Poll::Ready(item)
+        // Do we have an item ready to go?
+        if let Some(item) = this.ready_items.pop_front() {
+            return Poll::Ready(Some(item));
+        }
+
+        // re-arm timer.
+        let some_when = this.queue.peek().map(|item| item.when);
+        if let Some(when) = some_when {
+            this.arm_timer(when);
+            return Poll::Pending;
+        }
+
+
+        Poll::Pending
+    }
+}
+
+/// Iterator returned by DelayQueue::into_iter()
+pub struct Drain<'a, T> {
+    dq: &'a mut DelayQueue<T>,
+}
+
+impl<'a, T: Unpin> Drain<'a, T> {
+    pub fn len(&self) -> usize {
+        self.dq.len()
+    }
+}
+
+impl<'a, T: Unpin> Iterator for Drain<'a, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        if let Some(item) = self.dq.ready_items.pop_front() {
+            Some(item)
         } else {
-            Poll::Pending
+            self.dq.queue.pop().map(|d| d.item)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DelayQueue;
+    use tokio::time::Duration;
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn test() {
+        let mut dq = DelayQueue::with_capacity(100);
+        dq.batch = Duration::from_millis(5);
+        dq.insert(4u32, Duration::from_millis(80)).unwrap();
+        dq.insert(5u32, Duration::from_millis(81)).unwrap();
+        dq.insert(1u32, Duration::from_millis(20)).unwrap();
+        dq.insert(3u32, Duration::from_millis(60)).unwrap();
+        dq.insert(2u32, Duration::from_millis(40)).unwrap();
+        assert!(dq.next().await.unwrap() == 1);
+        assert!(dq.next().await.unwrap() == 2);
+        assert!(dq.next().await.unwrap() == 3);
+        assert!(dq.next().await.unwrap() == 4);
+        assert!(dq.next().await.unwrap() == 5);
+    }
+}
+
