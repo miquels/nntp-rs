@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt::Write as _;
 use std::io;
 use std::panic;
@@ -174,6 +175,8 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 fn main() -> Result<()> {
+    maybe_do_mlock();
+
     let opts = MainOpts::from_args();
 
     if opts.trace {
@@ -216,8 +219,9 @@ fn main() -> Result<()> {
     };
 
     if config.history.mlock == MLockMode::All {
-        history::mlock::mlock_all(&config.history.file).unwrap_or_else(|e| {
-            eprintln!("{}", e);
+        let hpath = config::expand_path(&config.paths, &config.history.file);
+        util::mlock_all(&hpath).unwrap_or_else(|e| {
+            eprintln!("mlock_all: {}", e);
             exit(1);
         });
     }
@@ -320,6 +324,15 @@ fn main() -> Result<()> {
         exit(1);
     }
     Ok(())
+}
+
+fn maybe_do_mlock() {
+    if let Ok(envvar) = env::var("NNTP_RS_MLOCK") {
+        let argv: Vec<_> = env::args().collect();
+        if argv.len() >= 2 && &argv[1] == "mlock" && argv[2] == envvar {
+            util::mlock_run(&argv[2]);
+        }
+    }
 }
 
 fn run_subcommand(cmd: Command, config: Option<&config::Config>, pretty: bool) -> ! {

@@ -17,8 +17,11 @@ pub struct MemLock {
 impl MemLock {
 
     /// Return new, _unlocked_ MemLock struct.
-    pub fn new(file: fs::File) -> io::Result<MemLock> {
+    pub fn new(file: &fs::File) -> io::Result<MemLock> {
         let meta = file.metadata()?;
+        if meta.len() > (usize::MAX as u64) {
+            return Err(ioerr!(Other, "file too big"));
+        }
         let len = meta.len() as libc::size_t;
 
         let ptr = unsafe {
@@ -71,16 +74,22 @@ impl MemLock {
             // mremap keep the range that was locked, locked.
             // so we only need to mlock the extra pages if new_len > len.
             if new_len > self.len {
-                let start_addr = round_pagesz(self.ptr as usize) as *const c_void;
-                let len = new_len - round_pagesz(self.len);
+                let start_addr = self.ptr as usize + self.len;
+                let page_start = round_pagesz(start_addr);
+                let len = (new_len - self.len) + (start_addr - page_start);
                 // XXX we ignore re-mlock() errors, for now.
-                libc::mlock(start_addr, len);
+                libc::mlock(page_start as *const c_void, len);
             }
 
             self.ptr = ptr;
             self.len = new_len;
         }
         Ok(())
+    }
+
+    /// Size of the locked area.
+    pub fn len(&self) -> usize {
+        self.len
     }
 }
 

@@ -10,6 +10,7 @@ mod de;
 mod dhash;
 pub mod format;
 mod hashfeed;
+mod mlock;
 mod mmap_atomicu32;
 mod nix;
 mod wildmat;
@@ -25,6 +26,7 @@ pub use self::de::*;
 pub use self::dhash::*;
 pub use self::hashfeed::*;
 pub use self::mmap_atomicu32::*;
+pub use self::mlock::*;
 pub use self::wildmat::*;
 pub use self::wildmat_fn::*;
 

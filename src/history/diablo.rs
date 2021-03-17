@@ -351,7 +351,7 @@ impl DHistoryInner {
         }
 
         // mmap the hash table index.
-        let do_mlock = lock_mode != MLockMode::None;
+        let do_mlock = lock_mode == MLockMode::Index;
         let buckets = MmapAtomicU32::new(&f, rw, do_mlock, DHistHead::SIZE as u64, dhh.hash_size as usize)
             .map_err(|e| io::Error::new(e.kind(), format!("{:?}: mmap failed: {}", path, e)))?;
 
