@@ -37,5 +37,8 @@ pub use self::nix::hostname::*;
 pub use self::nix::io::*;
 pub use self::nix::memlock::*;
 pub use self::nix::proc::*;
+pub use self::nix::signal;
+pub use self::nix::signal::ignore_signal;
+pub use self::nix::signal::ignore_most_signals;
 pub use self::nix::socket::*;
 

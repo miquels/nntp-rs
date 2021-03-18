@@ -330,6 +330,7 @@ fn maybe_do_mlock() {
     if let Ok(envvar) = env::var("NNTP_RS_MLOCK") {
         let argv: Vec<_> = env::args().collect();
         if argv.len() >= 2 && &argv[1] == "mlock" && argv[2] == envvar {
+            util::ignore_most_signals();
             util::mlock_run(&argv[2]);
         }
     }
