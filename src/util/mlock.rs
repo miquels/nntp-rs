@@ -57,6 +57,7 @@ pub fn mlock_run(path: &str) {
         let mut buffer = [0; 16];
         let mut stdin = io::stdin();
         let _= stdin.read(&mut buffer);
+        eprintln!("mlock process: exit");
         exit(0);
     });
 

@@ -4,9 +4,6 @@ use std::os::unix::io::AsRawFd;
 use std::ptr;
 
 use libc::c_void;
-use once_cell::sync::Lazy;
-
-static PAGE_SIZE: Lazy<usize> = Lazy::new(|| unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) as usize });
 
 /// A handle to a file of which the pages are mlocked() in memory.
 pub struct MemLock {
@@ -70,19 +67,15 @@ impl MemLock {
             if ptr == ptr::null() {
                 return Err(io::Error::last_os_error());
             }
+            self.ptr = ptr;
+            self.len = new_len;
 
             // mremap keep the range that was locked, locked.
             // so we only need to mlock the extra pages if new_len > len.
             if new_len > self.len {
-                let start_addr = self.ptr as usize + self.len;
-                let page_start = round_pagesz(start_addr);
-                let len = (new_len - self.len) + (start_addr - page_start);
-                // XXX we ignore re-mlock() errors, for now.
-                libc::mlock(page_start as *const c_void, len);
+                // ignore result.
+                libc::mlock(self.ptr as *const c_void, self.len);
             }
-
-            self.ptr = ptr;
-            self.len = new_len;
         }
         Ok(())
     }
@@ -99,11 +92,5 @@ impl Drop for MemLock {
             libc::munmap(self.ptr as *mut c_void, self.len);
         }
     }
-}
-
-fn round_pagesz(sz: usize) -> usize {
-    use std::ops::Deref;
-    let page_size = *(PAGE_SIZE.deref());
-    (sz / page_size) * page_size
 }
 
