@@ -85,6 +85,8 @@ mod try_read_at {
         let res = unsafe { preadv2(fd, iovptr, 1, offset as libc::off_t, RWF_NOWAIT) };
         if res < 0 {
             Err(io::Error::last_os_error())
+        } else if res as usize != buf.len() {
+            Err(io::Error::from_raw_os_error(libc::EAGAIN))
         } else {
             Ok(res as usize)
         }
