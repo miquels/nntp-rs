@@ -170,23 +170,29 @@ impl<'a, T: Unpin> Iterator for Drain<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::DelayQueue;
-    use tokio::time::Duration;
+    use tokio::time::{Duration, Instant};
     use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn test() {
         let mut dq = DelayQueue::with_capacity(100);
+        let start = Instant::now();
         dq.batch = Duration::from_millis(5);
         dq.insert(4u32, Duration::from_millis(80)).unwrap();
-        dq.insert(5u32, Duration::from_millis(81)).unwrap();
+        dq.insert(5u32, Duration::from_millis(100)).unwrap();
         dq.insert(1u32, Duration::from_millis(20)).unwrap();
         dq.insert(3u32, Duration::from_millis(60)).unwrap();
         dq.insert(2u32, Duration::from_millis(40)).unwrap();
         assert!(dq.next().await.unwrap() == 1);
+        assert!(start.elapsed() >= Duration::from_millis(20));
         assert!(dq.next().await.unwrap() == 2);
+        assert!(start.elapsed() >= Duration::from_millis(40));
         assert!(dq.next().await.unwrap() == 3);
+        assert!(start.elapsed() >= Duration::from_millis(60));
         assert!(dq.next().await.unwrap() == 4);
+        assert!(start.elapsed() >= Duration::from_millis(80));
         assert!(dq.next().await.unwrap() == 5);
+        assert!(start.elapsed() >= Duration::from_millis(100));
     }
 }
 
