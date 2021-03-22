@@ -110,17 +110,6 @@ impl NewsFeeds {
         }
     }
 
-    /// Setup %XCLIENT / xclient.
-    pub fn setup_xclient(&mut self) {
-        for e in self.peers.iter_mut() {
-            if e.label.as_str() == "%XCLIENT" {
-                e.xclient = true;
-            } else if e.xclient {
-                e.label = "%XCLIENT".into()
-            }
-        }
-    }
-
     /// Update the hostcache, after changes to self.
     pub fn update_hostcache(&self) {
         self.hcache.update(&self);

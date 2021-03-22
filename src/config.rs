@@ -348,7 +348,6 @@ pub fn set_config(mut cfg: Config) -> io::Result<Arc<Config>> {
     nf.set_hostname_default();
     nf.init_hostcache();
     nf.resolve_references();
-    nf.setup_xclient();
     nf.check_self(&cfg);
     let newsfeeds = Arc::get_mut(&mut cfg.newsfeeds).unwrap();
     std::mem::swap(&mut nf, newsfeeds);

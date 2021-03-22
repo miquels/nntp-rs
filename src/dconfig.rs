@@ -41,6 +41,9 @@ fn dnewsfeeds_to_newsfeeds(mut dnf: DNewsFeeds, nf: &mut NewsFeeds) {
         if let Some(ref global) = dnf.labels.global {
             peer.merge_template(global);
         }
+        if peer.label.as_str() == "%XCLIENT" {
+            peer.xclient = true;
+        }
         nf.peers.push(peer);
     }
     for gd in dnf.groupdef.into_iter() {
