@@ -118,76 +118,98 @@ impl Connection {
         queue: Queue,
     ) -> io::Result<Connection> {
         let mut broadcast_rx = broadcast.subscribe();
-        let mut do_delay = false;
 
         let mut fail_delay = 1000f64;
         delay_jitter(&mut fail_delay);
 
         loop {
-            log::info!(
-                "Feed {}:{}: connecting to {}",
-                newspeer.label,
-                id,
-                newspeer.outhost
-            );
 
-            let conn_fut = Connection::connect(newspeer.clone(), id);
-            tokio::pin!(conn_fut);
+            // Only try connecting if the hostname resolves.
+            let addrs = crate::dns::lookup_ip(&newspeer.outhost).await;
+            let resolves = addrs.map(|mut a| a.next().is_some()).unwrap_or(false);
 
-            let delay_fut = conditional_fut!(do_delay, {
-                log::debug!("Connection::new: delay {} ms", fail_delay as u64);
-                sleep(Duration::from_millis(fail_delay as u64))
-            });
+            if resolves {
+                log::info!(
+                    "Feed {}:{}: connecting to {}",
+                    newspeer.label,
+                    id,
+                    newspeer.outhost
+                );
+
+                let conn_fut = Connection::connect(newspeer.clone(), id);
+                tokio::pin!(conn_fut);
+
+                // Start connecting and also listen to broadcasts while connecting.
+                loop {
+                    tokio::select! {
+                        conn = &mut conn_fut => {
+                            let (codec, ipaddr, connect_msg) = match conn {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    // break out of the inner loop and retry.
+                                    log::warn!("{}:{}: {}", newspeer.label, id, e);
+                                    break;
+                                },
+                            };
+                            let rewrite = newspeer.headfeed && !newspeer.preservebytes;
+
+                            // Build and return a new Connection struct.
+                            let (reader, writer) = codec.split();
+                            let mut conn = Connection {
+                                id,
+                                ipaddr,
+                                newspeer,
+                                reader,
+                                writer,
+                                send_queue: VecDeque::new(),
+                                recv_queue: VecDeque::new(),
+                                dropped: Vec::new(),
+                                stats: TxSessionStats::default(),
+                                spool,
+                                tx_chan,
+                                rx_queue,
+                                deferred: DeferredQueue::new(),
+                                broadcast: broadcast_rx,
+                                rewrite,
+                                queue,
+                                qitems: None,
+                                idle_counter: 0,
+                                quitting: false,
+                            };
+
+                            // Initialize stats logger and log connect message.
+                            conn.stats.on_connect(&conn.newspeer.label, id, &conn.newspeer.outhost, conn.ipaddr,  &connect_msg);
+                            return Ok(conn);
+                        }
+                        item = broadcast_rx.recv() => {
+                            // if any of these events happen, cancel the connect.
+                            match item {
+                                Ok(PeerFeedItem::Reconfigure) |
+                                Ok(PeerFeedItem::ExitGraceful) |
+                                Ok(PeerFeedItem::ExitNow) |
+                                Err(_) => {
+                                    return Err(ioerr!(ConnectionAborted, "{}:{}: connection cancelled", newspeer.label, id));
+                                },
+                                _ => {},
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Do retry delay while listening to broadcasts.
+            log::debug!("Connection::new: delay {} ms", fail_delay as u64);
+            let delay_fut = sleep(Duration::from_millis(fail_delay as u64));
             tokio::pin!(delay_fut);
 
-            // Start connecting, but also listen to broadcasts while connecting.
+            // Increase delay for next iteration.
+            delay_increase(&mut fail_delay, 120_000);
+            delay_jitter(&mut fail_delay);
+
             loop {
                 tokio::select! {
                     _ = &mut delay_fut => {
-                        do_delay = false;
-                        delay_increase(&mut fail_delay, 120_000);
-                        delay_jitter(&mut fail_delay);
-                        continue;
-                    }
-                    conn = &mut conn_fut, if !do_delay => {
-                        let (codec, ipaddr, connect_msg) = match conn {
-                            Ok(c) => c,
-                            Err(e) => {
-                                // break out of the inner loop and retry.
-                                log::warn!("{}:{}: {}", newspeer.label, id, e);
-                                do_delay = true;
-                                break;
-                            },
-                        };
-                        let rewrite = newspeer.headfeed && !newspeer.preservebytes;
-
-                        // Build and return a new Connection struct.
-                        let (reader, writer) = codec.split();
-                        let mut conn = Connection {
-                            id,
-                            ipaddr,
-                            newspeer,
-                            reader,
-                            writer,
-                            send_queue: VecDeque::new(),
-                            recv_queue: VecDeque::new(),
-                            dropped: Vec::new(),
-                            stats: TxSessionStats::default(),
-                            spool,
-                            tx_chan,
-                            rx_queue,
-                            deferred: DeferredQueue::new(),
-                            broadcast: broadcast_rx,
-                            rewrite,
-                            queue,
-                            qitems: None,
-                            idle_counter: 0,
-                            quitting: false,
-                        };
-
-                        // Initialize stats logger and log connect message.
-                        conn.stats.on_connect(&conn.newspeer.label, id, &conn.newspeer.outhost, conn.ipaddr,  &connect_msg);
-                        return Ok(conn);
+                        break;
                     }
                     item = broadcast_rx.recv() => {
                         // if any of these events happen, cancel the connect.

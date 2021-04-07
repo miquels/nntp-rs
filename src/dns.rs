@@ -6,6 +6,7 @@
 //! Then if a peer connects, we try to find the peers' IP address in the
 //! cache. This way we're not dependent on PTR lookups.
 //!
+use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
@@ -23,8 +24,10 @@ use tokio_stream::StreamExt;
 use crate::bus::{self, Notification};
 use crate::newsfeeds::NewsFeeds;
 
-const DNS_REFRESH_SECS: Duration = Duration::from_secs(3600);
-const DNS_MAX_TEMPERROR_SECS: Duration = Duration::from_secs(86400);
+const DNS_REFRESH: Duration = Duration::from_secs(3600);
+const DNS_MIN_RETRY: Duration = Duration::from_secs(60);
+const DNS_MAX_RETRY: Duration = Duration::from_secs(900);
+const DNS_MAX_TEMPERROR: Duration = Duration::from_secs(86400);
 
 static HOST_CACHE: Lazy<HostCache> = Lazy::new(|| HostCache::new());
 
@@ -138,7 +141,8 @@ struct HostEntry {
     label:      String,
     hostname:   String,
     addrs:      Vec<IpAddr>,
-    lastupdate: Option<Instant>,
+    retries:    u32,
+    nextupdate: Option<Instant>,
 }
 
 // Host cache.
@@ -200,7 +204,8 @@ impl HostCache {
                         label:      label.to_string(),
                         hostname:   host.clone(),
                         addrs:      Vec::new(),
-                        lastupdate: None,
+                        retries:    0,
+                        nextupdate: None,
                     });
                 },
             }
@@ -302,6 +307,7 @@ impl HostCache {
                     // Lookup "hostname".
                     log::debug!("Refreshing host cache for {}", entry.hostname);
                     let start = Instant::now();
+                    let nextupdate = start + DNS_REFRESH;
                     let res = lookup_ip(entry.hostname.as_str()).await;
                     let elapsed = start.elapsed();
                     let elapsed_ms = elapsed.as_millis();
@@ -317,9 +323,13 @@ impl HostCache {
                             if addrs.len() == 0 {
                                 // should not happen. log and handle as transient error.
                                 log::warn!("resolver: lookup {}: OK, but 0 results?!", entry.hostname);
+                                entry.retries += 1;
+                                let delay = cmp::min(DNS_MIN_RETRY * entry.retries, DNS_MAX_RETRY);
+                                entry.nextupdate = Some(start + delay);
                             } else {
                                 entry.addrs = addrs;
-                                entry.lastupdate = Some(start);
+                                entry.nextupdate = Some(nextupdate);
+                                entry.retries = 0;
                             }
                         },
                         Err(e) => {
@@ -328,15 +338,17 @@ impl HostCache {
                                 io::ErrorKind::NotFound { .. } => {
                                     log::warn!("resolver: lookup {}: host not found", entry.hostname);
                                     entry.addrs.truncate(0);
-                                    entry.lastupdate = Some(start);
+                                    entry.nextupdate = Some(nextupdate);
                                 },
                                 // Transient error, retry soon.
                                 _ => {
                                     log::warn!("resolver: lookup {}: {}", entry.hostname, e);
-                                    if elapsed >= DNS_MAX_TEMPERROR_SECS {
+                                    if elapsed >= DNS_MAX_TEMPERROR {
                                         entry.addrs.truncate(0);
                                     }
-                                    entry.lastupdate = Some(start);
+                                    entry.retries += 1;
+                                    let delay = cmp::min(DNS_MIN_RETRY * entry.retries, DNS_MAX_RETRY);
+                                    entry.nextupdate = Some(start + delay);
                                 },
                             }
                         },
@@ -359,7 +371,8 @@ impl HostCache {
                 for entry in inner.entries.iter_mut() {
                     if let Some(e) = updated.get(&entry.hostname) {
                         entry.addrs = e.addrs.clone();
-                        entry.lastupdate = e.lastupdate.clone();
+                        entry.nextupdate = e.nextupdate.clone();
+                        entry.retries = e.retries;
                     }
                 }
 
@@ -378,8 +391,8 @@ impl HostCache {
 }
 
 fn needs_update(entry: &HostEntry, now: &Instant) -> bool {
-    match entry.lastupdate {
-        Some(t) => now.saturating_duration_since(t) >= DNS_REFRESH_SECS,
+    match entry.nextupdate {
+        Some(ref t) => now >= t,
         None => true,
     }
 }
