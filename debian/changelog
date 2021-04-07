@@ -1,6 +1,6 @@
-nntp-rs (0.2.2) buster; urgency=low
+nntp-rs (0.2.3) buster; urgency=low
 
   * development release
 
- -- Miquel van Smoorenburg (XS4ALL) <mikevs@xs4all.net>  Sun, 14 Mar 2021 15:29:24 +0100
+ -- Miquel van Smoorenburg (XS4ALL) <mikevs@xs4all.net>  Wed, 07 Apr 2021 11:42:22 +0200
 
