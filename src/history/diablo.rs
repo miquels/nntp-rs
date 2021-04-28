@@ -13,6 +13,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use bytemuck::{Pod, Zeroable};
 use fs2::FileExt as _;
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 use crate::history::{HistBackend, HistEnt, HistStatus, MLockMode};
@@ -597,6 +598,13 @@ impl DHistoryInner {
         no_rename: bool,
         force: bool,
     ) -> io::Result<Option<Arc<DHistoryInner>>> {
+
+        static EXPIRING: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+        let _expire_guard = match EXPIRING.try_lock() {
+            Some(guard) => guard,
+            None => return Ok(None),
+        };
+
         // get age of oldest article for each spool.
         let spool_oldest = spool.get_oldest();
         if !force && !self.need_expire(&spool_oldest) {
