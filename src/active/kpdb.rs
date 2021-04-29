@@ -219,10 +219,7 @@ impl KpDb {
     pub fn do_flush(&mut self) -> io::Result<()> {
         // Will never happen but check anyway.
         if self.datasz + self.ndata.len() > MAX_FILE_SIZE {
-            panic!(format!(
-                "kpdb: FATAL: {}: grown too big (>{})",
-                self.path, MAX_FILE_SIZE
-            ));
+            panic!("kpdb: FATAL: {}: grown too big (>{})", self.path, MAX_FILE_SIZE);
         }
 
         let mut ndata = std::mem::replace(&mut self.ndata, Vec::new());
@@ -247,20 +244,20 @@ impl KpDb {
             match self.file.metadata() {
                 Err(_) => {
                     // If we can't even fstat() anymore, the world is broken.
-                    panic!(format!(
+                    panic!(
                         "kpdb: FATAL: {}: partial written database file, can't recover: {}",
                         self.path, e
-                    ));
+                    );
                 },
                 Ok(meta) => {
                     // See if we can recover.
                     if meta.len() != oldlen {
                         if let Err(_) = self.file.set_len(oldlen) {
                             // If ftruncate fails, there's no way to recover.
-                            panic!(format!(
+                            panic!(
                                 "kpdb: FATAL: {}: partial written database file, can't recover: {}",
                                 self.path, e
-                            ));
+                            );
                         }
                     }
                     self.ndata = ndata;
@@ -280,7 +277,7 @@ impl KpDb {
         // If this fails, we are in an unrecoverable state.
         let data = match unsafe { MmapMut::map_mut(&self.file) } {
             Ok(data) => data,
-            Err(e) => panic!(format!("kpdb: FATAL: mmap {}: {}", self.path, e)),
+            Err(e) => panic!("kpdb: FATAL: mmap {}: {}", self.path, e),
         };
 
         // Lock the file into memory, so that we never block on pagefaults.
