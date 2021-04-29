@@ -114,19 +114,21 @@ impl Buffer {
             4096
         } else if size < 65536 {
             65536
-        } else {
+        } else if size < 2097152 {
             size.next_power_of_two()
+        } else {
+            (1 + size / 1048576) * 1048576
         }
     }
 
     /// Make sure at least `size` bytes are available.
     #[inline]
     pub fn reserve(&mut self, size: usize) {
-        let end = self.len() + size;
+        let end = self.data.len() + size;
         if end < self.data.capacity() {
             return;
         }
-        self.data.reserve(Self::round_size_up(end) - self.len());
+        self.data.reserve_exact(Self::round_size_up(end) - self.data.len());
     }
 
     /// total length of all data in this Buffer.

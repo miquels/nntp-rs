@@ -246,48 +246,45 @@ where
 {
     // fill the read buffer as much as possible.
     fn fill_read_buf(&mut self, cx: &mut Context) -> Poll<Result<usize, io::Error>> {
+
+        // Fuse the future if we're at EOF.
         if self.rd_eof {
             return Poll::Ready(Ok(0));
         }
-        let mut bytes_read = 0usize;
-        loop {
-            // in a overflow situation, truncate the buffer. 32768 should be enough
-            // to still have the headers available. Maybe we should scan to find the
-            // header/body separator though.
-            if self.rd_overflow && self.rd.len() > 32768 {
-                self.rd.truncate(32768);
-            }
 
-            // Ensure the read buffer has capacity.
-            // We grow the reserve_size during the session, and never shrink it.
-            if self.rd_reserve_size < 131072 {
-                let buflen = self.rd.len();
-                let size = if buflen <= 1024 {
-                    1024
-                } else if buflen <= 16384 {
-                    16384
-                } else {
-                    131072
-                };
-                self.rd_reserve_size = size;
-            }
-            let size = self.rd_reserve_size;
-            self.rd.reserve(size);
+        // in a overflow situation, truncate the buffer. 32768 should be enough
+        // to still have the headers available. Maybe we should scan to find the
+        // header/body separator though.
+        if self.rd_overflow && self.rd.len() > 32768 {
+            self.rd.truncate(32768);
+        }
 
-            // Read data into the buffer if it's available.
-            let socket = Pin::new(&mut self.socket);
-            match self.rd.poll_read(socket, cx) {
-                Poll::Ready(Ok(n)) => {
-                    if n == 0 {
-                        self.rd_eof = true;
-                        return Poll::Ready(Ok(bytes_read));
-                    }
-                    bytes_read += n;
-                },
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending if bytes_read > 0 => return Poll::Ready(Ok(bytes_read)),
-                Poll::Pending => return Poll::Pending,
+        // Ensure the read buffer has capacity.
+        // We grow the reserve_size during the session, and never shrink it.
+        if self.rd_reserve_size < 131072 {
+            let buflen = self.rd.len();
+            let size = if buflen <= 1024 {
+                1024
+            } else if buflen <= 16384 {
+                16384
+            } else {
+                131072
             };
+            self.rd_reserve_size = size;
+        }
+        let size = self.rd_reserve_size;
+        self.rd.reserve(size);
+
+        // Read data into the buffer if it's available.
+        let socket = Pin::new(&mut self.socket);
+        match self.rd.poll_read(socket, cx) {
+            Poll::Ready(Ok(n)) => {
+                if n == 0 {
+                    self.rd_eof = true;
+                }
+                Poll::Ready(Ok(n))
+            },
+            other => other,
         }
     }
 
@@ -424,30 +421,42 @@ where
     }
 
     fn poll_read(&mut self, cx: &mut Context) -> Poll<io::Result<NntpInput>> {
-        // read as much data as we can.
-        let sock_closed = match self.fill_read_buf(cx) {
-            Poll::Ready(Ok(0)) => true,
-            Poll::Ready(Ok(_)) => false,
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => false,
-        };
 
-        // Then process the data.
-        if self.rd.len() > 0 {
+        let mut sock_closed = false;
+        let mut no_more = false;
+        let mut need_data = self.rd_pos == self.rd.len();
+
+        while !no_more {
+
+            if need_data {
+                // read more data from the socket.
+                match self.fill_read_buf(cx) {
+                    Poll::Ready(Ok(0)) => {
+                        no_more = true;
+                        sock_closed = true;
+                    },
+                    Poll::Ready(Ok(_)) => {
+                        self.reset_rd_timer();
+                    },
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {
+                        no_more = true;
+                    },
+                }
+            }
+            if self.rd_pos == self.rd.len() {
+                break;
+            }
+
+            // There is some data to process.
             let res = match self.rd_mode {
                 CodecMode::ReadLine => self.poll_read_line(),
                 CodecMode::ReadBlock => self.poll_read_block(false),
                 CodecMode::ReadArticle => self.poll_read_article(),
             };
             match res {
-                Poll::Pending => {
-                    // we read some data, so reset the timer.
-                    self.reset_rd_timer();
-                },
-                res => {
-                    // we got a full line/block/article.
-                    return res;
-                },
+                Poll::Ready(v) => return Poll::Ready(v),
+                Poll::Pending => need_data = true,
             }
         }
 
