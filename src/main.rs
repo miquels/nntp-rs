@@ -516,7 +516,7 @@ async fn test_article(opts: TestArticleOpts) -> Result<()> {
     let num_arts = opts.num_arts.unwrap_or(1);
 
     for _ in 0..num_arts {
-        let msgid = nntp_client::message_id(None);
+        let msgid = util::generate_message_id(None);
         let hostname = msgid.split("@").nth(1).unwrap();
 
         let mut buf = String::new();
