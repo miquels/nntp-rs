@@ -26,7 +26,7 @@
 //! that start with a '-'. These are ignored.
 //!
 //! Diablo uses the "sort offset field" to order the database by record_key.
-//! It does a "re-sort" when "aaaaaaaa" >= 64, rewriting the "ssssssss" and
+//! It does a "re-sort" when "cccccccc" >= 128, rewriting the "ssssssss" and
 //! "mmmm" fields of all records, and resetting "aaaaaaaa".
 //!
 //! We simply read the entire file on startup and keep an in-memory
@@ -35,7 +35,7 @@
 //!
 //! It's not too hard to keep interoperability with diablo:
 //!
-//! - always set "aaaaaaaa" to 10000000, this causes diablo to "re-sort"
+//! - always set "cccccccc" to 10000000, this causes diablo to "re-sort"
 //!   the database when it starts up, fixing the "sssssssss" fields it needs.
 //! - always set "ssssssss" to 00000023 (offset of the first line)
 //! - always set "mmmmm" to 0000 (diablo appears to not use it either).
@@ -45,9 +45,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, ErrorKind, Seek, Write};
 
+use fs2::FileExt as _;
 use memmap::MmapMut;
 
 const MAX_FILE_SIZE: usize = 4_000_000_000;
+const MAX_RECORD_SIZE: usize = 8192;
+
+const OFF_SEQ: usize = 8;
+const OFF_MOD: usize = 17;
+const OFF_SSEQ: usize = 26;
+const OFF_REC: usize = 35;
 
 type Range = std::ops::Range<usize>;
 
@@ -57,14 +64,10 @@ type Range = std::ops::Range<usize>;
 
 /// An open database handle.
 pub struct KpDb {
-    // appends since db creation.
-    append_seq:  u32,
-    // last modified (written on exit).
-    modified:    u32,
-    // appends since last sort.
-    append_sseq: u32,
     // for each group, location and current value of artno_xref.
     records:     BTreeMap<String, RecordLoc>,
+    // Number of deleted ('-') records.
+    deleted:     u32,
     // The mmap'd file (impl's DerefMut &[u8]).
     data:        MmapMut,
     // Size of the mmap'ed file.
@@ -83,25 +86,34 @@ impl KpDb {
     /// If 'create' is true, the file is created if it did not exist,
     /// but if it _did_ exist the open will fail.
     pub fn open(path: impl AsRef<str>, create: bool) -> io::Result<KpDb> {
+
         let path = path.as_ref();
-        let mut options = fs::OpenOptions::new();
-        let options = options.read(true).write(true).create_new(create);
         let file = if create {
             // Create and initialize.
-            let mut file = options
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
                 .open(&path)
                 .map_err(|e| io::Error::new(e.kind(), format!("kpdb: create {}: {}", path, e)))?;
             write!(file, "$V00.00 00000000 {:08x} 10000000\n", unixtime_now())
                 .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
             file
         } else {
-            options
+            // Open existing file.
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
                 .open(&path)
                 .map_err(|e| io::Error::new(e.kind(), format!("kpdb: open {}: {}", path, e)))?
         };
 
-        // This is safe providing that other unrelated processes don't modify the file.
-        // We do put an fcntl lock on the file so other instances of nntp-rs will
+        // Get an exclusive lock (flock(2)).
+        file.try_lock_exclusive()
+            .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+
+        // SAFETY: Unrelated processes should not modify the file.
+        // We have a fcntl lock on the file so other instances of nntp-rs will
         // not ever modify the file concurrently.
         let data = unsafe { MmapMut::map_mut(&file) }?;
 
@@ -113,7 +125,7 @@ impl KpDb {
         }
 
         // Decode the head.
-        if data.len() < 35 || data[7] != b' ' || data[16] != b' ' || data[25] != b' ' || data[34] != b'\n' {
+        if data.len() < OFF_REC || data[OFF_SEQ-1] != b' ' || data[OFF_MOD-1] != b' ' || data[OFF_SSEQ-1] != b' ' || data[OFF_REC-1] != b'\n' {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 format!("kpdb: {}: head: cannot parse", path),
@@ -125,19 +137,19 @@ impl KpDb {
                 format!("kpdb: {}: head: unsupported version", path),
             ));
         }
-        let append_seq = u32_from_hex(&data[8..16]).ok_or_else(|| {
+        let _append_seq = u32_from_hex(&data[OFF_SEQ..OFF_SEQ+8]).ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidData,
                 format!("kpdb: {}: head: field 2 damaged", path),
             )
         })?;
-        let modified = u32_from_hex(&data[17..25]).ok_or_else(|| {
+        let _modified = u32_from_hex(&data[OFF_MOD..OFF_MOD+8]).ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidData,
                 format!("kpdb: {}: head: field 3 damaged", path),
             )
         })?;
-        let append_sseq = u32_from_hex(&data[26..34]).ok_or_else(|| {
+        let _append_sseq = u32_from_hex(&data[OFF_SSEQ..OFF_SSEQ+8]).ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidData,
                 format!("kpdb: {}: head: field 4 damaged", path),
@@ -154,11 +166,12 @@ impl KpDb {
         }
 
         // Now walk over the individual records.
-        let mut pos = 35;
+        let mut pos = OFF_REC;
         let mut lineno = 1;
         let datasz = data.len();
 
         let mut records = BTreeMap::new();
+        let mut deleted = 0;
 
         loop {
             // Find the newline at the end of the line.
@@ -176,26 +189,29 @@ impl KpDb {
 
             // We have a line.
             let line = &data[pos..idx];
-            if line.len() >= 8192 {
+            if line.len() >= MAX_RECORD_SIZE {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     format!("dactive.kp: line {}: too long", lineno),
                 ));
             }
+            let lpos = pos;
+            pos = idx + 1;
+
+            if line.len() > 0 && line[0] == b'-' {
+                deleted += 1;
+                continue;
+            }
 
             // Now parse it, and turn it into a RecordLoc struct.
             // That struct has the offset and length of the line.
-            let (name, record) = RecordLoc::new(line, pos as u32, lineno)?;
+            let (name, record) = RecordLoc::new(line, lpos as u32, lineno)?;
             records.insert(name, record);
-
-            pos = idx + 1;
         }
 
         Ok(KpDb {
-            append_seq,
-            modified,
-            append_sseq,
             records,
+            deleted,
             data,
             datasz,
             file,
@@ -216,26 +232,91 @@ impl KpDb {
         self.do_flush()
     }
 
-    pub fn do_flush(&mut self) -> io::Result<()> {
+    // Write a new file, then make it active.
+    fn do_rewrite(&mut self) -> io::Result<()> {
+
+        // Open new file as 'file.new'.
+        let path = self.path.clone() + ".new";
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| io::Error::new(e.kind(), format!("kpdb: create {}: {}", path, e)))?;
+        file.try_lock_exclusive()
+            .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+
+        // Write header.
+        let mut file = io::BufWriter::with_capacity(65536, file);
+        write!(file, "$V00.00 00000000 {:08x} 10000000\n", unixtime_now())
+            .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+
+        let mut records = BTreeMap::new();
+        let mut offset = OFF_REC as u32;
+        let mut lineno = 2;
+
+        // Write records.
+        for (group, rec) in &self.records {
+            let r_off = rec.offset as usize;
+            let r_len = rec.len as usize;
+            file.write_all(&self.data[r_off .. r_off + r_len])
+                .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+            file.write_all(&b"\n"[..])
+                .map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+            let nrec = RecordLoc {
+                lineno,
+                offset,
+                len: rec.len,
+            };
+            records.insert(group.to_string(), nrec);
+
+            lineno += 1;
+            offset += rec.len as u32 + 1;
+        }
+
+        // Flush data, then mmap.
+        let file = file.into_inner()
+            .map_err(|e| io::Error::new(e.error().kind(), format!("kpdb: {}: {}", path, e)))?;
+        file.sync_all().map_err(|e| io::Error::new(e.kind(), format!("kpdb: {}: {}", path, e)))?;
+        let data = unsafe { MmapMut::map_mut(&file) }?;
+
+        // Lock the file into memory, so that we never block on pagefaults.
+        match region::lock(data.as_ptr(), data.len()) {
+            Ok(guard) => {
+                // Don't need the guard, unmap will unlock.
+                std::mem::forget(guard);
+            },
+            Err(e) => log::warn!("kpdb: {}: cannot mlock: {}", self.path, e),
+        }
+
+        // Move new file over old file.
+        fs::rename(&path, &self.path)
+            .map_err(|e| io::Error::new(e.kind(), format!("kpdb: rename({} {}): {}", path, self.path, e)))?;
+
+        // Use new data.
+        self.records = records;
+        self.deleted = 0;
+        self.datasz = data.len();
+        self.data = data;
+        self.file = file;
+        self.ndata = Vec::new();
+
+        Ok(())
+    }
+
+    fn do_flush(&mut self) -> io::Result<()> {
         // Will never happen but check anyway.
         if self.datasz + self.ndata.len() > MAX_FILE_SIZE {
             panic!("kpdb: FATAL: {}: grown too big (>{})", self.path, MAX_FILE_SIZE);
         }
 
-        let mut ndata = std::mem::replace(&mut self.ndata, Vec::new());
-        if ndata.len() > 1000 {
-            // This change is more than a few records, so chances are that
-            // there are multiple updates pending for the same record.
-            // Only include lines that start with '+'.
-            let mut d = Vec::new();
-            for line in ndata.split(|&b| b == b'\n') {
-                if line.len() > 0 && line[0] == b'+' {
-                    d.extend_from_slice(line);
-                    d.push(b'\n');
-                }
-            }
-            ndata = d;
+        // If we have collected too many updates / deletions, rewrite.
+        if self.deleted > self.records.len() as u32 / 10 || self.deleted >= 1024 {
+            return self.do_rewrite();
         }
+
+        let ndata = std::mem::replace(&mut self.ndata, Vec::new());
 
         // First append 'ndata' to the database file. If that fails, try to
         // recover and get to a stable state, and return an IO error.
@@ -266,12 +347,8 @@ impl KpDb {
             }
         }
 
-        // Set append_sseq to 10000000, this is not used by us, but if you ever use
-        // this database with diablo again it will make diablo re-sort the db keys.
-        if self.append_sseq < 0x10000000 {
-            self.append_sseq = 0x10000000;
-            self.data[26..34].copy_from_slice("10000000".as_bytes());
-        }
+        self.set(OFF_MOD, unixtime_now());
+        self.set(OFF_SSEQ, 0x10000000);
 
         // Now do a new mmap. Too bad we cannot use mremap, this is expensive.
         // If this fails, we are in an unrecoverable state.
@@ -312,13 +389,13 @@ impl KpDb {
 
     /// Remove a record from the database.
     pub fn remove<'a>(&'a mut self, key: &str) -> io::Result<()> {
-        match self.get_mut(key) {
-            Some(mut r) => {
-                r.line_mut()[0] = b'-';
-                Ok(())
-            },
-            None => Err(io::Error::new(ErrorKind::NotFound, "key not found")),
+        self.deleted += 1;
+        if let Some(mut r) = self.get_mut(key) {
+            r.line_mut()[0] = b'-';
+            return Ok(());
         }
+        self.deleted -= 1;
+        Err(io::Error::new(ErrorKind::NotFound, "key not found"))
     }
 
     /// Insert a new Record in the database.
@@ -362,6 +439,11 @@ impl KpDb {
     pub fn keys<'a>(&'a self) -> impl Iterator<Item = &'a str> {
         self.records.keys().map(|k| k.as_str())
     }
+
+    fn set(&mut self, offset: usize, val: u32) {
+        let d = format!("{:08x}", val);
+        self.data[offset..offset+8].copy_from_slice(d.as_bytes());
+    }
 }
 
 // An RecordLoc is a reference to an Record in the database,
@@ -379,7 +461,7 @@ impl RecordLoc {
     // Parse a line, check its validity, then return an `RecordLoc` for it.
     fn new(line: &[u8], offset: u32, lineno: u32) -> io::Result<(String, RecordLoc)> {
         // Some sanity checks.
-        if line.len() < 18 || line[14] != b':' {
+        if line.len() < 18 || line[0] != b'+' || line[14] != b':' {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 format!("dactive.kp: line {}: damaged", lineno),
@@ -586,6 +668,7 @@ impl<'a> Drop for RecordMut<'a> {
         if let Some(mut hm) = self.modified.take() {
             // invalidate old record.
             self.line_mut()[0] = b'-';
+            self.kpdb.deleted += 1;
 
             // Now remember location in ndata so we can update self.records.
             let start = self.kpdb.ndata.len() + self.kpdb.datasz;
