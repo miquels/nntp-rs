@@ -15,7 +15,6 @@ use crate::util::{Buffer, HashFeed};
 
 use bytes::Buf;
 use futures::future::poll_fn;
-use futures::sink::Sink;
 use memchr::memchr;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -645,9 +644,9 @@ where
         }
     }
 
-    async fn flush(&mut self) -> io::Result<()> {
-        self.reset_wr_timer();
+    pub async fn flush(&mut self) -> io::Result<()> {
         if self.wr_bufs.len() > 0 {
+            self.reset_wr_timer();
             let mut this = Pin::new(self);
             poll_fn(move |cx: &mut Context| this.as_mut().poll_flush(cx)).await?;
         }
@@ -658,9 +657,7 @@ where
     pub async fn write(&mut self, buf: impl Into<Buffer>) -> io::Result<()> {
         let buf = buf.into();
         self.wr_bufs.push(buf);
-        self.flush().await?;
-        let mut this = Pin::new(self);
-        poll_fn(move |cx: &mut Context| this.as_mut().poll_flush(cx)).await
+        self.flush().await
     }
 
     /// Write a buffer that impl's the `Buf` trait.
@@ -679,36 +676,9 @@ where
         }
         false
     }
-}
 
-impl<S> Stream for NntpCodec<S>
-where
-    S: AsyncRead,
-    S: Unpin,
-{
-    type Item = io::Result<NntpInput>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
         let mut this = self.as_mut();
-        this.reset_rd_timer();
-        match this.poll_read(cx) {
-            Poll::Ready(x) => Poll::Ready(Some(x)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<S> Sink<Buffer> for NntpCodec<S>
-where S: AsyncWrite + Unpin
-{
-    type Error = io::Error;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        let mut this = self.as_mut();
-        if this.wr_bufs.len() == 0 {
-            return Poll::Ready(Ok(()));
-        }
-
         let mut bufs = std::mem::replace(&mut this.wr_bufs, Vec::new());
         let res = loop {
             // TODO FIXME: use poll_write_vectored (in tokio 0.3).
@@ -729,7 +699,7 @@ where S: AsyncWrite + Unpin
         res
     }
 
-    fn start_send(mut self: Pin<&mut Self>, item: Buffer) -> Result<(), Self::Error> {
+    pub fn start_send(&mut self, item: Buffer) -> io::Result<()> {
         if item.len() < 256 && self.wr_bufs.len() > 0 {
             // This is a bit of a hack. we want to put consecutive
             // CHECKS in one packet. Maybe better to mark the buffer with
@@ -738,22 +708,30 @@ where S: AsyncWrite + Unpin
             let last = self.wr_bufs.len() - 1;
             let b = &self.wr_bufs[last];
             if b.starts_with(b"CHECK <") && b.len() < 1200 {
-                self.as_mut().wr_bufs[last].extend_from_slice(&item);
+                self.wr_bufs[last].extend_from_slice(&item);
                 return Ok(());
             }
         }
-        self.as_mut().wr_bufs.push(item);
+        self.wr_bufs.push(item);
         Ok(())
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        self.poll_ready(cx)
-    }
+}
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
-        // NOTE: we could call self.socket.shutdown() here, but then
-        // we'd need to store the future it returns as state.
-        self.poll_flush(cx)
+impl<S> Stream for NntpCodec<S>
+where
+    S: AsyncRead,
+    S: Unpin,
+{
+    type Item = io::Result<NntpInput>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let mut this = self.as_mut();
+        this.reset_rd_timer();
+        match this.poll_read(cx) {
+            Poll::Ready(x) => Poll::Ready(Some(x)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

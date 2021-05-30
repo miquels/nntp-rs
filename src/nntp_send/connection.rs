@@ -17,7 +17,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::future::FutureExt;
-use futures::sink::{Sink, SinkExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::sleep;
@@ -653,7 +652,7 @@ impl Connection {
             ConnItem::Check(ref art) => {
                 log::trace!("Connection::transmit_item: CHECK {}", art.msgid);
                 let line = format!("CHECK {}\r\n", art.msgid);
-                Pin::new(&mut self.writer).start_send(line.into())?;
+                self.writer.start_send(line.into())?;
                 Ok(true)
             },
             ConnItem::Takethis(ref mut art) => {
@@ -680,21 +679,21 @@ impl Connection {
                     sp_art.data.push_str("\r\n.\r\n");
                 }
                 let line = format!("TAKETHIS {}\r\n", art.msgid);
-                Pin::new(&mut self.writer).start_send(line.into())?;
+                self.writer.start_send(line.into())?;
                 if self.rewrite {
                     let (head, body) = self.rewrite_headers(sp_art);
                     art.size = head.len() + body.len() - 3;
-                    Pin::new(&mut self.writer).start_send(head)?;
-                    Pin::new(&mut self.writer).start_send(body)?;
+                    self.writer.start_send(head)?;
+                    self.writer.start_send(body)?;
                     Ok(true)
                 } else {
                     art.size = sp_art.data.len() - 3;
-                    Pin::new(&mut self.writer).start_send(sp_art.data)?;
+                    self.writer.start_send(sp_art.data)?;
                     Ok(true)
                 }
             },
             ConnItem::Quit => {
-                Pin::new(&mut self.writer).start_send("QUIT\r\n".into())?;
+                self.writer.start_send("QUIT\r\n".into())?;
                 Ok(true)
             },
         }
