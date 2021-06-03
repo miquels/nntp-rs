@@ -741,6 +741,9 @@ impl DHistoryInner {
 
         // now report.
         log::info!("inspect {:?}: {} entries total", self.path, idx);
+        // the first entry is a NUL entry, so report the offset of the actual first one.
+        let rpos = rpos + DHistEnt::SIZE as u64;
+        log::info!("inspect {:?}: first entry at offset: {} (byte {})", self.path, rpos, rpos+1);
         let mut spools = stats.keys().map(|k| *k).collect::<Vec<_>>();
         spools.sort();
         for k in &spools {
@@ -1014,8 +1017,9 @@ fn read_dhisthead_at(file: &fs::File, pos: u64) -> io::Result<DHistHead> {
 fn read_dhistent<F>(file: &mut F) -> io::Result<Option<DHistEnt>>
 where F: Read {
     // The file might be buffered. In that case, there is no guarantee
-    // that we will read exactly DHistEnt::SIZE bytes in one read. So we
-    // implement the equivalent of read_exact()..
+    // that we will read exactly DHistEnt::SIZE bytes in one read.
+    // We could use read_exact(), but implementing it explicitly gives
+    // slightly better error messages.
     let mut dhe = DHistEnt::zeroed();
     let bytes = dhe.as_mut_bytes();
     let mut done = 0;
