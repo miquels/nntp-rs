@@ -174,7 +174,7 @@ pub struct TestArticleOpts {
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-fn main() -> Result<()> {
+pub fn main() -> Result<()> {
     maybe_do_mlock();
 
     let opts = MainOpts::from_args();
