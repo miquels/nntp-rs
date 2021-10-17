@@ -265,7 +265,8 @@ impl Logger {
     fn new2(mut dest: LogDest, is_log: bool, pkg_name: Option<String>) -> Logger {
         let (tx, rx) = channel::unbounded();
 
-        let tid = thread::spawn(move || {
+        let thread = thread::Builder::new().name("logger".into());
+        let tid = thread.spawn(move || {
             let ticker = channel::tick(Duration::from_millis(1000));
             loop {
                 channel::select! {
@@ -293,7 +294,7 @@ impl Logger {
                     }
                 }
             }
-        });
+        }).unwrap();
 
         Logger {
             tx,

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use parking_lot::Mutex;
-use tokio::runtime::{self, Runtime};
+use tokio::runtime;
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -45,7 +45,19 @@ pub struct Server {
 
 impl Server {
     pub fn start(history: History, spool: Spool, listener_sets: TcpListenerSets) -> io::Result<()> {
-        Runtime::new().unwrap().block_on(async move {
+
+        let config = config::get_config();
+        let name = match config.server.runtime {
+            config::Runtime::Threaded(_) => "nntp-rs-server",
+            config::Runtime::MultiSingle(_) => "nntp-rs-outgoing",
+        };
+        let runtime = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name(name)
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
             // Create pub/sub bus.
             let (bus_sender, bus_recv) = bus::new();
 
@@ -71,7 +83,6 @@ impl Server {
                 conns: Arc::new(Mutex::new(HashMap::new())),
                 outfeed: master_chan,
             };
-            let config = config::get_config();
 
             // Start the nntp sender.
             match config.server.runtime {
@@ -122,7 +133,8 @@ impl Server {
             let bus_recv = bus_recv.clone();
             let core_id = core_ids.pop_front();
 
-            thread::spawn(move || {
+            let thread = thread::Builder::new().name("nntp-rs-incoming".into());
+            thread.spawn(move || {
                 if let Some(id) = core_id {
                     // tie this thread to a specific core.
                     log::debug!(
@@ -136,6 +148,7 @@ impl Server {
                 // tokio runtime for this thread alone.
                 let basic_runtime = runtime::Builder::new_current_thread()
                     .enable_all()
+                    .thread_name("nntp-rs-incoming")
                     .build()
                     .unwrap();
                 log::trace!("runtime::basic_scheduler on {:?}", thread::current().id());
@@ -160,7 +173,7 @@ impl Server {
                         let _ = task.await;
                     }
                 });
-            });
+            }).expect("thread::spawn");
 
             n += 1;
         }
